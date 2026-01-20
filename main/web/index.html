@@ -238,6 +238,7 @@
         <div class="flex items-center justify-between mb-6">
           <h2 class="text-2xl font-bold">BOM & Cost Management</h2>
           <div class="space-x-2">
+            <button onclick="showImportModal()" class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700">📥 Import CSV/XLSX</button>
             <button onclick="showSupplierModal()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">Add Supplier</button>
             <button onclick="showComponentModal()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">Add Component</button>
           </div>
@@ -253,47 +254,70 @@
             <div id="suppliers-list" class="space-y-2 max-h-64 overflow-y-auto">Loading...</div>
           </div>
           <div class="bg-white rounded border p-6">
-            <h3 class="font-semibold mb-4">Components <span class="text-xs text-gray-500 font-normal">(reusable across all products)</span></h3>
+            <div class="flex justify-between items-center mb-4">
+              <h3 class="font-semibold">Components <span class="text-xs text-gray-500 font-normal">(reusable across all products)</span></h3>
+              <select id="component-category-filter" onchange="filterComponents()" class="text-xs border rounded px-2 py-1">
+                <option value="">All Categories</option>
+                <option value="Tools">Tools</option>
+                <option value="Packaging">Packaging</option>
+                <option value="Hardware">Hardware</option>
+                <option value="Accessories">Accessories</option>
+                <option value="Imported">Imported</option>
+                <option value="General">General</option>
+              </select>
+            </div>
+            <input type="text" id="component-search" onkeyup="filterComponents()" placeholder="🔍 Search components..." class="w-full border rounded px-3 py-2 text-sm mb-3">
             <div id="components-list" class="space-y-2 max-h-64 overflow-y-auto">Loading...</div>
+            <div id="components-count" class="text-xs text-gray-500 mt-2"></div>
           </div>
         </div>
         <div class="mt-6 bg-white rounded border p-6">
           <h3 class="font-semibold mb-4">Bill of Materials by SKU</h3>
-          <div class="mb-4">
+          <div class="mb-4 flex gap-4 items-center">
             <select id="bom-sku-select" onchange="loadBOMForSKU()" class="border rounded px-3 py-2 w-64"><option value="">Select a SKU...</option></select>
+            <input type="text" id="bom-sku-search" onkeyup="filterSKUDropdown()" placeholder="🔍 Filter SKUs..." class="border rounded px-3 py-2 text-sm w-48">
           </div>
           <div id="bom-editor" class="hidden">
             <div class="grid grid-cols-3 gap-4 mb-4">
               <div>
-                <h4 class="font-medium mb-2">Components in this BOM</h4>
+                <h4 class="font-medium mb-2">Components in this BOM <span id="bom-component-count" class="text-xs text-gray-500"></span></h4>
                 <div id="bom-components-list" class="space-y-2 max-h-48 overflow-y-auto border rounded p-3"></div>
               </div>
               <div>
-                <h4 class="font-medium mb-2">Add Component to BOM</h4>
+                <h4 class="font-medium mb-2">Add Components to BOM</h4>
                 <div class="border rounded p-3">
-                  <select id="bom-add-component" class="w-full border rounded px-2 py-1 text-sm mb-2"><option value="">Select component...</option></select>
+                  <input type="text" id="bom-component-search" onkeyup="filterBOMComponentDropdown()" placeholder="🔍 Search to add..." class="w-full border rounded px-2 py-1 text-sm mb-2">
+                  <div id="bom-component-suggestions" class="max-h-32 overflow-y-auto mb-2 hidden"></div>
+                  <select id="bom-add-component" class="w-full border rounded px-2 py-1 text-sm mb-2"><option value="">Or select from list...</option></select>
                   <div class="flex gap-2">
                     <input type="number" id="bom-add-qty" placeholder="Qty" value="1" min="1" step="1" class="w-20 border rounded px-2 py-1 text-sm">
-                    <button onclick="addComponentToBOM()" class="flex-1 bg-green-600 text-white px-2 py-1 rounded text-sm hover:bg-green-700">Add</button>
+                    <button onclick="addComponentToBOM()" class="flex-1 bg-green-600 text-white px-2 py-1 rounded text-sm hover:bg-green-700">+ Add</button>
                   </div>
-                  <p class="text-xs text-gray-500 mt-2">Components can be reused across multiple products</p>
+                  <div id="quick-add-buttons" class="mt-3 pt-3 border-t">
+                    <p class="text-xs text-gray-500 mb-2">Quick add recent:</p>
+                    <div id="recent-components" class="flex flex-wrap gap-1"></div>
+                  </div>
                 </div>
               </div>
               <div>
-                <h4 class="font-medium mb-2">Cost Breakdown</h4>
+                <h4 class="font-medium mb-2">Cost Breakdown <span class="text-xs text-green-600" id="cost-live-indicator">(live)</span></h4>
                 <div id="bom-cost-breakdown" class="space-y-2 border rounded p-3"></div>
+                <div id="cost-comparison" class="mt-2 text-xs text-gray-500"></div>
               </div>
             </div>
             <div class="grid grid-cols-4 gap-4">
-              <div><label class="block text-sm mb-1">Labor Cost (£)</label><input type="number" id="bom-labor" step="0.01" class="w-full border rounded px-3 py-2"></div>
-              <div><label class="block text-sm mb-1">Packaging (£)</label><input type="number" id="bom-packaging" step="0.01" class="w-full border rounded px-3 py-2"></div>
-              <div><label class="block text-sm mb-1">Overhead (%)</label><input type="number" id="bom-overhead" step="0.1" class="w-full border rounded px-3 py-2"></div>
-              <div class="flex items-end"><button onclick="saveBOMData()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 w-full">Save BOM</button></div>
+              <div><label class="block text-sm mb-1">Labor Cost (£)</label><input type="number" id="bom-labor" step="0.01" oninput="updateLiveCost()" class="w-full border rounded px-3 py-2"></div>
+              <div><label class="block text-sm mb-1">Packaging (£)</label><input type="number" id="bom-packaging" step="0.01" oninput="updateLiveCost()" class="w-full border rounded px-3 py-2"></div>
+              <div><label class="block text-sm mb-1">Overhead (%)</label><input type="number" id="bom-overhead" step="0.1" oninput="updateLiveCost()" class="w-full border rounded px-3 py-2"></div>
+              <div class="flex items-end"><button onclick="saveBOMData()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 w-full">💾 Save BOM</button></div>
             </div>
           </div>
         </div>
         <div class="mt-6 bg-white rounded border p-6">
-          <h3 class="font-semibold mb-4">Component Usage Across Products</h3>
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="font-semibold">Component Usage Across Products</h3>
+            <input type="text" id="usage-search" onkeyup="filterUsageList()" placeholder="🔍 Search..." class="border rounded px-3 py-2 text-sm w-48">
+          </div>
           <div id="component-usage-list" class="grid grid-cols-2 gap-4 max-h-64 overflow-y-auto">Loading...</div>
         </div>
       </div>
@@ -684,13 +708,14 @@ function renderListings() {
     const score = item.score ?? '-';
     const sc = score >= 80 ? 'bg-green-100 text-green-800' : score >= 60 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800';
     const k = keepaData[item.asin] || {};
-    const bb = k.buyBoxPrice ? '£' + k.buyBoxPrice.toFixed(2) : '-';
-    const diff = k.buyBoxPrice && item.price ? item.price - k.buyBoxPrice : null;
+    const bb = k.buyBoxPrice ? '£' + parseFloat(k.buyBoxPrice).toFixed(2) : '-';
+    const itemPrice = parseFloat(item.price) || 0;
+    const diff = k.buyBoxPrice && itemPrice ? itemPrice - parseFloat(k.buyBoxPrice) : null;
     const pc = diff === null ? '' : diff > 0.01 ? 'text-red-600 font-medium' : diff < -0.01 ? 'text-green-600 font-medium' : 'text-blue-600 font-medium';
     html += '<tr class="border-t hover:bg-gray-50 cursor-pointer" onclick="showDetail(\'' + item.sku.replace(/'/g, "\\'") + '\')">';
     html += '<td class="p-3"><span class="px-2 py-1 rounded text-xs font-medium ' + sc + '">' + score + '</span></td>';
     html += '<td class="p-3 max-w-xs truncate">' + (item.title || '').substring(0, 50) + '</td>';
-    html += '<td class="p-3 text-right ' + pc + '">£' + (item.price || 0).toFixed(2) + '</td>';
+    html += '<td class="p-3 text-right ' + pc + '">£' + itemPrice.toFixed(2) + '</td>';
     html += '<td class="p-3 text-right">' + bb + '</td>';
     html += '<td class="p-3 text-right text-gray-500">' + (k.salesRank ? k.salesRank.toLocaleString() : '-') + '</td>';
     html += '<td class="p-3 text-right text-gray-500">' + (k.competitorCount ?? '-') + '</td></tr>';
@@ -719,13 +744,13 @@ function renderPricing() {
   profitData.forEach(item => {
     const profitClass = item.profit > 0 ? 'text-green-600' : item.profit < 0 ? 'text-red-600' : 'text-gray-500';
     const marginClass = item.margin >= 20 ? 'text-green-600' : item.margin >= 10 ? 'text-yellow-600' : item.margin > 0 ? 'text-orange-600' : 'text-red-600';
-    const costDisplay = item.hasCost ? '£' + item.cost.toFixed(2) : '<span class="text-gray-400">Not set</span>';
+    const costDisplay = item.hasCost ? '£' + parseFloat(item.cost).toFixed(2) : '<span class="text-gray-400">Not set</span>';
     html += '<tr class="border-t hover:bg-gray-50">';
     html += '<td class="p-3 max-w-xs truncate">' + (item.title || '').substring(0, 40) + '</td>';
-    html += '<td class="p-3 text-right">£' + (item.price || 0).toFixed(2) + '</td>';
+    html += '<td class="p-3 text-right">£' + (parseFloat(item.price) || 0).toFixed(2) + '</td>';
     html += '<td class="p-3 text-right">' + costDisplay + '</td>';
-    html += '<td class="p-3 text-right text-gray-500">£' + item.fees.toFixed(2) + '</td>';
-    html += '<td class="p-3 text-right font-medium ' + profitClass + '">£' + item.profit.toFixed(2) + '</td>';
+    html += '<td class="p-3 text-right text-gray-500">£' + (parseFloat(item.fees) || 0).toFixed(2) + '</td>';
+    html += '<td class="p-3 text-right font-medium ' + profitClass + '">£' + (parseFloat(item.profit) || 0).toFixed(2) + '</td>';
     html += '<td class="p-3 text-right font-medium ' + marginClass + '">' + item.margin + '%</td>';
     html += '<td class="p-3 text-center"><button onclick="editCost(\'' + item.sku.replace(/'/g, "\\'") + '\')" class="text-blue-600 hover:underline text-xs">Edit Cost</button></td></tr>';
   });
@@ -748,9 +773,9 @@ async function editCost(sku) {
     html += '<h2 class="text-xl font-bold mb-2">' + (profit.title || '').substring(0, 60) + '</h2>';
     html += '<p class="text-sm text-gray-500 mb-4">SKU: ' + profit.sku + '</p>';
     html += '<div class="grid grid-cols-3 gap-4 mb-6">';
-    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Selling Price</p><p class="font-medium">£' + profit.sellingPrice.toFixed(2) + '</p></div>';
-    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Buy Box</p><p class="font-medium">£' + (profit.buyBoxPrice || 0).toFixed(2) + '</p></div>';
-    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Amazon Fees</p><p class="font-medium">£' + profit.fees.total.toFixed(2) + '</p></div>';
+    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Selling Price</p><p class="font-medium">£' + (parseFloat(profit.sellingPrice) || 0).toFixed(2) + '</p></div>';
+    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Buy Box</p><p class="font-medium">£' + (parseFloat(profit.buyBoxPrice) || 0).toFixed(2) + '</p></div>';
+    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Amazon Fees</p><p class="font-medium">£' + (parseFloat(profit.fees?.total) || 0).toFixed(2) + '</p></div>';
     html += '</div></div>';
     html += '<div class="bg-white rounded border p-6 mb-6"><h3 class="font-semibold mb-4">Enter Your Costs</h3>';
     html += '<div class="grid grid-cols-2 gap-4">';
@@ -763,11 +788,11 @@ async function editCost(sku) {
     html += '<span id="cost-save-msg" class="ml-3 text-sm"></span></div>';
     html += '<div class="bg-white rounded border p-6"><h3 class="font-semibold mb-4">Profit Calculation</h3>';
     html += '<div class="grid grid-cols-2 gap-4">';
-    html += '<div class="p-4 bg-green-50 rounded border border-green-200"><p class="text-sm text-green-700">Gross Profit</p><p class="text-2xl font-bold text-green-700">£' + profit.profit.gross.toFixed(2) + '</p></div>';
+    html += '<div class="p-4 bg-green-50 rounded border border-green-200"><p class="text-sm text-green-700">Gross Profit</p><p class="text-2xl font-bold text-green-700">£' + (parseFloat(profit.profit?.gross) || 0).toFixed(2) + '</p></div>';
     html += '<div class="p-4 bg-blue-50 rounded border border-blue-200"><p class="text-sm text-blue-700">Margin</p><p class="text-2xl font-bold text-blue-700">' + profit.profit.margin + '%</p></div>';
     html += '</div>';
     if (profit.atBuyBox) {
-      html += '<p class="mt-4 text-sm text-gray-500">At Buy Box price (£' + profit.buyBoxPrice.toFixed(2) + '): £' + profit.atBuyBox.gross.toFixed(2) + ' profit (' + profit.atBuyBox.margin + '% margin)</p>';
+      html += '<p class="mt-4 text-sm text-gray-500">At Buy Box price (£' + (parseFloat(profit.buyBoxPrice) || 0).toFixed(2) + '): £' + (parseFloat(profit.atBuyBox?.gross) || 0).toFixed(2) + ' profit (' + (profit.atBuyBox?.margin || 0) + '% margin)</p>';
     }
     html += '</div></div>';
     container.innerHTML = html;
@@ -807,8 +832,8 @@ async function showDetail(sku) {
       html += '<div class="text-center"><div class="w-20 h-20 rounded-full ' + scc + ' flex items-center justify-center"><span class="text-2xl font-bold text-white">' + score.totalScore + '</span></div><p class="text-sm text-gray-500 mt-1">Score</p></div>';
     }
     html += '</div><div class="grid grid-cols-5 gap-4">';
-    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Your Price</p><p class="font-medium">£' + (listing.price || 0).toFixed(2) + '</p></div>';
-    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Buy Box</p><p class="font-medium">' + (k.buyBoxPrice ? '£' + k.buyBoxPrice.toFixed(2) : '-') + '</p></div>';
+    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Your Price</p><p class="font-medium">£' + (parseFloat(listing.price) || 0).toFixed(2) + '</p></div>';
+    html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Buy Box</p><p class="font-medium">' + (k.buyBoxPrice ? '£' + parseFloat(k.buyBoxPrice).toFixed(2) : '-') + '</p></div>';
     html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">BSR</p><p class="font-medium">' + (k.salesRank ? '#' + k.salesRank.toLocaleString() : '-') + '</p></div>';
     html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Rating</p><p class="font-medium">' + (k.rating ? k.rating + '/5' : '-') + '</p></div>';
     html += '<div class="p-3 bg-gray-50 rounded"><p class="text-xs text-gray-500">Competitors</p><p class="font-medium">' + (k.competitorCount ?? '-') + '</p></div>';
@@ -845,7 +870,7 @@ async function showDetail(sku) {
       if (score.components?.competitive?.dataAvailable && score.components?.competitive?.analysis) {
         const ca = score.components.competitive.analysis;
         html += '<div class="bg-blue-50 border border-blue-200 rounded p-4 mb-6"><h4 class="font-semibold text-blue-800 mb-2">📊 Competitive Analysis</h4><div class="grid grid-cols-5 gap-4 text-sm">';
-        html += '<div><p class="text-gray-500">Buy Box</p><p class="font-medium">' + (ca.buyBoxPrice ? '£' + ca.buyBoxPrice.toFixed(2) : '-') + '</p></div>';
+        html += '<div><p class="text-gray-500">Buy Box</p><p class="font-medium">' + (ca.buyBoxPrice ? '£' + (parseFloat(ca.buyBoxPrice) || 0).toFixed(2) : '-') + '</p></div>';
         html += '<div><p class="text-gray-500">BSR</p><p class="font-medium">' + (ca.bsr ? '#' + ca.bsr.toLocaleString() : '-') + '</p></div>';
         html += '<div><p class="text-gray-500">Sellers</p><p class="font-medium">' + (ca.offerCount || '-') + '</p></div>';
         html += '<div><p class="text-gray-500">Rating</p><p class="font-medium">' + (ca.rating ? ca.rating + '/5' : '-') + '</p></div>';
@@ -890,5 +915,49 @@ async function saveSettings() {
 }
 loadDashboard();
 </script>
+
+<!-- BOM Import Modal -->
+<div id="import-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+  <div class="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+    <div class="flex justify-between items-center mb-4">
+      <h3 class="text-lg font-semibold">Import Components via CSV/XLSX</h3>
+      <button onclick="hideImportModal()" class="text-gray-500 hover:text-gray-700">&times;</button>
+    </div>
+
+    <div class="mb-4 p-4 bg-blue-50 border border-blue-200 rounded">
+      <p class="text-sm text-blue-800 mb-2"><strong>Required columns:</strong></p>
+      <p class="text-xs text-blue-700">SKU, Component, Qty, Cost, Supplier</p>
+      <p class="text-xs text-gray-600 mt-2">• SKU = Your product SKU to attach the component to</p>
+      <p class="text-xs text-gray-600">• Component = Component name (e.g. "M8 Bolt")</p>
+      <p class="text-xs text-gray-600">• Qty = Quantity needed per unit</p>
+      <p class="text-xs text-gray-600">• Cost = Unit cost in £ (e.g. 0.15)</p>
+      <p class="text-xs text-gray-600">• Supplier = Supplier name</p>
+    </div>
+
+    <div class="mb-4">
+      <button onclick="downloadImportTemplate()" class="text-blue-600 hover:text-blue-800 text-sm underline">📥 Download CSV Template</button>
+    </div>
+
+    <div class="mb-4">
+      <label class="block text-sm font-medium mb-2">Select CSV or XLSX File</label>
+      <input type="file" id="import-file" accept=".csv,.xlsx,.xls" class="w-full border rounded px-3 py-2 text-sm">
+    </div>
+
+    <div id="import-preview" class="hidden mb-4">
+      <h4 class="font-medium mb-2">Preview (first 5 rows)</h4>
+      <div id="import-preview-table" class="overflow-x-auto"></div>
+    </div>
+
+    <div id="import-results" class="hidden mb-4 p-4 rounded">
+    </div>
+
+    <div class="flex justify-end gap-3">
+      <button onclick="hideImportModal()" class="px-4 py-2 border rounded hover:bg-gray-50">Cancel</button>
+      <button onclick="previewImport()" id="btn-preview-import" class="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700">Preview</button>
+      <button onclick="executeImport()" id="btn-execute-import" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 hidden">Import</button>
+    </div>
+  </div>
+</div>
+
 <script src="/extra.js"></script></body>
 </html>

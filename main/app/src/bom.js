@@ -204,13 +204,17 @@ export function saveBOM(sku, bomData) {
   const data = JSON.parse(readFileSync(BOM_FILE, 'utf8'));
   const bom = data.bom || {};
 
+  // Get existing BOM to preserve components if not provided
+  const existingBom = bom[sku] || { components: [] };
+
   bom[sku] = {
     sku,
-    components: bomData.components || [], // Array of { componentId, quantity }
+    // Preserve existing components if not explicitly provided
+    components: bomData.components !== undefined ? bomData.components : existingBom.components,
     laborCost: parseFloat(bomData.laborCost) || 0,
     packagingCost: parseFloat(bomData.packagingCost) || 0,
     overheadPercent: parseFloat(bomData.overheadPercent) || 0,
-    notes: bomData.notes || '',
+    notes: bomData.notes !== undefined ? bomData.notes : (existingBom.notes || ''),
     updatedAt: new Date().toISOString()
   };
 
@@ -359,6 +363,71 @@ export function compareSupplierPrices(componentId) {
   };
 }
 
+// ============ BULK IMPORT ============
+
+export function importBOMData(rows) {
+  initDataFiles();
+
+  let suppliersCreated = 0;
+  let componentsCreated = 0;
+  let bomEntriesCreated = 0;
+
+  // Track existing suppliers/components by name for deduplication
+  const suppliersByName = {};
+  getSuppliers().forEach(s => { suppliersByName[s.name.toLowerCase()] = s; });
+
+  const componentsByName = {};
+  getComponents().forEach(c => { componentsByName[c.name.toLowerCase()] = c; });
+
+  // Group rows by SKU
+  const rowsBySku = {};
+  for (const row of rows) {
+    if (!row.sku || !row.component) continue;
+    if (!rowsBySku[row.sku]) rowsBySku[row.sku] = [];
+    rowsBySku[row.sku].push(row);
+  }
+
+  // Process each row
+  for (const row of rows) {
+    if (!row.sku || !row.component) continue;
+
+    // 1. Create or find supplier
+    let supplier = suppliersByName[row.supplier?.toLowerCase()];
+    if (!supplier && row.supplier) {
+      supplier = createSupplier({
+        name: row.supplier,
+        currency: 'GBP'
+      });
+      suppliersByName[supplier.name.toLowerCase()] = supplier;
+      suppliersCreated++;
+    }
+
+    // 2. Create or find component
+    let component = componentsByName[row.component.toLowerCase()];
+    if (!component) {
+      component = createComponent({
+        name: row.component,
+        unitCost: row.cost || 0,
+        supplierId: supplier?.id || null,
+        category: 'Imported'
+      });
+      componentsByName[component.name.toLowerCase()] = component;
+      componentsCreated++;
+    }
+
+    // 3. Add to BOM for this SKU
+    addComponentToBOM(row.sku, component.id, row.qty || 1);
+    bomEntriesCreated++;
+  }
+
+  return {
+    suppliersCreated,
+    componentsCreated,
+    bomEntriesCreated,
+    skusProcessed: Object.keys(rowsBySku).length
+  };
+}
+
 export default {
   getSuppliers,
   getSupplier,
@@ -378,5 +447,6 @@ export default {
   calculateLandedCost,
   calculateMargin,
   getBulkCostAnalysis,
-  compareSupplierPrices
+  compareSupplierPrices,
+  importBOMData
 };

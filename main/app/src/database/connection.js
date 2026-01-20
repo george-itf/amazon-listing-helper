@@ -132,4 +132,7 @@ export async function close() {
   console.log('📦 Database pool closed');
 }
 
-export default { query, getClient, transaction, testConnection, close };
+// Alias for backwards compatibility
+export const closePool = close;
+
+export default { query, getClient, transaction, testConnection, close, closePool };

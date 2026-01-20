@@ -17,7 +17,7 @@ import { generateRecommendations, getBulkRecommendations } from './ai-recommenda
 import { getTasks, getTasksByStage, createTask, updateTask, moveTask, deleteTask, getTaskStats, generateTasksFromScores, TASK_TYPES } from './tasks.js';
 import { getTemplates, getTemplate, createTemplateFromListing, deleteTemplate, applyTemplate } from './templates.js';
 import { getPendingChanges, getAllChanges, queuePriceChange, queueListingUpdate, cancelChange, submitPriceChanges, checkFeedStatus } from './amazon-push.js';
-import { getSuppliers, getSupplier, createSupplier, updateSupplier, deleteSupplier, getComponents, getComponent, createComponent, updateComponent, deleteComponent, getBOM, getAllBOMs, saveBOM, addComponentToBOM, removeComponentFromBOM, calculateLandedCost, calculateMargin, getBulkCostAnalysis, compareSupplierPrices } from './bom.js';
+import { getSuppliers, getSupplier, createSupplier, updateSupplier, deleteSupplier, getComponents, getComponent, createComponent, updateComponent, deleteComponent, getBOM, getAllBOMs, saveBOM, addComponentToBOM, removeComponentFromBOM, calculateLandedCost, calculateMargin, getBulkCostAnalysis, compareSupplierPrices, importBOMData } from './bom.js';
 import { recordMetrics, getMetrics, getMetricsSummary, recordScore, getScoreHistory as getMetricsScoreHistory, getScoreTrend, recordChange, getChanges as getAttributionChanges, analyzeChangeImpact, detectCannibalization, getPortfolioMetrics } from './metrics.js';
 import { analyzeOpportunities, getQuickWins, getOpportunitySummary, findBundleOpportunities, getSeasonalOpportunities } from './opportunities.js';
 import { recordSales, getSalesHistory, forecastDemand, getRestockRecommendation, bulkForecast, detectSeasonality, saveForecast, getStoredForecast } from './forecasting.js';
@@ -27,6 +27,8 @@ import { REPORT_TEMPLATES, generateReport, getReportHistory, getScheduledReports
 import { generateFromASIN, generateFromComponents, compareASINs, saveGeneratedListing, getSavedListings, deleteSavedListing, CATEGORY_KEYWORDS } from './listing-generator.js';
 import { MODULE_TYPES, APLUS_TEMPLATES, generateAPlusContent, saveAPlusContent, getAPlusContent, getAllAPlusContent, deleteAPlusContent, updateAPlusStatus, generateHTMLPreview } from './aplus-content.js';
 import { trackCompetitor, untrackCompetitor, getTrackedCompetitors, getAllTrackedCompetitors, recordCompetitorPrice, getCompetitorPriceHistory, analyzePriceTrends, calculateBuyBoxWinRate, getBulkBuyBoxAnalysis, analyzeMarketGaps, getCompetitorPositionSummary, generateCompetitiveReport } from './competitor-intelligence.js';
+import * as OrderRepository from './repositories/order.repository.js';
+import { syncOrders, getSyncStatus } from './orders-sync.js';
 
 const fastify = Fastify({ logger: true });
 await fastify.register(cors, { origin: true });
@@ -181,7 +183,7 @@ fastify.get('/api/v1/dashboard', async () => {
     const scoreStats = await ScoreRepository.getStatistics();
     const scoreDistribution = await ScoreRepository.getDistribution();
 
-    const active = statusCounts.find(s => s.status === 'active')?.count || 0;
+    const active = statusCounts.active || 0;
     const inactive = listings.length - active;
 
     // Map distribution buckets
@@ -420,8 +422,6 @@ fastify.post('/api/v1/sync', async () => {
     return { success: false, error: e.message };
   }
 });
-
-fastify.listen({ port: 4000, host: '0.0.0.0' });
 
 // Keepa Integration (PostgreSQL)
 fastify.get('/api/v1/keepa/:asin', async (req) => {
@@ -1486,6 +1486,21 @@ fastify.get('/api/v1/components/:id/compare', async (request) => {
   const comparison = compareSupplierPrices(request.params.id);
   if (!comparison) return { success: false, error: 'Component not found' };
   return { success: true, data: comparison };
+});
+
+// Bulk import BOM data from CSV/XLSX
+fastify.post('/api/v1/bom/import', async (request) => {
+  try {
+    const { rows } = request.body;
+    if (!rows || !Array.isArray(rows) || rows.length === 0) {
+      return { success: false, error: 'No valid rows provided' };
+    }
+    const result = importBOMData(rows);
+    return { success: true, data: result };
+  } catch (error) {
+    console.error('BOM import error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 console.log("BOM & Cost Management loaded");
@@ -2615,3 +2630,152 @@ fastify.get('/api/v1/competitive/:sku', async (request, reply) => {
 });
 
 console.log("Competitor Intelligence Dashboard loaded");
+
+// ============================================
+// ORDERS & SALES API
+// ============================================
+
+// Get orders with filters
+fastify.get('/api/v1/orders', async (request) => {
+  try {
+    const filters = {
+      status: request.query.status,
+      startDate: request.query.startDate,
+      endDate: request.query.endDate,
+      sku: request.query.sku,
+      limit: parseInt(request.query.limit) || 50,
+      offset: parseInt(request.query.offset) || 0
+    };
+    const orders = await OrderRepository.getOrders(filters);
+    return { success: true, data: orders };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get order counts by status
+fastify.get('/api/v1/orders/counts', async () => {
+  try {
+    const counts = await OrderRepository.getOrderCounts();
+    return { success: true, data: counts };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get sales summary
+fastify.get('/api/v1/sales/summary', async (request) => {
+  try {
+    const days = parseInt(request.query.days) || 30;
+    const endDate = new Date();
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const summary = await OrderRepository.getSalesSummary(startDate, endDate);
+    return { success: true, data: summary };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get daily sales for charts
+fastify.get('/api/v1/sales/daily', async (request) => {
+  try {
+    const days = parseInt(request.query.days) || 30;
+    const dailySales = await OrderRepository.getDailySales(days);
+    return { success: true, data: dailySales };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get top selling SKUs
+fastify.get('/api/v1/sales/top-skus', async (request) => {
+  try {
+    const days = parseInt(request.query.days) || 30;
+    const limit = parseInt(request.query.limit) || 10;
+    const topSkus = await OrderRepository.getTopSkus(days, limit);
+    return { success: true, data: topSkus };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get sales history for a specific SKU
+fastify.get('/api/v1/sales/sku/:sku', async (request) => {
+  try {
+    const days = parseInt(request.query.days) || 30;
+    const history = await OrderRepository.getSkuSalesHistory(request.params.sku, days);
+    return { success: true, data: history };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Trigger order sync from SP-API
+fastify.post('/api/v1/orders/sync', async (request) => {
+  try {
+    const options = {
+      fullSync: request.body?.fullSync || false,
+      orderStatuses: request.body?.orderStatuses
+    };
+    const result = await syncOrders(options);
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get sync status
+fastify.get('/api/v1/orders/sync/status', async () => {
+  try {
+    const status = await getSyncStatus();
+    return { success: true, data: status };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Combined sales dashboard data
+fastify.get('/api/v1/sales/dashboard', async (request) => {
+  try {
+    const days = parseInt(request.query.days) || 30;
+    const [summary, dailySales, topSkus, orderCounts, syncStatus] = await Promise.all([
+      OrderRepository.getSalesSummary(
+        new Date(Date.now() - days * 24 * 60 * 60 * 1000),
+        new Date()
+      ),
+      OrderRepository.getDailySales(days),
+      OrderRepository.getTopSkus(days, 10),
+      OrderRepository.getOrderCounts(),
+      getSyncStatus()
+    ]);
+
+    return {
+      success: true,
+      data: {
+        summary,
+        dailySales,
+        topSkus,
+        orderCounts,
+        syncStatus
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+console.log("Orders & Sales API loaded");
+
+// ============================================
+// START SERVER (must be at the end after all routes are registered)
+// ============================================
+const start = async () => {
+  try {
+    await fastify.listen({ port: 4000, host: '0.0.0.0' });
+    console.log('Server running on http://0.0.0.0:4000');
+  } catch (err) {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  }
+};
+start();

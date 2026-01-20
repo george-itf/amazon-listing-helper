@@ -168,13 +168,16 @@ export async function remove(asin) {
  * @returns {Promise<Array>} Stale records
  */
 export async function getStale(hoursOld = 24) {
+  // Validate input to prevent SQL injection
+  const safeHours = Math.max(1, Math.min(720, parseInt(hoursOld) || 24));
+
   const sql = `
     SELECT * FROM keepa_data
-    WHERE "lastSyncedAt" < NOW() - INTERVAL '${hoursOld} hours'
+    WHERE "lastSyncedAt" < NOW() - INTERVAL '1 hour' * $1
     ORDER BY "lastSyncedAt" ASC
   `;
 
-  const result = await query(sql);
+  const result = await query(sql, [safeHours]);
   return result.rows;
 }
 
@@ -185,14 +188,18 @@ export async function getStale(hoursOld = 24) {
  * @returns {Promise<Array<string>>} Array of ASINs
  */
 export async function getAsinsToSync(limit = 50, hoursOld = 24) {
+  // Validate inputs to prevent SQL injection
+  const safeLimit = Math.max(1, Math.min(500, parseInt(limit) || 50));
+  const safeHours = Math.max(1, Math.min(720, parseInt(hoursOld) || 24));
+
   const sql = `
     SELECT asin FROM keepa_data
-    WHERE "lastSyncedAt" < NOW() - INTERVAL '${hoursOld} hours'
+    WHERE "lastSyncedAt" < NOW() - INTERVAL '1 hour' * $1
     ORDER BY "lastSyncedAt" ASC
-    LIMIT $1
+    LIMIT $2
   `;
 
-  const result = await query(sql, [limit]);
+  const result = await query(sql, [safeHours, safeLimit]);
   return result.rows.map(row => row.asin);
 }
 

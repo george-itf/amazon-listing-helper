@@ -289,6 +289,57 @@ export async function getCountByStatus() {
 }
 
 /**
+ * Get status counts (alias for getCountByStatus)
+ * @returns {Promise<Object>} Count by status
+ */
+export async function getStatusCounts() {
+  return getCountByStatus();
+}
+
+/**
+ * Upsert a listing (insert or update)
+ * @param {Object} data - Listing data
+ * @returns {Promise<Object>} Upserted listing
+ */
+export async function upsert(data) {
+  const sql = `
+    INSERT INTO listings (
+      sku, asin, title, description, "bulletPoints", price, quantity,
+      status, category, "fulfillmentChannel", "currentScore", "createdAt", "updatedAt"
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+    ON CONFLICT (sku) DO UPDATE SET
+      asin = COALESCE(EXCLUDED.asin, listings.asin),
+      title = COALESCE(EXCLUDED.title, listings.title),
+      description = COALESCE(EXCLUDED.description, listings.description),
+      "bulletPoints" = COALESCE(EXCLUDED."bulletPoints", listings."bulletPoints"),
+      price = COALESCE(EXCLUDED.price, listings.price),
+      quantity = COALESCE(EXCLUDED.quantity, listings.quantity),
+      status = COALESCE(EXCLUDED.status, listings.status),
+      category = COALESCE(EXCLUDED.category, listings.category),
+      "fulfillmentChannel" = COALESCE(EXCLUDED."fulfillmentChannel", listings."fulfillmentChannel"),
+      "currentScore" = COALESCE(EXCLUDED."currentScore", listings."currentScore"),
+      "updatedAt" = NOW()
+    RETURNING *
+  `;
+
+  const result = await query(sql, [
+    data.sku,
+    data.asin || null,
+    data.title || null,
+    data.description || null,
+    JSON.stringify(data.bulletPoints || data.bullet_points || []),
+    data.price || 0,
+    data.quantity || 0,
+    data.status || 'active',
+    data.category || null,
+    data.fulfillmentChannel || data.fulfillment_channel || 'FBM',
+    data.currentScore || data.current_score || null,
+  ]);
+
+  return result.rows[0];
+}
+
+/**
  * Get listings with low scores
  * @param {number} threshold - Score threshold
  * @returns {Promise<Array>} Listings below threshold
@@ -313,7 +364,9 @@ export default {
   getByAsin,
   create,
   update,
+  upsert,
   remove,
   getCountByStatus,
+  getStatusCounts,
   getLowScoreListings,
 };

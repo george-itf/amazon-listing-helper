@@ -1,39 +1,84 @@
+// ============================================
+// GLOBAL UTILITY FUNCTIONS
+// ============================================
+
+// Escape HTML to prevent XSS attacks - MUST be defined at top level
+function escapeHtml(text) {
+  if (text === null || text === undefined) return '';
+  const str = String(text);
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// Safe number formatting with fallback
+function safeToFixed(value, decimals = 2) {
+  const num = parseFloat(value);
+  if (isNaN(num)) return '0.00';
+  return num.toFixed(decimals);
+}
+
+// Safe property access helper
+function safeGet(obj, path, defaultValue = null) {
+  try {
+    const result = path.split('.').reduce((o, k) => (o || {})[k], obj);
+    return result !== undefined ? result : defaultValue;
+  } catch (e) {
+    return defaultValue;
+  }
+}
+
+// ============================================
+// PAGE FUNCTIONS
+// ============================================
+
 async function calcShipping() {
   const r = document.getElementById("ship-result");
-  const w=document.getElementById("ship-weight").value;
-  const l=document.getElementById("ship-length").value;
-  const wd=document.getElementById("ship-width").value;
-  const h=document.getElementById("ship-height").value;
+  if (!r) return;
+  const w=document.getElementById("ship-weight")?.value || 0;
+  const l=document.getElementById("ship-length")?.value || 0;
+  const wd=document.getElementById("ship-width")?.value || 0;
+  const h=document.getElementById("ship-height")?.value || 0;
   try {
     const res = await fetch("/api/v1/shipping/rates?weight="+w+"&length="+l+"&width="+wd+"&height="+h);
     const d = await res.json();
-    let out = "<div class='p-4 bg-gray-50 rounded'><b>"+d.data.parcelType+"</b><br>";
-    if(d.data.options) d.data.options.forEach(function(o){out+="<div>"+o.service+": <b>£"+o.price.toFixed(2)+"</b> ("+o.deliveryDays+" days)</div>";});
-    if(d.data.error) out="<p class='text-red-600'>"+d.data.error+"</p>";
+    const data = d?.data || d || {};
+    let out = "<div class='p-4 bg-gray-50 rounded'><b>"+(data.parcelType || 'Unknown')+"</b><br>";
+    if(data.options) data.options.forEach(function(o){out+="<div>"+escapeHtml(o.service)+": <b>£"+safeToFixed(o.price)+"</b> ("+o.deliveryDays+" days)</div>";});
+    if(data.error) out="<p class='text-red-600'>"+escapeHtml(data.error)+"</p>";
     out+="</div>";
     r.innerHTML=out;
-  } catch(e) { r.innerHTML="<p class='text-red-500'>"+e.message+"</p>"; }
+  } catch(e) { r.innerHTML="<p class='text-red-500'>"+escapeHtml(e.message)+"</p>"; }
 }
 
 async function loadOptimize() {
   const c = document.getElementById("optimize-container");
+  if (!c) return;
   c.innerHTML="<p class='p-4'>Loading...</p>";
   try {
     const res = await fetch("/api/v1/optimize");
     const d = await res.json();
-    document.getElementById("opt-high").textContent=d.data.summary.high;
-    document.getElementById("opt-medium").textContent=d.data.summary.medium;
-    document.getElementById("opt-low").textContent=d.data.summary.low;
-    if(!d.data.opportunities.length) { c.innerHTML="<p class='p-4 text-green-600'>All optimized!</p>"; return; }
+    const data = d?.data || d || {};
+    const summary = data.summary || {};
+    const opportunities = data.opportunities || [];
+
+    const optHigh = document.getElementById("opt-high");
+    const optMedium = document.getElementById("opt-medium");
+    const optLow = document.getElementById("opt-low");
+    if (optHigh) optHigh.textContent = summary.high || 0;
+    if (optMedium) optMedium.textContent = summary.medium || 0;
+    if (optLow) optLow.textContent = summary.low || 0;
+
+    if(!opportunities.length) { c.innerHTML="<p class='p-4 text-green-600'>All optimized!</p>"; return; }
     let h="<table class='w-full text-sm'><thead class='bg-gray-50'><tr><th class='p-3 text-left'>Priority</th><th class='p-3 text-left'>Product</th><th class='p-3 text-right'>Price</th><th class='p-3 text-right'>Buy Box</th><th class='p-3 text-right'>Profit</th><th class='p-3'>Issue</th><th class='p-3'></th></tr></thead><tbody>";
-    d.data.opportunities.forEach(function(i){
+    opportunities.forEach(function(i){
       var sc=i.severity==="high"?"bg-red-100 text-red-800":i.severity==="medium"?"bg-yellow-100 text-yellow-800":"bg-blue-100 text-blue-800";
-      var escSku = i.sku.replace(/'/g, "\\'");
-      h+="<tr class='border-t'><td class='p-3'><span class='px-2 py-1 rounded text-xs "+sc+"'>"+i.severity+"</span></td><td class='p-3 max-w-xs truncate'>"+i.title+"</td><td class='p-3 text-right'>£"+i.currentPrice.toFixed(2)+"</td><td class='p-3 text-right'>"+(i.buyBoxPrice>0?"£"+i.buyBoxPrice.toFixed(2):"-")+"</td><td class='p-3 text-right "+(i.profit>0?"text-green-600":"text-red-600")+"'>£"+i.profit.toFixed(2)+"</td><td class='p-3 text-xs text-gray-500'>"+i.message+"</td><td class='p-3'><button onclick=\"showOptDetail('"+escSku+"')\" class='text-blue-600 text-xs'>View</button></td></tr>";
+      var escSku = (i.sku || '').replace(/'/g, "\\'");
+      h+="<tr class='border-t'><td class='p-3'><span class='px-2 py-1 rounded text-xs "+sc+"'>"+escapeHtml(i.severity)+"</span></td><td class='p-3 max-w-xs truncate'>"+escapeHtml(i.title)+"</td><td class='p-3 text-right'>£"+safeToFixed(i.currentPrice)+"</td><td class='p-3 text-right'>"+(i.buyBoxPrice>0?"£"+safeToFixed(i.buyBoxPrice):"-")+"</td><td class='p-3 text-right "+(i.profit>0?"text-green-600":"text-red-600")+"'>£"+safeToFixed(i.profit)+"</td><td class='p-3 text-xs text-gray-500'>"+escapeHtml(i.message)+"</td><td class='p-3'><button onclick=\"showOptDetail('"+escSku+"')\" class='text-blue-600 text-xs'>View</button></td></tr>";
     });
     h+="</tbody></table>";
     c.innerHTML=h;
-  } catch(e) { c.innerHTML="<p class='p-4 text-red-500'>"+e.message+"</p>"; }
+  } catch(e) { c.innerHTML="<p class='p-4 text-red-500'>"+escapeHtml(e.message)+"</p>"; }
 }
 
 async function showOptDetail(sku) {
@@ -45,50 +90,62 @@ async function showOptDetail(sku) {
     const res = await fetch("/api/v1/optimize/"+encodeURIComponent(sku));
     const d = await res.json();
     let h="<div class='bg-white rounded border p-6 mb-4'><h2 class='text-xl font-bold mb-2'>"+d.data.title.substring(0,60)+"</h2><p class='text-sm text-gray-500 mb-4'>SKU: "+d.data.sku+"</p>";
-    h+="<div class='grid grid-cols-4 gap-4'><div class='p-3 bg-gray-50 rounded'><p class='text-xs'>Price</p><p class='font-bold'>£"+d.data.current.price.toFixed(2)+"</p></div>";
-    h+="<div class='p-3 bg-gray-50 rounded'><p class='text-xs'>Buy Box</p><p class='font-bold'>"+(d.data.buyBoxPrice>0?"£"+d.data.buyBoxPrice.toFixed(2):"-")+"</p></div>";
-    h+="<div class='p-3 bg-gray-50 rounded'><p class='text-xs'>Break Even</p><p class='font-bold'>£"+d.data.breakEven.toFixed(2)+"</p></div>";
-    h+="<div class='p-3 "+(d.data.current.profit>0?"bg-green-50":"bg-red-50")+" rounded'><p class='text-xs'>Profit</p><p class='font-bold'>£"+d.data.current.profit.toFixed(2)+" ("+d.data.current.margin+"%)</p></div></div></div>";
+    h+="<div class='grid grid-cols-4 gap-4'><div class='p-3 bg-gray-50 rounded'><p class='text-xs'>Price</p><p class='font-bold'>£"+(parseFloat(d.data.current?.price)||0).toFixed(2)+"</p></div>";
+    h+="<div class='p-3 bg-gray-50 rounded'><p class='text-xs'>Buy Box</p><p class='font-bold'>"+(d.data.buyBoxPrice>0?"£"+(parseFloat(d.data.buyBoxPrice)||0).toFixed(2):"-")+"</p></div>";
+    h+="<div class='p-3 bg-gray-50 rounded'><p class='text-xs'>Break Even</p><p class='font-bold'>£"+(parseFloat(d.data.breakEven)||0).toFixed(2)+"</p></div>";
+    h+="<div class='p-3 "+(d.data.current?.profit>0?"bg-green-50":"bg-red-50")+" rounded'><p class='text-xs'>Profit</p><p class='font-bold'>£"+(parseFloat(d.data.current?.profit)||0).toFixed(2)+" ("+(d.data.current?.margin||0)+"%)</p></div></div></div>";
     h+="<div class='bg-white rounded border p-6 mb-4'><h3 class='font-semibold mb-3'>Costs</h3><div class='grid grid-cols-5 gap-2 text-sm'>";
-    h+="<div class='p-2 bg-gray-50 rounded text-center'>Product<br><b>£"+d.data.costs.product.toFixed(2)+"</b></div>";
-    h+="<div class='p-2 bg-gray-50 rounded text-center'>Shipping<br><b>£"+d.data.costs.shipping.toFixed(2)+"</b></div>";
-    h+="<div class='p-2 bg-gray-50 rounded text-center'>Packaging<br><b>£"+d.data.costs.packaging.toFixed(2)+"</b></div>";
-    h+="<div class='p-2 bg-gray-50 rounded text-center'>Other<br><b>£"+d.data.costs.other.toFixed(2)+"</b></div>";
-    h+="<div class='p-2 bg-blue-50 rounded text-center'>Total<br><b class='text-blue-700'>£"+d.data.costs.total.toFixed(2)+"</b></div></div></div>";
+    h+="<div class='p-2 bg-gray-50 rounded text-center'>Product<br><b>£"+(parseFloat(d.data.costs?.product)||0).toFixed(2)+"</b></div>";
+    h+="<div class='p-2 bg-gray-50 rounded text-center'>Shipping<br><b>£"+(parseFloat(d.data.costs?.shipping)||0).toFixed(2)+"</b></div>";
+    h+="<div class='p-2 bg-gray-50 rounded text-center'>Packaging<br><b>£"+(parseFloat(d.data.costs?.packaging)||0).toFixed(2)+"</b></div>";
+    h+="<div class='p-2 bg-gray-50 rounded text-center'>Other<br><b>£"+(parseFloat(d.data.costs?.other)||0).toFixed(2)+"</b></div>";
+    h+="<div class='p-2 bg-blue-50 rounded text-center'>Total<br><b class='text-blue-700'>£"+(parseFloat(d.data.costs?.total)||0).toFixed(2)+"</b></div></div></div>";
     if(d.data.recommendations && d.data.recommendations.length) {
       h+="<div class='bg-white rounded border p-6'><h3 class='font-semibold mb-3'>Recommendations</h3><div class='space-y-2'>";
       d.data.recommendations.forEach(function(r){
-        h+="<div class='p-3 border rounded flex justify-between'><div><b>"+r.strategy+"</b><p class='text-sm text-gray-500'>"+r.reason+"</p></div><div class='text-right'><span class='text-lg font-bold'>£"+r.price.toFixed(2)+"</span><br><span class='text-sm "+(r.profit>0?"text-green-600":"text-red-600")+"'>£"+r.profit.toFixed(2)+" ("+r.margin+"%)</span></div></div>";
+        h+="<div class='p-3 border rounded flex justify-between'><div><b>"+r.strategy+"</b><p class='text-sm text-gray-500'>"+r.reason+"</p></div><div class='text-right'><span class='text-lg font-bold'>£"+(parseFloat(r.price)||0).toFixed(2)+"</span><br><span class='text-sm "+(r.profit>0?"text-green-600":"text-red-600")+"'>£"+(parseFloat(r.profit)||0).toFixed(2)+" ("+(r.margin||0)+"%)</span></div></div>";
       });
       h+="</div></div>";
     }
     c.innerHTML=h;
   } catch(e) { c.innerHTML="<p class='text-red-500'>"+e.message+"</p>"; }
-}async function loadAlerts() {
+}
+
+async function loadAlerts() {
   const c = document.getElementById("alerts-container");
+  if (!c) return;
   c.innerHTML = "<p class='p-4'>Loading...</p>";
   try {
     const res = await fetch("/api/v1/alerts");
     const d = await res.json();
-    document.getElementById("alert-critical").textContent = d.data.summary.critical;
-    document.getElementById("alert-high").textContent = d.data.summary.high;
-    document.getElementById("alert-medium").textContent = d.data.summary.medium;
-    document.getElementById("alert-low").textContent = d.data.summary.low;
-    if (!d.data.alerts.length) { c.innerHTML = "<p class='p-4 text-green-600'>No alerts!</p>"; return; }
+    const data = d?.data || d || {};
+    const summary = data.summary || {};
+    const alerts = data.alerts || [];
+
+    const alertCritical = document.getElementById("alert-critical");
+    const alertHigh = document.getElementById("alert-high");
+    const alertMedium = document.getElementById("alert-medium");
+    const alertLow = document.getElementById("alert-low");
+    if (alertCritical) alertCritical.textContent = summary.critical || 0;
+    if (alertHigh) alertHigh.textContent = summary.high || 0;
+    if (alertMedium) alertMedium.textContent = summary.medium || 0;
+    if (alertLow) alertLow.textContent = summary.low || 0;
+
+    if (!alerts.length) { c.innerHTML = "<p class='p-4 text-green-600'>No alerts!</p>"; return; }
     let h = "<table class='w-full text-sm'><thead class='bg-gray-50'><tr><th class='p-3 text-left'>Severity</th><th class='p-3 text-left'>Rule</th><th class='p-3 text-left'>Product</th><th class='p-3 text-left'>Message</th><th class='p-3 text-left'>Time</th></tr></thead><tbody>";
-    for (var i = 0; i < d.data.alerts.length; i++) {
-      var a = d.data.alerts[i];
+    for (var i = 0; i < alerts.length; i++) {
+      var a = alerts[i];
       var sc = a.severity === "critical" ? "bg-red-100 text-red-800" : a.severity === "high" ? "bg-orange-100 text-orange-800" : a.severity === "medium" ? "bg-yellow-100 text-yellow-800" : "bg-blue-100 text-blue-800";
       var rowClass = a.read ? "border-t opacity-50" : "border-t bg-yellow-50";
-      h += "<tr class='" + rowClass + "'><td class='p-3'><span class='px-2 py-1 rounded text-xs " + sc + "'>" + (a.severity || "") + "</span></td>";
-      h += "<td class='p-3'>" + (a.ruleName || "") + "</td>";
-      h += "<td class='p-3 max-w-xs truncate'>" + (a.title || "") + "</td>";
-      h += "<td class='p-3 text-gray-600'>" + (a.message || "") + "</td>";
+      h += "<tr class='" + rowClass + "'><td class='p-3'><span class='px-2 py-1 rounded text-xs " + sc + "'>" + escapeHtml(a.severity || "") + "</span></td>";
+      h += "<td class='p-3'>" + escapeHtml(a.ruleName || "") + "</td>";
+      h += "<td class='p-3 max-w-xs truncate'>" + escapeHtml(a.title || "") + "</td>";
+      h += "<td class='p-3 text-gray-600'>" + escapeHtml(a.message || "") + "</td>";
       h += "<td class='p-3 text-xs text-gray-400'>" + (a.createdAt ? new Date(a.createdAt).toLocaleString() : "") + "</td></tr>";
     }
     h += "</tbody></table>";
     c.innerHTML = h;
-  } catch(e) { c.innerHTML = "<p class='p-4 text-red-500'>" + e.message + "</p>"; }
+  } catch(e) { c.innerHTML = "<p class='p-4 text-red-500'>" + escapeHtml(e.message) + "</p>"; }
 }
 
 async function runAutomation() {
@@ -381,7 +438,7 @@ async function loadChanges() {
             <tr class="border-b">
               <td class="py-2 font-mono text-xs">${c.sku}</td>
               <td>${c.type}</td>
-              <td>${c.type === 'price' ? `£${c.oldValue?.toFixed(2) || '?'} → £${c.newValue?.toFixed(2)}` : 'Listing update'}</td>
+              <td>${c.type === 'price' ? `£${(parseFloat(c.oldValue)||0).toFixed(2)} → £${(parseFloat(c.newValue)||0).toFixed(2)}` : 'Listing update'}</td>
               <td><span class="px-2 py-1 rounded text-xs bg-${statusColors[c.status]}-100 text-${statusColors[c.status]}-700">${c.status}</span></td>
               <td class="text-xs text-gray-500">${new Date(c.createdAt).toLocaleDateString()}</td>
               <td>${c.status === 'pending' ? `<button onclick="cancelChangeItem(${c.id})" class="text-red-600 hover:underline text-xs">Cancel</button>` : ''}</td>
@@ -452,12 +509,14 @@ async function loadRules() {
       fetch('/api/v1/automation/rules'),
       fetch('/api/v1/automation/templates')
     ]);
-    const rules = await rulesRes.json();
-    const templates = await templatesRes.json();
-    
+    const rulesData = await rulesRes.json();
+    const templatesData = await templatesRes.json();
+    const rules = rulesData.data?.rules || rulesData.rules || rulesData || [];
+    const templates = templatesData.data?.templates || templatesData.templates || templatesData || [];
+
     // Render active rules
     const rulesEl = document.getElementById('rules-list');
-    if (rules.length === 0) {
+    if (!Array.isArray(rules) || rules.length === 0) {
       rulesEl.innerHTML = '<p class="text-gray-500">No custom rules configured. Use templates below to get started.</p>';
     } else {
       rulesEl.innerHTML = `
@@ -495,43 +554,59 @@ async function loadRules() {
 }
 
 async function enableTemplate(templateId) {
-  const templates = await (await fetch('/api/v1/automation/templates')).json();
-  const template = templates.find(t => t.id === templateId);
-  if (!template) return;
-  
-  const rules = await (await fetch('/api/v1/automation/rules')).json();
-  
-  // Check if already exists
-  if (rules.some(r => r.id === templateId)) {
-    alert('This rule is already enabled');
-    return;
+  try {
+    const templatesRes = await fetch('/api/v1/automation/templates');
+    const templatesData = await templatesRes.json();
+    const templates = templatesData?.data?.templates || templatesData?.templates || templatesData || [];
+    const template = templates.find(t => t.id === templateId);
+    if (!template) return;
+
+    const rulesRes = await fetch('/api/v1/automation/rules');
+    const rulesData = await rulesRes.json();
+    const rules = rulesData?.data?.rules || rulesData?.rules || rulesData || [];
+
+    // Check if already exists
+    if (rules.some(r => r.id === templateId)) {
+      alert('This rule is already enabled');
+      return;
+    }
+
+    // Add to rules
+    rules.push({ ...template, enabled: true });
+
+    await fetch('/api/v1/automation/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules })
+    });
+
+    loadRules();
+  } catch (e) {
+    console.error('Enable template error:', e);
+    alert('Failed to enable template: ' + e.message);
   }
-  
-  // Add to rules
-  rules.push({ ...template, enabled: true });
-  
-  await fetch('/api/v1/automation/rules', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(rules)
-  });
-  
-  loadRules();
 }
 
 async function deleteRule(ruleId) {
   if (!confirm('Delete this rule?')) return;
-  
-  const rules = await (await fetch('/api/v1/automation/rules')).json();
-  const filtered = rules.filter(r => r.id !== ruleId);
-  
-  await fetch('/api/v1/automation/rules', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(filtered)
-  });
-  
-  loadRules();
+
+  try {
+    const rulesRes = await fetch('/api/v1/automation/rules');
+    const rulesData = await rulesRes.json();
+    const rules = rulesData?.data?.rules || rulesData?.rules || rulesData || [];
+    const filtered = rules.filter(r => r.id !== ruleId);
+
+    await fetch('/api/v1/automation/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules: filtered })
+    });
+
+    loadRules();
+  } catch (e) {
+    console.error('Delete rule error:', e);
+    alert('Failed to delete rule: ' + e.message);
+  }
 }
 
 function showAddRule() {
@@ -592,18 +667,25 @@ async function saveRule() {
     action: { type: action, severity },
     enabled: true
   };
-  
-  const rules = await (await fetch('/api/v1/automation/rules')).json();
-  rules.push(rule);
-  
-  await fetch('/api/v1/automation/rules', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(rules)
-  });
-  
-  hideAddRule();
-  loadRules();
+
+  try {
+    const rulesRes = await fetch('/api/v1/automation/rules');
+    const rulesData = await rulesRes.json();
+    const rules = rulesData?.data?.rules || rulesData?.rules || rulesData || [];
+    rules.push(rule);
+
+    await fetch('/api/v1/automation/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules })
+    });
+
+    hideAddRule();
+    loadRules();
+  } catch (e) {
+    console.error('Save rule error:', e);
+    alert('Failed to save rule: ' + e.message);
+  }
 }
 
 // Add event listener for trigger type change
@@ -622,6 +704,13 @@ let bomSuppliers = [];
 let bomComponents = [];
 let allBOMs = {};
 let currentBOMSku = '';
+let allListingsForBOM = [];
+let recentlyUsedComponents = [];
+
+// Load recently used components from localStorage
+try {
+  recentlyUsedComponents = JSON.parse(localStorage.getItem('recentComponents') || '[]');
+} catch (e) { recentlyUsedComponents = []; }
 
 async function loadBOMPage() {
   try {
@@ -635,7 +724,8 @@ async function loadBOMPage() {
     bomSuppliers = (await suppliersRes.json()).data || [];
     bomComponents = (await componentsRes.json()).data || [];
     allBOMs = (await bomRes.json()).data || {};
-    const listings = (await listingsRes.json()).data?.items || [];
+    const listingsData = await listingsRes.json();
+    allListingsForBOM = listingsData?.data?.items || listingsData?.items || [];
 
     document.getElementById('bom-suppliers').textContent = bomSuppliers.length;
     document.getElementById('bom-components').textContent = bomComponents.length;
@@ -648,41 +738,23 @@ async function loadBOMPage() {
     } else {
       suppliersList.innerHTML = bomSuppliers.map(s => `
         <div class="flex justify-between items-center p-2 bg-gray-50 rounded">
-          <div><span class="font-medium">${s.name}</span><span class="text-xs text-gray-500 ml-2">${s.email || ''}</span></div>
+          <div><span class="font-medium">${escapeHtml(s.name)}</span><span class="text-xs text-gray-500 ml-2">${escapeHtml(s.email || '')}</span></div>
           <button onclick="deleteSupplier('${s.id}')" class="text-red-500 hover:text-red-700 text-sm">Delete</button>
         </div>
       `).join('');
     }
 
-    // Render components with usage count
-    const componentsList = document.getElementById('components-list');
-    if (bomComponents.length === 0) {
-      componentsList.innerHTML = '<p class="text-gray-500 text-sm">No components. Add one to get started.</p>';
-    } else {
-      componentsList.innerHTML = bomComponents.map(c => {
-        const supplier = bomSuppliers.find(s => s.id === c.supplierId);
-        const usageCount = countComponentUsage(c.id);
-        return `
-          <div class="flex justify-between items-center p-2 bg-gray-50 rounded">
-            <div>
-              <span class="font-medium">${c.name}</span>
-              <span class="text-xs text-gray-500 ml-2">£${c.unitCost.toFixed(2)}</span>
-              <span class="text-xs text-gray-400 ml-2">${supplier?.name || ''}</span>
-              ${usageCount > 0 ? `<span class="text-xs bg-blue-100 text-blue-700 px-1 rounded ml-2">Used in ${usageCount} SKU${usageCount > 1 ? 's' : ''}</span>` : ''}
-            </div>
-            <button onclick="deleteComponent('${c.id}')" class="text-red-500 hover:text-red-700 text-sm">Delete</button>
-          </div>
-        `;
-      }).join('');
-    }
+    // Render components (filtered)
+    renderComponentsList();
 
     // Populate SKU select
-    const skuSelect = document.getElementById('bom-sku-select');
-    skuSelect.innerHTML = '<option value="">Select a SKU...</option>' +
-      listings.map(l => `<option value="${l.sku}">${l.sku} - ${(l.title || '').substring(0, 40)}...</option>`).join('');
+    populateSKUSelect();
 
     // Populate component usage list
-    renderComponentUsage(listings);
+    renderComponentUsage(allListingsForBOM);
+
+    // Render recent components buttons
+    renderRecentComponents();
 
     // If we have a SKU selected, refresh it
     if (currentBOMSku) {
@@ -692,6 +764,252 @@ async function loadBOMPage() {
   } catch (e) {
     console.error('BOM load error:', e);
   }
+}
+
+// Filter and render components list
+function renderComponentsList() {
+  const componentsList = document.getElementById('components-list');
+  const countEl = document.getElementById('components-count');
+  const searchTerm = (document.getElementById('component-search')?.value || '').toLowerCase();
+  const categoryFilter = document.getElementById('component-category-filter')?.value || '';
+
+  if (bomComponents.length === 0) {
+    componentsList.innerHTML = '<p class="text-gray-500 text-sm">No components. Add one to get started.</p>';
+    if (countEl) countEl.textContent = '';
+    return;
+  }
+
+  let filtered = bomComponents;
+
+  // Apply search filter
+  if (searchTerm) {
+    filtered = filtered.filter(c =>
+      c.name.toLowerCase().includes(searchTerm) ||
+      (c.sku || '').toLowerCase().includes(searchTerm) ||
+      (c.category || '').toLowerCase().includes(searchTerm)
+    );
+  }
+
+  // Apply category filter
+  if (categoryFilter) {
+    filtered = filtered.filter(c => (c.category || 'General') === categoryFilter);
+  }
+
+  if (filtered.length === 0) {
+    componentsList.innerHTML = '<p class="text-gray-500 text-sm">No matching components.</p>';
+    if (countEl) countEl.textContent = `0 of ${bomComponents.length} shown`;
+    return;
+  }
+
+  // Group by category
+  const byCategory = {};
+  filtered.forEach(c => {
+    const cat = c.category || 'General';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(c);
+  });
+
+  let html = '';
+  for (const [category, components] of Object.entries(byCategory)) {
+    if (!categoryFilter && Object.keys(byCategory).length > 1) {
+      html += `<div class="text-xs font-semibold text-gray-600 bg-gray-100 px-2 py-1 rounded mt-2 first:mt-0">${escapeHtml(category)} (${components.length})</div>`;
+    }
+    html += components.map(c => {
+      const supplier = bomSuppliers.find(s => s.id === c.supplierId);
+      const usageCount = countComponentUsage(c.id);
+      return `
+        <div class="flex justify-between items-center p-2 bg-gray-50 rounded hover:bg-gray-100 cursor-pointer component-item" data-id="${c.id}" onclick="quickSelectComponent('${c.id}')">
+          <div class="flex-1 min-w-0">
+            <span class="font-medium text-sm">${escapeHtml(c.name)}</span>
+            <span class="text-xs text-green-600 ml-2">£${safeToFixed(c.unitCost)}</span>
+            <span class="text-xs text-gray-400 ml-1">${escapeHtml(supplier?.name || '')}</span>
+            ${usageCount > 0 ? `<span class="text-xs bg-blue-100 text-blue-700 px-1 rounded ml-1">×${usageCount}</span>` : ''}
+          </div>
+          <button onclick="event.stopPropagation(); deleteComponent('${c.id}')" class="text-red-500 hover:text-red-700 text-xs ml-2">Delete</button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  componentsList.innerHTML = html;
+  if (countEl) countEl.textContent = `Showing ${filtered.length} of ${bomComponents.length}`;
+}
+
+function filterComponents() {
+  renderComponentsList();
+}
+
+// Quick select component from list click
+function quickSelectComponent(componentId) {
+  const select = document.getElementById('bom-add-component');
+  if (select) {
+    select.value = componentId;
+    // Highlight it briefly
+    select.classList.add('ring-2', 'ring-green-500');
+    setTimeout(() => select.classList.remove('ring-2', 'ring-green-500'), 1000);
+  }
+}
+
+// Filter SKU dropdown
+function populateSKUSelect() {
+  const skuSelect = document.getElementById('bom-sku-select');
+  const searchTerm = (document.getElementById('bom-sku-search')?.value || '').toLowerCase();
+
+  let filtered = allListingsForBOM;
+  if (searchTerm) {
+    filtered = filtered.filter(l =>
+      (l.sku || '').toLowerCase().includes(searchTerm) ||
+      (l.title || '').toLowerCase().includes(searchTerm)
+    );
+  }
+
+  skuSelect.innerHTML = '<option value="">Select a SKU...</option>' +
+    filtered.map(l => `<option value="${escapeHtml(l.sku)}">${escapeHtml(l.sku)} - ${escapeHtml((l.title || '').substring(0, 35))}...</option>`).join('');
+
+  // Preserve selection
+  if (currentBOMSku && filtered.some(l => l.sku === currentBOMSku)) {
+    skuSelect.value = currentBOMSku;
+  }
+}
+
+function filterSKUDropdown() {
+  populateSKUSelect();
+}
+
+// Filter BOM component dropdown with live search suggestions
+function filterBOMComponentDropdown() {
+  const searchInput = document.getElementById('bom-component-search');
+  const suggestionsDiv = document.getElementById('bom-component-suggestions');
+  const searchTerm = (searchInput?.value || '').toLowerCase();
+
+  if (!searchTerm || searchTerm.length < 2) {
+    suggestionsDiv.classList.add('hidden');
+    return;
+  }
+
+  const matches = bomComponents.filter(c =>
+    c.name.toLowerCase().includes(searchTerm) ||
+    (c.sku || '').toLowerCase().includes(searchTerm)
+  ).slice(0, 8);
+
+  if (matches.length === 0) {
+    suggestionsDiv.innerHTML = '<p class="text-xs text-gray-500 p-2">No matches</p>';
+  } else {
+    suggestionsDiv.innerHTML = matches.map(c => `
+      <div class="p-2 hover:bg-blue-50 cursor-pointer text-sm border-b flex justify-between" onclick="selectComponentFromSearch('${c.id}')">
+        <span>${escapeHtml(c.name)}</span>
+        <span class="text-green-600">£${safeToFixed(c.unitCost)}</span>
+      </div>
+    `).join('');
+  }
+  suggestionsDiv.classList.remove('hidden');
+}
+
+function selectComponentFromSearch(componentId) {
+  const select = document.getElementById('bom-add-component');
+  const searchInput = document.getElementById('bom-component-search');
+  const suggestionsDiv = document.getElementById('bom-component-suggestions');
+
+  if (select) select.value = componentId;
+  if (searchInput) searchInput.value = '';
+  if (suggestionsDiv) suggestionsDiv.classList.add('hidden');
+
+  // Focus qty input
+  document.getElementById('bom-add-qty')?.focus();
+}
+
+// Render recent components quick-add buttons
+function renderRecentComponents() {
+  const container = document.getElementById('recent-components');
+  if (!container) return;
+
+  const recent = recentlyUsedComponents.slice(0, 5);
+  if (recent.length === 0) {
+    container.innerHTML = '<span class="text-xs text-gray-400">None yet</span>';
+    return;
+  }
+
+  container.innerHTML = recent.map(compId => {
+    const comp = bomComponents.find(c => c.id === compId);
+    if (!comp) return '';
+    return `<button onclick="quickAddRecentComponent('${comp.id}')" class="text-xs bg-gray-100 hover:bg-blue-100 px-2 py-1 rounded">${escapeHtml(comp.name.substring(0, 15))}</button>`;
+  }).filter(Boolean).join('');
+}
+
+function quickAddRecentComponent(componentId) {
+  const select = document.getElementById('bom-add-component');
+  if (select) {
+    select.value = componentId;
+    addComponentToBOM();
+  }
+}
+
+// Track recently used components
+function trackRecentComponent(componentId) {
+  recentlyUsedComponents = recentlyUsedComponents.filter(id => id !== componentId);
+  recentlyUsedComponents.unshift(componentId);
+  recentlyUsedComponents = recentlyUsedComponents.slice(0, 10);
+  try {
+    localStorage.setItem('recentComponents', JSON.stringify(recentlyUsedComponents));
+  } catch (e) {}
+  renderRecentComponents();
+}
+
+// Live cost update
+function updateLiveCost() {
+  if (!currentBOMSku) return;
+
+  const bom = allBOMs[currentBOMSku] || { components: [] };
+  let materialCost = 0;
+
+  for (const bomItem of bom.components || []) {
+    const component = bomComponents.find(c => c.id === bomItem.componentId);
+    if (component) {
+      materialCost += (component.unitCost || 0) * (bomItem.quantity || 1);
+    }
+  }
+
+  const laborCost = parseFloat(document.getElementById('bom-labor')?.value) || 0;
+  const packagingCost = parseFloat(document.getElementById('bom-packaging')?.value) || 0;
+  const overheadPercent = parseFloat(document.getElementById('bom-overhead')?.value) || 0;
+
+  const subtotal = materialCost + laborCost + packagingCost;
+  const overheadCost = subtotal * (overheadPercent / 100);
+  const total = subtotal + overheadCost;
+
+  const breakdownEl = document.getElementById('bom-cost-breakdown');
+  if (breakdownEl) {
+    breakdownEl.innerHTML = `
+      <div class="flex justify-between text-sm"><span>Materials:</span><span>£${safeToFixed(materialCost)}</span></div>
+      <div class="flex justify-between text-sm"><span>Labor:</span><span>£${safeToFixed(laborCost)}</span></div>
+      <div class="flex justify-between text-sm"><span>Packaging:</span><span>£${safeToFixed(packagingCost)}</span></div>
+      <div class="flex justify-between text-sm"><span>Overhead:</span><span>£${safeToFixed(overheadCost)}</span></div>
+      <div class="flex justify-between font-bold border-t pt-2 mt-2"><span>Total:</span><span class="text-green-600">£${safeToFixed(total)}</span></div>
+    `;
+  }
+
+  // Show comparison if we have a selling price
+  const listing = allListingsForBOM.find(l => l.sku === currentBOMSku);
+  const comparisonEl = document.getElementById('cost-comparison');
+  if (comparisonEl && listing?.price) {
+    const price = parseFloat(listing.price) || 0;
+    const margin = price > 0 ? ((price - total) / price * 100) : 0;
+    const profit = price - total;
+    comparisonEl.innerHTML = `
+      Selling: £${safeToFixed(price)} | Profit: <span class="${profit > 0 ? 'text-green-600' : 'text-red-600'}">£${safeToFixed(profit)}</span> (${safeToFixed(margin, 1)}%)
+    `;
+  }
+}
+
+// Filter usage list
+function filterUsageList() {
+  const searchTerm = (document.getElementById('usage-search')?.value || '').toLowerCase();
+  const items = document.querySelectorAll('#component-usage-list > div');
+
+  items.forEach(item => {
+    const text = item.textContent.toLowerCase();
+    item.style.display = text.includes(searchTerm) ? '' : 'none';
+  });
 }
 
 function countComponentUsage(componentId) {
@@ -738,7 +1056,7 @@ function renderComponentUsage(listings) {
   usageList.innerHTML = usageData.map(item => `
     <div class="p-3 bg-gray-50 rounded border">
       <div class="font-medium text-sm">${item.component.name}</div>
-      <div class="text-xs text-gray-500 mb-2">£${item.component.unitCost.toFixed(2)} per unit</div>
+      <div class="text-xs text-gray-500 mb-2">£${(parseFloat(item.component?.unitCost)||0).toFixed(2)} per unit</div>
       <div class="space-y-1">
         ${item.usedIn.map(u => `
           <div class="text-xs flex justify-between">
@@ -817,12 +1135,16 @@ async function loadBOMForSKU() {
     // Get list of component IDs already in this BOM
     const usedComponentIds = (bom.components || []).map(c => c.componentId);
 
+    // Update component count
+    const countEl = document.getElementById('bom-component-count');
+    if (countEl) countEl.textContent = `(${cost.componentDetails.length} items)`;
+
     // Populate add-component dropdown with available components
     const addCompSelect = document.getElementById('bom-add-component');
-    addCompSelect.innerHTML = '<option value="">Select component to add...</option>' +
+    addCompSelect.innerHTML = '<option value="">Or select from list...</option>' +
       bomComponents.map(c => {
         const inUse = usedComponentIds.includes(c.id);
-        return `<option value="${c.id}" ${inUse ? 'disabled' : ''}>${c.name} - £${c.unitCost.toFixed(2)}${inUse ? ' (already added)' : ''}</option>`;
+        return `<option value="${c.id}" ${inUse ? 'disabled' : ''}>${escapeHtml(c.name)} - £${safeToFixed(c.unitCost)}${inUse ? ' (already added)' : ''}</option>`;
       }).join('');
 
     // Render components in BOM with remove buttons
@@ -833,25 +1155,20 @@ async function loadBOMForSKU() {
       compList.innerHTML = cost.componentDetails.map(c => `
         <div class="flex justify-between items-center text-sm bg-gray-50 p-2 rounded">
           <div>
-            <span class="font-medium">${c.name}</span>
+            <span class="font-medium">${escapeHtml(c.name)}</span>
             <span class="text-gray-500 ml-1">×${c.quantity}</span>
           </div>
           <div class="flex items-center gap-2">
-            <span class="text-gray-600">£${c.totalCost.toFixed(2)}</span>
+            <span class="text-gray-600">£${safeToFixed(c.totalCost)}</span>
             <button onclick="removeComponentFromBOM('${c.componentId}')" class="text-red-500 hover:text-red-700 text-xs">✕</button>
           </div>
         </div>
       `).join('');
     }
 
-    // Render cost breakdown
-    document.getElementById('bom-cost-breakdown').innerHTML = `
-      <div class="flex justify-between text-sm"><span>Materials:</span><span>£${cost.materialCost.toFixed(2)}</span></div>
-      <div class="flex justify-between text-sm"><span>Labor:</span><span>£${cost.laborCost.toFixed(2)}</span></div>
-      <div class="flex justify-between text-sm"><span>Packaging:</span><span>£${cost.packagingCost.toFixed(2)}</span></div>
-      <div class="flex justify-between text-sm"><span>Overhead:</span><span>£${cost.overheadCost.toFixed(2)}</span></div>
-      <div class="flex justify-between font-bold border-t pt-2 mt-2"><span>Total:</span><span>£${cost.totalCost.toFixed(2)}</span></div>
-    `;
+    // Update live cost and store BOM in memory for live updates
+    allBOMs[currentBOMSku] = bom;
+    updateLiveCost();
   } catch (e) {
     console.error('BOM load error:', e);
   }
@@ -878,9 +1195,14 @@ async function addComponentToBOM() {
       body: JSON.stringify({ componentId, quantity })
     });
 
+    // Track recently used component
+    trackRecentComponent(componentId);
+
     // Reset the form
     document.getElementById('bom-add-component').value = '';
     document.getElementById('bom-add-qty').value = '1';
+    const searchInput = document.getElementById('bom-component-search');
+    if (searchInput) searchInput.value = '';
 
     // Reload the BOM view
     loadBOMForSKU();
@@ -910,18 +1232,27 @@ async function removeComponentFromBOM(componentId) {
 async function saveBOMData() {
   if (!currentBOMSku) return;
 
-  await fetch('/api/v1/bom/' + currentBOMSku, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      laborCost: parseFloat(document.getElementById('bom-labor').value) || 0,
-      packagingCost: parseFloat(document.getElementById('bom-packaging').value) || 0,
-      overheadPercent: parseFloat(document.getElementById('bom-overhead').value) || 0
-    })
-  });
+  try {
+    const res = await fetch('/api/v1/bom/' + encodeURIComponent(currentBOMSku), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        laborCost: parseFloat(document.getElementById('bom-labor').value) || 0,
+        packagingCost: parseFloat(document.getElementById('bom-packaging').value) || 0,
+        overheadPercent: parseFloat(document.getElementById('bom-overhead').value) || 0
+      })
+    });
 
-  loadBOMForSKU();
-  alert('BOM saved!');
+    const data = await res.json();
+    if (data.success) {
+      loadBOMForSKU();
+      alert('BOM saved!');
+    } else {
+      alert('Error saving BOM: ' + (data.error || 'Unknown error'));
+    }
+  } catch (e) {
+    alert('Error saving BOM: ' + e.message);
+  }
 }
 
 // ============================================
@@ -974,8 +1305,8 @@ async function loadOpportunities() {
         <div class="p-3 bg-blue-50 rounded border border-blue-200">
           <div class="text-sm font-medium">${b.category} Bundle</div>
           <div class="text-xs text-gray-600">${b.items.map(i => i.sku).join(' + ')}</div>
-          <div class="text-xs mt-1">Combined: £${b.combinedPrice.toFixed(2)} → Bundle: £${b.suggestedBundlePrice.toFixed(2)}</div>
-          <div class="text-xs text-green-600">Save £${b.savings.toFixed(2)}</div>
+          <div class="text-xs mt-1">Combined: £${(parseFloat(b.combinedPrice)||0).toFixed(2)} → Bundle: £${(parseFloat(b.suggestedBundlePrice)||0).toFixed(2)}</div>
+          <div class="text-xs text-green-600">Save £${(parseFloat(b.savings)||0).toFixed(2)}</div>
         </div>
       `).join('');
     }
@@ -2144,15 +2475,15 @@ function displayGeneratedListing(data) {
       <div class="grid grid-cols-3 gap-4 mt-2">
         <div class="p-3 bg-gray-50 rounded text-center">
           <p class="text-xs text-gray-500">Competitive</p>
-          <p class="font-bold">${ps.min ? '£' + ps.min.toFixed(2) : 'N/A'}</p>
+          <p class="font-bold">${ps.min ? '£' + (parseFloat(ps.min)||0).toFixed(2) : 'N/A'}</p>
         </div>
         <div class="p-3 bg-green-50 rounded text-center border-2 border-green-200">
           <p class="text-xs text-green-700">Recommended</p>
-          <p class="font-bold text-green-700">${ps.recommended ? '£' + ps.recommended.toFixed(2) : 'N/A'}</p>
+          <p class="font-bold text-green-700">${ps.recommended ? '£' + (parseFloat(ps.recommended)||0).toFixed(2) : 'N/A'}</p>
         </div>
         <div class="p-3 bg-gray-50 rounded text-center">
           <p class="text-xs text-gray-500">Premium</p>
-          <p class="font-bold">${ps.max ? '£' + ps.max.toFixed(2) : 'N/A'}</p>
+          <p class="font-bold">${ps.max ? '£' + (parseFloat(ps.max)||0).toFixed(2) : 'N/A'}</p>
         </div>
       </div>
     </div>`;
@@ -2236,7 +2567,7 @@ function displayComparison(data) {
   // Price row
   html += '<tr class="border-t"><td class="p-3 font-medium">Price</td>';
   data.products.forEach(p => {
-    html += `<td class="p-3">£${p.price?.toFixed(2) || 'N/A'}</td>`;
+    html += `<td class="p-3">${p.price ? '£' + (parseFloat(p.price)||0).toFixed(2) : 'N/A'}</td>`;
   });
   html += '</tr>';
 
@@ -2406,4 +2737,192 @@ async function loadScoreSummary(containerId = 'score-summary') {
   } catch (e) {
     container.innerHTML = `<p class="text-red-500">${e.message}</p>`;
   }
+}
+
+// ============================================
+// BOM IMPORT FUNCTIONS
+// ============================================
+
+let importData = [];
+
+function showImportModal() {
+  document.getElementById('import-modal').classList.remove('hidden');
+  document.getElementById('import-file').value = '';
+  document.getElementById('import-preview').classList.add('hidden');
+  document.getElementById('import-results').classList.add('hidden');
+  document.getElementById('btn-execute-import').classList.add('hidden');
+  importData = [];
+}
+
+function hideImportModal() {
+  document.getElementById('import-modal').classList.add('hidden');
+  importData = [];
+}
+
+function downloadImportTemplate() {
+  const template = `SKU,Component,Qty,Cost,Supplier
+INV-TOOL-001,M8 Hex Bolt,4,0.15,FastFasteners UK
+INV-TOOL-001,Rubber Washer,4,0.05,FastFasteners UK
+INV-TOOL-001,Packaging Box Small,1,0.45,PackCo
+INV-TOOL-002,Allen Key 5mm,1,1.20,Tool Supplies Ltd
+INV-TOOL-002,Carrying Pouch,1,0.80,PackCo`;
+
+  const blob = new Blob([template], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'bom-import-template.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function previewImport() {
+  const fileInput = document.getElementById('import-file');
+  const file = fileInput.files[0];
+
+  if (!file) {
+    alert('Please select a file first');
+    return;
+  }
+
+  const previewDiv = document.getElementById('import-preview');
+  const tableDiv = document.getElementById('import-preview-table');
+  const resultsDiv = document.getElementById('import-results');
+
+  try {
+    const text = await file.text();
+    const rows = parseCSV(text);
+
+    if (rows.length < 2) {
+      throw new Error('File must have at least a header row and one data row');
+    }
+
+    const headers = rows[0].map(h => h.toLowerCase().trim());
+    const requiredCols = ['sku', 'component', 'qty', 'cost', 'supplier'];
+    const missingCols = requiredCols.filter(c => !headers.includes(c));
+
+    if (missingCols.length > 0) {
+      throw new Error(`Missing required columns: ${missingCols.join(', ')}`);
+    }
+
+    const skuIdx = headers.indexOf('sku');
+    const compIdx = headers.indexOf('component');
+    const qtyIdx = headers.indexOf('qty');
+    const costIdx = headers.indexOf('cost');
+    const suppIdx = headers.indexOf('supplier');
+
+    importData = rows.slice(1).filter(row => row.length >= 5 && row[skuIdx]).map(row => ({
+      sku: row[skuIdx]?.trim() || '',
+      component: row[compIdx]?.trim() || '',
+      qty: parseFloat(row[qtyIdx]) || 1,
+      cost: parseFloat(row[costIdx]) || 0,
+      supplier: row[suppIdx]?.trim() || ''
+    }));
+
+    // Show preview table
+    let html = `<table class="w-full text-xs border"><thead class="bg-gray-100">
+      <tr><th class="p-2 border">SKU</th><th class="p-2 border">Component</th><th class="p-2 border">Qty</th><th class="p-2 border">Cost</th><th class="p-2 border">Supplier</th></tr>
+    </thead><tbody>`;
+
+    importData.slice(0, 5).forEach(row => {
+      html += `<tr>
+        <td class="p-2 border">${row.sku}</td>
+        <td class="p-2 border">${row.component}</td>
+        <td class="p-2 border">${row.qty}</td>
+        <td class="p-2 border">£${(parseFloat(row.cost)||0).toFixed(2)}</td>
+        <td class="p-2 border">${row.supplier}</td>
+      </tr>`;
+    });
+
+    if (importData.length > 5) {
+      html += `<tr><td colspan="5" class="p-2 border text-center text-gray-500">... and ${importData.length - 5} more rows</td></tr>`;
+    }
+
+    html += '</tbody></table>';
+    html += `<p class="text-sm text-gray-600 mt-2">Total rows to import: <strong>${importData.length}</strong></p>`;
+
+    tableDiv.innerHTML = html;
+    previewDiv.classList.remove('hidden');
+    resultsDiv.classList.add('hidden');
+    document.getElementById('btn-execute-import').classList.remove('hidden');
+
+  } catch (e) {
+    tableDiv.innerHTML = `<p class="text-red-600">${e.message}</p>`;
+    previewDiv.classList.remove('hidden');
+    document.getElementById('btn-execute-import').classList.add('hidden');
+  }
+}
+
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/);
+  return lines.map(line => {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        result.push(current);
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current);
+    return result;
+  }).filter(row => row.some(cell => cell.trim()));
+}
+
+async function executeImport() {
+  if (!importData.length) {
+    alert('No data to import. Please preview first.');
+    return;
+  }
+
+  const btn = document.getElementById('btn-execute-import');
+  const resultsDiv = document.getElementById('import-results');
+
+  btn.disabled = true;
+  btn.textContent = 'Importing...';
+
+  try {
+    const res = await fetch('/api/v1/bom/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: importData })
+    });
+
+    const result = await res.json();
+
+    if (result.success) {
+      resultsDiv.className = 'mb-4 p-4 rounded bg-green-50 border border-green-200';
+      resultsDiv.innerHTML = `
+        <p class="text-green-800 font-medium">✅ Import Complete!</p>
+        <p class="text-sm text-green-700 mt-1">
+          ${result.data.suppliersCreated} suppliers created<br>
+          ${result.data.componentsCreated} components created<br>
+          ${result.data.bomEntriesCreated} BOM entries added
+        </p>
+      `;
+
+      // Refresh BOM page data
+      setTimeout(() => {
+        loadBOMPage();
+        hideImportModal();
+      }, 2000);
+    } else {
+      throw new Error(result.error || 'Import failed');
+    }
+
+  } catch (e) {
+    resultsDiv.className = 'mb-4 p-4 rounded bg-red-50 border border-red-200';
+    resultsDiv.innerHTML = `<p class="text-red-800">❌ Error: ${e.message}</p>`;
+  }
+
+  resultsDiv.classList.remove('hidden');
+  btn.disabled = false;
+  btn.textContent = 'Import';
 }

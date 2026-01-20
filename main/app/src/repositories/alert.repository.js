@@ -182,13 +182,16 @@ export async function remove(id) {
  * @returns {Promise<number>} Number of deleted alerts
  */
 export async function pruneOldAlerts(daysOld = 30) {
+  // Validate input to prevent SQL injection
+  const safeDays = Math.max(1, Math.min(365, parseInt(daysOld) || 30));
+
   const sql = `
     DELETE FROM alerts
-    WHERE "createdAt" < NOW() - INTERVAL '${daysOld} days'
+    WHERE "createdAt" < NOW() - INTERVAL '1 day' * $1
     AND dismissed = true
   `;
 
-  const result = await query(sql);
+  const result = await query(sql, [safeDays]);
   return result.rowCount;
 }
 
