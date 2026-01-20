@@ -38,15 +38,23 @@ async function processJob(job) {
     case 'PUBLISH_STOCK_CHANGE':
       return await processStockChange(job);
 
+    case 'SYNC_KEEPA_ASIN':
+      return await processSyncKeepaAsin(job);
+
+    case 'COMPUTE_FEATURES_LISTING':
+      return await processComputeFeaturesListing(job);
+
+    case 'COMPUTE_FEATURES_ASIN':
+      return await processComputeFeaturesAsin(job);
+
     case 'SYNC_AMAZON_OFFER':
     case 'SYNC_AMAZON_SALES':
     case 'SYNC_AMAZON_CATALOG':
-    case 'SYNC_KEEPA_ASIN':
-    case 'COMPUTE_FEATURES_LISTING':
-    case 'COMPUTE_FEATURES_ASIN':
+      return await processSyncAmazon(job);
+
     case 'GENERATE_RECOMMENDATIONS_LISTING':
     case 'GENERATE_RECOMMENDATIONS_ASIN':
-      // TODO: Implement in respective slices
+      // TODO: Implement in Slice D
       throw new Error(`Job type ${job.job_type} not yet implemented`);
 
     default:
@@ -355,6 +363,144 @@ async function callSpApiUpdateInventory(listingId, newQuantity) {
     new_quantity: newQuantity,
     timestamp: new Date().toISOString(),
   };
+}
+
+// ============================================================================
+// SLICE C: KEEPA & FEATURE STORE JOBS
+// ============================================================================
+
+/**
+ * Process SYNC_KEEPA_ASIN job
+ * @param {Object} job
+ * @returns {Promise<Object>}
+ */
+async function processSyncKeepaAsin(job) {
+  const input = job.input_json || {};
+  const asin = input.asin;
+  const marketplaceId = input.marketplace_id || 1; // Default to UK
+
+  if (!asin) {
+    throw new Error('ASIN is required for SYNC_KEEPA_ASIN job');
+  }
+
+  console.log(`[Worker] Syncing Keepa data for ASIN ${asin}`);
+
+  // Dynamic import to avoid circular dependencies
+  const keepaService = await import('../services/keepa.service.js');
+
+  const result = await keepaService.syncKeepaAsin(asin, marketplaceId);
+
+  // Create listing event if this is for a listing
+  if (job.listing_id) {
+    await query(`
+      INSERT INTO listing_events (listing_id, event_type, job_id, after_json, created_by)
+      VALUES ($1, 'KEEPA_SYNC_COMPLETED', $2, $3, 'worker')
+    `, [job.listing_id, job.id, JSON.stringify(result)]);
+  }
+
+  return result;
+}
+
+/**
+ * Process COMPUTE_FEATURES_LISTING job
+ * @param {Object} job
+ * @returns {Promise<Object>}
+ */
+async function processComputeFeaturesListing(job) {
+  const listingId = job.listing_id;
+
+  if (!listingId) {
+    throw new Error('listing_id is required for COMPUTE_FEATURES_LISTING job');
+  }
+
+  console.log(`[Worker] Computing features for listing ${listingId}`);
+
+  const featureStoreService = await import('../services/feature-store.service.js');
+
+  const result = await featureStoreService.computeListingFeatures(listingId);
+
+  // Create listing event
+  await query(`
+    INSERT INTO listing_events (listing_id, event_type, job_id, after_json, created_by)
+    VALUES ($1, 'FEATURES_COMPUTED', $2, $3, 'worker')
+  `, [listingId, job.id, JSON.stringify({ feature_store_id: result.feature_store_id })]);
+
+  return result;
+}
+
+/**
+ * Process COMPUTE_FEATURES_ASIN job
+ * @param {Object} job
+ * @returns {Promise<Object>}
+ */
+async function processComputeFeaturesAsin(job) {
+  const input = job.input_json || {};
+  const asinEntityId = input.asin_entity_id || job.asin_entity_id;
+
+  if (!asinEntityId) {
+    throw new Error('asin_entity_id is required for COMPUTE_FEATURES_ASIN job');
+  }
+
+  console.log(`[Worker] Computing features for ASIN entity ${asinEntityId}`);
+
+  const featureStoreService = await import('../services/feature-store.service.js');
+
+  const result = await featureStoreService.computeAsinFeatures(asinEntityId);
+
+  return result;
+}
+
+/**
+ * Process SYNC_AMAZON_* jobs (stub implementation)
+ * @param {Object} job
+ * @returns {Promise<Object>}
+ */
+async function processSyncAmazon(job) {
+  const listingId = job.listing_id;
+  const jobType = job.job_type;
+
+  console.log(`[Worker] Processing ${jobType} for listing ${listingId}`);
+
+  // Check if we have SP-API credentials
+  if (!hasSpApiCredentials()) {
+    console.log(`[Worker] No SP-API credentials - simulating ${jobType}`);
+    return {
+      success: true,
+      simulated: true,
+      message: `${jobType} simulated (no SP-API credentials)`,
+    };
+  }
+
+  // TODO: Implement actual SP-API calls
+  // For now, return success with simulation flag
+  switch (jobType) {
+    case 'SYNC_AMAZON_OFFER':
+      // Would call SP-API to get current offer data
+      return {
+        success: true,
+        simulated: true,
+        message: 'Offer sync not yet implemented',
+      };
+
+    case 'SYNC_AMAZON_SALES':
+      // Would call SP-API to get sales data
+      return {
+        success: true,
+        simulated: true,
+        message: 'Sales sync not yet implemented',
+      };
+
+    case 'SYNC_AMAZON_CATALOG':
+      // Would call SP-API to get catalog data
+      return {
+        success: true,
+        simulated: true,
+        message: 'Catalog sync not yet implemented',
+      };
+
+    default:
+      throw new Error(`Unknown Amazon sync type: ${jobType}`);
+  }
 }
 
 /**

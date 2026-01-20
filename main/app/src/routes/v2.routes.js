@@ -997,6 +997,370 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
+  // ASIN ENTITIES (Slice C)
+  // ============================================================================
+
+  /**
+   * GET /api/v2/asins
+   * List ASIN entities (research pool)
+   */
+  fastify.get('/api/v2/asins', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const { tracked_only = 'false', limit = '50', offset = '0' } = request.query;
+
+    let whereClause = '';
+    if (tracked_only === 'true') {
+      whereClause = 'WHERE ae.is_tracked = true';
+    }
+
+    const result = await dbQuery(`
+      SELECT ae.*, m.name as marketplace_name
+      FROM asin_entities ae
+      JOIN marketplaces m ON m.id = ae.marketplace_id
+      ${whereClause}
+      ORDER BY ae.updated_at DESC
+      LIMIT $1 OFFSET $2
+    `, [parseInt(limit, 10), parseInt(offset, 10)]);
+
+    return { items: result.rows };
+  });
+
+  /**
+   * GET /api/v2/asins/:id
+   * Get ASIN entity by ID (asin_entity_id)
+   */
+  fastify.get('/api/v2/asins/:id', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    const result = await dbQuery(`
+      SELECT ae.*, m.name as marketplace_name, m.vat_rate
+      FROM asin_entities ae
+      JOIN marketplaces m ON m.id = ae.marketplace_id
+      WHERE ae.id = $1
+    `, [asinEntityId]);
+
+    if (result.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    // Get latest features
+    const featureStoreService = await import('../services/feature-store.service.js');
+    const features = await featureStoreService.getLatestFeatures('ASIN', asinEntityId);
+
+    // Get latest Keepa snapshot
+    const keepaService = await import('../services/keepa.service.js');
+    const keepaResult = await dbQuery(`
+      SELECT id, parsed_json, captured_at
+      FROM keepa_snapshots
+      WHERE asin_entity_id = $1
+      ORDER BY captured_at DESC
+      LIMIT 1
+    `, [asinEntityId]);
+
+    return {
+      ...result.rows[0],
+      features: features?.features_json || null,
+      features_computed_at: features?.computed_at || null,
+      latest_keepa: keepaResult.rows[0] || null,
+    };
+  });
+
+  /**
+   * POST /api/v2/asins/analyze
+   * Analyze an ASIN (create entity and trigger sync)
+   * Body: { asin, marketplace_id? }
+   */
+  fastify.post('/api/v2/asins/analyze', async (request, reply) => {
+    const { asin, marketplace_id = 1 } = request.body;
+
+    if (!asin) {
+      return reply.status(400).send({ error: 'asin is required' });
+    }
+
+    const sanitizedAsin = asin.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+
+    try {
+      const keepaService = await import('../services/keepa.service.js');
+      const { query: dbQuery } = await import('../database/connection.js');
+
+      // Get or create ASIN entity
+      const asinEntity = await keepaService.getOrCreateAsinEntity(sanitizedAsin, marketplace_id);
+
+      // Create Keepa sync job
+      const jobResult = await dbQuery(`
+        INSERT INTO jobs (job_type, scope_type, asin_entity_id, input_json, created_by)
+        VALUES ('SYNC_KEEPA_ASIN', 'ASIN', $1, $2, 'user')
+        RETURNING *
+      `, [asinEntity.id, JSON.stringify({ asin: sanitizedAsin, marketplace_id, asin_entity_id: asinEntity.id })]);
+
+      return reply.status(201).send({
+        asin_entity_id: asinEntity.id,
+        asin: sanitizedAsin,
+        sync_job_id: jobResult.rows[0].id,
+        message: 'ASIN analysis started',
+      });
+    } catch (error) {
+      return reply.status(500).send({ error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/asins/:id/track
+   * Add ASIN to research pool (tracked list)
+   */
+  fastify.post('/api/v2/asins/:id/track', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    const result = await dbQuery(`
+      UPDATE asin_entities
+      SET is_tracked = true, tracked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING *
+    `, [asinEntityId]);
+
+    if (result.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    return result.rows[0];
+  });
+
+  /**
+   * DELETE /api/v2/asins/:id/track
+   * Remove ASIN from research pool
+   */
+  fastify.delete('/api/v2/asins/:id/track', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    const result = await dbQuery(`
+      UPDATE asin_entities
+      SET is_tracked = false, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING *
+    `, [asinEntityId]);
+
+    if (result.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    return { success: true };
+  });
+
+  // ============================================================================
+  // KEEPA DATA (Slice C)
+  // ============================================================================
+
+  /**
+   * GET /api/v2/asins/:id/keepa
+   * Get Keepa data for an ASIN entity
+   */
+  fastify.get('/api/v2/asins/:id/keepa', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    const result = await dbQuery(`
+      SELECT ks.id, ks.asin, ks.parsed_json, ks.captured_at
+      FROM keepa_snapshots ks
+      WHERE ks.asin_entity_id = $1
+      ORDER BY ks.captured_at DESC
+      LIMIT 1
+    `, [asinEntityId]);
+
+    if (result.rows.length === 0) {
+      return { asin_entity_id: asinEntityId, keepa: null, message: 'No Keepa data available' };
+    }
+
+    return {
+      asin_entity_id: asinEntityId,
+      snapshot_id: result.rows[0].id,
+      asin: result.rows[0].asin,
+      data: result.rows[0].parsed_json,
+      captured_at: result.rows[0].captured_at,
+    };
+  });
+
+  /**
+   * POST /api/v2/asins/:id/keepa/refresh
+   * Trigger Keepa data refresh for an ASIN entity
+   */
+  fastify.post('/api/v2/asins/:id/keepa/refresh', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    // Get ASIN entity
+    const entityResult = await dbQuery(
+      'SELECT asin, marketplace_id FROM asin_entities WHERE id = $1',
+      [asinEntityId]
+    );
+
+    if (entityResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    const entity = entityResult.rows[0];
+
+    // Create sync job
+    const jobResult = await dbQuery(`
+      INSERT INTO jobs (job_type, scope_type, asin_entity_id, input_json, created_by)
+      VALUES ('SYNC_KEEPA_ASIN', 'ASIN', $1, $2, 'user')
+      RETURNING *
+    `, [asinEntityId, JSON.stringify({
+      asin: entity.asin,
+      marketplace_id: entity.marketplace_id,
+      asin_entity_id: asinEntityId,
+    })]);
+
+    return { job_id: jobResult.rows[0].id, status: 'PENDING' };
+  });
+
+  /**
+   * GET /api/v2/listings/:listingId/keepa
+   * Get Keepa data for a listing (via its ASIN)
+   */
+  fastify.get('/api/v2/listings/:listingId/keepa', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const listingId = parseInt(request.params.listingId, 10);
+
+    // Get listing ASIN
+    const listingResult = await dbQuery(
+      'SELECT asin, marketplace_id FROM listings WHERE id = $1',
+      [listingId]
+    );
+
+    if (listingResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'Listing not found' });
+    }
+
+    const listing = listingResult.rows[0];
+
+    if (!listing.asin) {
+      return { listing_id: listingId, keepa: null, message: 'Listing has no ASIN' };
+    }
+
+    // Get latest Keepa snapshot
+    const result = await dbQuery(`
+      SELECT ks.id, ks.asin, ks.parsed_json, ks.captured_at
+      FROM keepa_snapshots ks
+      WHERE ks.asin = $1 AND ks.marketplace_id = $2
+      ORDER BY ks.captured_at DESC
+      LIMIT 1
+    `, [listing.asin, listing.marketplace_id]);
+
+    if (result.rows.length === 0) {
+      return { listing_id: listingId, asin: listing.asin, keepa: null, message: 'No Keepa data available' };
+    }
+
+    return {
+      listing_id: listingId,
+      asin: listing.asin,
+      snapshot_id: result.rows[0].id,
+      data: result.rows[0].parsed_json,
+      captured_at: result.rows[0].captured_at,
+    };
+  });
+
+  // ============================================================================
+  // FEATURE STORE (Slice C)
+  // ============================================================================
+
+  /**
+   * GET /api/v2/listings/:listingId/features
+   * Get computed features for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/features', async (request, reply) => {
+    const listingId = parseInt(request.params.listingId, 10);
+    const featureStoreService = await import('../services/feature-store.service.js');
+
+    const features = await featureStoreService.getLatestFeatures('LISTING', listingId);
+
+    if (!features) {
+      return { listing_id: listingId, features: null, message: 'No features computed yet' };
+    }
+
+    return {
+      listing_id: listingId,
+      feature_store_id: features.id,
+      feature_version: features.feature_version,
+      features: features.features_json,
+      computed_at: features.computed_at,
+    };
+  });
+
+  /**
+   * POST /api/v2/listings/:listingId/features/refresh
+   * Trigger feature computation for a listing
+   */
+  fastify.post('/api/v2/listings/:listingId/features/refresh', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const listingId = parseInt(request.params.listingId, 10);
+
+    // Verify listing exists
+    const listingResult = await dbQuery('SELECT id FROM listings WHERE id = $1', [listingId]);
+    if (listingResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'Listing not found' });
+    }
+
+    // Create feature computation job
+    const jobResult = await dbQuery(`
+      INSERT INTO jobs (job_type, scope_type, listing_id, created_by)
+      VALUES ('COMPUTE_FEATURES_LISTING', 'LISTING', $1, 'user')
+      RETURNING *
+    `, [listingId]);
+
+    return { job_id: jobResult.rows[0].id, status: 'PENDING' };
+  });
+
+  /**
+   * GET /api/v2/asins/:id/features
+   * Get computed features for an ASIN entity
+   */
+  fastify.get('/api/v2/asins/:id/features', async (request, reply) => {
+    const asinEntityId = parseInt(request.params.id, 10);
+    const featureStoreService = await import('../services/feature-store.service.js');
+
+    const features = await featureStoreService.getLatestFeatures('ASIN', asinEntityId);
+
+    if (!features) {
+      return { asin_entity_id: asinEntityId, features: null, message: 'No features computed yet' };
+    }
+
+    return {
+      asin_entity_id: asinEntityId,
+      feature_store_id: features.id,
+      feature_version: features.feature_version,
+      features: features.features_json,
+      computed_at: features.computed_at,
+    };
+  });
+
+  /**
+   * POST /api/v2/asins/:id/features/refresh
+   * Trigger feature computation for an ASIN entity
+   */
+  fastify.post('/api/v2/asins/:id/features/refresh', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    // Verify entity exists
+    const entityResult = await dbQuery('SELECT id FROM asin_entities WHERE id = $1', [asinEntityId]);
+    if (entityResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    // Create feature computation job
+    const jobResult = await dbQuery(`
+      INSERT INTO jobs (job_type, scope_type, asin_entity_id, input_json, created_by)
+      VALUES ('COMPUTE_FEATURES_ASIN', 'ASIN', $1, $2, 'user')
+      RETURNING *
+    `, [asinEntityId, JSON.stringify({ asin_entity_id: asinEntityId })]);
+
+    return { job_id: jobResult.rows[0].id, status: 'PENDING' };
+  });
+
+  // ============================================================================
   // HEALTH CHECK
   // ============================================================================
 
