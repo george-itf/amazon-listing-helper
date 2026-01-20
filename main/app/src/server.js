@@ -39,6 +39,26 @@ await fastify.register(cors, { origin: true });
 await registerV2Routes(fastify);
 console.log('API v2 routes registered');
 
+// ============================================================================
+// V1 API DEPRECATION (Phase 6)
+// Per DEPRECATION_PLAN.md - v1 routes are frozen and deprecated
+// Sunset date: July 2026 (6 months from now)
+// ============================================================================
+const V1_SUNSET_DATE = 'Tue, 21 Jul 2026 00:00:00 GMT';
+
+fastify.addHook('onSend', async (request, reply, payload) => {
+  // Add deprecation headers to all /api/v1/* routes
+  if (request.url.startsWith('/api/v1')) {
+    reply.header('Deprecation', 'true');
+    reply.header('Sunset', V1_SUNSET_DATE);
+    reply.header('Link', '</api/v2>; rel="successor-version"');
+    reply.header('X-API-Warning', 'This endpoint is deprecated. Please migrate to /api/v2');
+  }
+  return payload;
+});
+
+console.log('API v1 deprecation headers enabled (sunset: ' + V1_SUNSET_DATE + ')');
+
 const DATA_DIR = '/opt/alh/data';
 const CREDS_FILE = `${DATA_DIR}/credentials.json`;
 const LISTINGS_FILE = `${DATA_DIR}/listings.json`;

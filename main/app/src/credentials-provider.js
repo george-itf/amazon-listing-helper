@@ -114,11 +114,72 @@ export function getCredentialsStatus() {
   };
 }
 
+/**
+ * Get SP-API client configuration object
+ * Use this to create amazon-sp-api SellingPartner instances.
+ *
+ * @param {string} [overrideMarketplaceId] - Override default marketplace
+ * @returns {Object} Configuration for SellingPartner constructor
+ * @example
+ *   import SellingPartnerAPI from 'amazon-sp-api';
+ *   const config = getSpApiClientConfig();
+ *   const spClient = new SellingPartnerAPI(config);
+ */
+export function getSpApiClientConfig(overrideMarketplaceId = null) {
+  const creds = getSpApiCredentials();
+  const marketplaceId = overrideMarketplaceId || creds.marketplaceId;
+
+  return {
+    region: 'eu',  // UK marketplace is in EU region
+    refresh_token: creds.refreshToken,
+    credentials: {
+      SELLING_PARTNER_APP_CLIENT_ID: creds.clientId,
+      SELLING_PARTNER_APP_CLIENT_SECRET: creds.clientSecret,
+    },
+    options: {
+      auto_request_tokens: true,
+      auto_request_throttled: true,
+    },
+    // Seller info for reference
+    sellerId: creds.sellerId,
+    marketplaceId: marketplaceId,
+  };
+}
+
+/**
+ * Get default marketplace ID
+ * @returns {string} Amazon marketplace ID (default: UK)
+ */
+export function getDefaultMarketplaceId() {
+  try {
+    const creds = getSpApiCredentials();
+    return creds.marketplaceId;
+  } catch {
+    return 'A1F83G8C2ARO7P'; // UK fallback
+  }
+}
+
+/**
+ * Get seller ID
+ * @returns {string|null} Amazon seller ID
+ */
+export function getSellerId() {
+  try {
+    const creds = getSpApiCredentials();
+    return creds.sellerId || null;
+  } catch {
+    return null;
+  }
+}
+
 export default {
   getSpApiCredentials,
+  getSpApiClientConfig,
   getKeepaApiKey,
   hasSpApiCredentials,
   hasKeepaCredentials,
   getCredentialsStatus,
+  getDefaultMarketplaceId,
+  getSellerId,
   clearCredentialsCache,
 };

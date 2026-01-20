@@ -26,6 +26,8 @@ import { loadGuardrails, validatePriceChange } from './guardrails.service.js';
  * Generate recommendations for a listing
  * Implements GENERATE_RECOMMENDATIONS_LISTING job
  *
+ * Uses advisory lock to prevent concurrent generation for same listing (Addendum B)
+ *
  * @param {number} listingId
  * @param {number} [jobId] - Optional job ID for tracking
  * @returns {Promise<Object>}
@@ -33,6 +35,33 @@ import { loadGuardrails, validatePriceChange } from './guardrails.service.js';
 export async function generateListingRecommendations(listingId, jobId = null) {
   console.log(`[Recommendations] Generating for listing ${listingId}`);
 
+  // Acquire advisory lock to prevent concurrent recommendation generation
+  // Lock key: 100000000 + listingId (arbitrary namespace for listing recommendations)
+  const lockKey = 100000000 + listingId;
+  const lockResult = await query('SELECT pg_try_advisory_lock($1) as acquired', [lockKey]);
+
+  if (!lockResult.rows[0].acquired) {
+    console.log(`[Recommendations] Skipping listing ${listingId} - concurrent generation in progress`);
+    return {
+      listing_id: listingId,
+      skipped: true,
+      reason: 'Concurrent generation in progress',
+    };
+  }
+
+  try {
+    return await doGenerateListingRecommendations(listingId, jobId);
+  } finally {
+    // Always release the lock
+    await query('SELECT pg_advisory_unlock($1)', [lockKey]);
+  }
+}
+
+/**
+ * Internal implementation of listing recommendation generation
+ * @private
+ */
+async function doGenerateListingRecommendations(listingId, jobId) {
   // Get latest features
   const featuresRow = await featureStoreService.getLatestFeatures('LISTING', listingId);
 
@@ -105,6 +134,8 @@ export async function generateListingRecommendations(listingId, jobId = null) {
  * Generate recommendations for an ASIN entity
  * Implements GENERATE_RECOMMENDATIONS_ASIN job
  *
+ * Uses advisory lock to prevent concurrent generation (Addendum B)
+ *
  * @param {number} asinEntityId
  * @param {number} [jobId]
  * @returns {Promise<Object>}
@@ -112,6 +143,33 @@ export async function generateListingRecommendations(listingId, jobId = null) {
 export async function generateAsinRecommendations(asinEntityId, jobId = null) {
   console.log(`[Recommendations] Generating for ASIN entity ${asinEntityId}`);
 
+  // Acquire advisory lock to prevent concurrent recommendation generation
+  // Lock key: 200000000 + asinEntityId (arbitrary namespace for ASIN recommendations)
+  const lockKey = 200000000 + asinEntityId;
+  const lockResult = await query('SELECT pg_try_advisory_lock($1) as acquired', [lockKey]);
+
+  if (!lockResult.rows[0].acquired) {
+    console.log(`[Recommendations] Skipping ASIN ${asinEntityId} - concurrent generation in progress`);
+    return {
+      asin_entity_id: asinEntityId,
+      skipped: true,
+      reason: 'Concurrent generation in progress',
+    };
+  }
+
+  try {
+    return await doGenerateAsinRecommendations(asinEntityId, jobId);
+  } finally {
+    // Always release the lock
+    await query('SELECT pg_advisory_unlock($1)', [lockKey]);
+  }
+}
+
+/**
+ * Internal implementation of ASIN recommendation generation
+ * @private
+ */
+async function doGenerateAsinRecommendations(asinEntityId, jobId) {
   // Get latest features
   const featuresRow = await featureStoreService.getLatestFeatures('ASIN', asinEntityId);
   const features = featuresRow?.features_json;

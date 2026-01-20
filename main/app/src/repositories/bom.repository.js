@@ -188,6 +188,11 @@ export async function updateLines(bomId, lines) {
     throw new Error(`BOM not found: ${bomId}`);
   }
 
+  // Enforce BOM immutability - can only update from the ACTIVE version (Addendum C)
+  if (!existingBom.is_active) {
+    throw new Error(`Cannot update inactive BOM (version ${existingBom.version}). Only the active BOM can be updated.`);
+  }
+
   // Create new version with updated lines
   return createVersion(existingBom.listing_id, {
     lines,

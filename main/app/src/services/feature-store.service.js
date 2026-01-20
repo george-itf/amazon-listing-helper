@@ -313,17 +313,31 @@ export async function computeAsinFeatures(asinEntityId) {
 
 /**
  * Save features to feature store
+ * Implements duplicate suppression by comparing feature hash (Addendum D)
+ *
  * @param {string} entityType - 'LISTING' or 'ASIN'
  * @param {number} entityId
  * @param {Object} features
  * @returns {Promise<Object>}
  */
 export async function saveFeatures(entityType, entityId, features) {
+  const newFeaturesJson = JSON.stringify(features);
+
+  // Check for existing features to avoid duplicates (Addendum D)
+  const existing = await getLatestFeatures(entityType, entityId);
+  if (existing) {
+    const existingFeaturesJson = JSON.stringify(existing.features_json);
+    if (existingFeaturesJson === newFeaturesJson) {
+      console.log(`[FeatureStore] Skipping duplicate features for ${entityType} ${entityId}`);
+      return existing; // Return existing row, no new insert
+    }
+  }
+
   const result = await query(`
     INSERT INTO feature_store (entity_type, entity_id, feature_version, features_json, computed_at)
     VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
     RETURNING *
-  `, [entityType, entityId, FEATURE_VERSION, JSON.stringify(features)]);
+  `, [entityType, entityId, FEATURE_VERSION, newFeaturesJson]);
 
   return result.rows[0];
 }

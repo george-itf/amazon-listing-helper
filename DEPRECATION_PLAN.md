@@ -1,8 +1,26 @@
 # DEPRECATION PLAN
 
 **Date:** 2026-01-20
-**Updated:** 2026-01-20 (Phase 0 revision per gating requirements)
+**Updated:** 2026-01-20 (Phase 6 - v1 API freeze and deprecation headers enabled)
 **Purpose:** Step-by-step plan to deprecate legacy systems and transition to SPEC.md architecture
+
+---
+
+## 0. V1 API Deprecation Notice
+
+> **⚠️ NOTICE:** All `/api/v1/*` endpoints are now FROZEN and DEPRECATED.
+>
+> **Sunset Date:** July 21, 2026 (6 months from freeze date)
+>
+> All v1 responses include the following headers:
+> - `Deprecation: true`
+> - `Sunset: Tue, 21 Jul 2026 00:00:00 GMT`
+> - `Link: </api/v2>; rel="successor-version"`
+> - `X-API-Warning: This endpoint is deprecated. Please migrate to /api/v2`
+>
+> **No new features will be added to v1 endpoints.**
+>
+> Clients should migrate to `/api/v2/*` endpoints per the mapping in §2 below.
 
 ---
 

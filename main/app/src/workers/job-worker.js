@@ -245,7 +245,7 @@ async function updateListingStock(listingId, newQuantity) {
 }
 
 /**
- * Record price change success event
+ * Record price change success event and queue feature recompute
  */
 async function recordPriceChangeSuccess(listingId, jobId, input) {
   await query(`
@@ -258,6 +258,9 @@ async function recordPriceChangeSuccess(listingId, jobId, input) {
     JSON.stringify({ price_inc_vat: input.price_inc_vat }),
     input.reason,
   ]);
+
+  // Queue feature recompute after price change (Addendum E)
+  await queueFeatureRecompute(listingId, 'price_change');
 }
 
 /**
@@ -277,7 +280,7 @@ async function recordPriceChangeFailure(listingId, jobId, input, errorMessage) {
 }
 
 /**
- * Record stock change success event
+ * Record stock change success event and queue feature recompute
  */
 async function recordStockChangeSuccess(listingId, jobId, input) {
   await query(`
@@ -290,6 +293,9 @@ async function recordStockChangeSuccess(listingId, jobId, input) {
     JSON.stringify({ available_quantity: input.available_quantity }),
     input.reason,
   ]);
+
+  // Queue feature recompute after stock change (Addendum E)
+  await queueFeatureRecompute(listingId, 'stock_change');
 }
 
 /**
@@ -306,6 +312,45 @@ async function recordStockChangeFailure(listingId, jobId, input, errorMessage) {
     JSON.stringify({ available_quantity: input.available_quantity, error: errorMessage }),
     input.reason,
   ]);
+}
+
+/**
+ * Queue feature recompute job after listing change
+ * Ensures features are fresh after price/stock updates (Addendum E)
+ * @param {number} listingId
+ * @param {string} reason - Trigger reason
+ */
+async function queueFeatureRecompute(listingId, reason) {
+  try {
+    // Check if there's already a pending feature compute job for this listing
+    const existing = await query(`
+      SELECT id FROM jobs
+      WHERE listing_id = $1
+        AND job_type = 'COMPUTE_FEATURES_LISTING'
+        AND status = 'PENDING'
+      LIMIT 1
+    `, [listingId]);
+
+    if (existing.rows.length > 0) {
+      console.log(`[Worker] Feature recompute already pending for listing ${listingId}`);
+      return;
+    }
+
+    // Create low-priority feature recompute job
+    await query(`
+      INSERT INTO jobs (
+        job_type, scope_type, listing_id, status, priority, input_json, created_by
+      ) VALUES ('COMPUTE_FEATURES_LISTING', 'LISTING', $1, 'PENDING', 3, $2, 'worker')
+    `, [
+      listingId,
+      JSON.stringify({ trigger: reason, triggered_at: new Date().toISOString() }),
+    ]);
+
+    console.log(`[Worker] Queued feature recompute for listing ${listingId} (trigger: ${reason})`);
+  } catch (error) {
+    // Don't fail the main job if feature recompute queuing fails
+    console.error(`[Worker] Failed to queue feature recompute for listing ${listingId}:`, error.message);
+  }
 }
 
 /**

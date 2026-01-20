@@ -11,6 +11,7 @@ import * as supplierRepo from '../repositories/supplier.repository.js';
 import * as componentRepo from '../repositories/component.repository.js';
 import * as bomRepo from '../repositories/bom.repository.js';
 import * as economicsService from '../services/economics.service.js';
+import * as listingService from '../services/listing.service.js';
 
 /**
  * Register all v2 routes
@@ -256,30 +257,6 @@ export async function registerV2Routes(fastify) {
     try {
       const economics = await economicsService.calculateEconomics(listingId, request.body);
       return economics;
-    } catch (error) {
-      if (error.message.includes('not found')) {
-        return reply.status(404).send({ error: error.message });
-      }
-      return reply.status(500).send({ error: error.message });
-    }
-  });
-
-  /**
-   * POST /api/v2/listings/:listingId/price/preview
-   * Preview economics impact of a price change
-   * Body: { price_inc_vat }
-   */
-  fastify.post('/api/v2/listings/:listingId/price/preview', async (request, reply) => {
-    const listingId = parseInt(request.params.listingId, 10);
-    const { price_inc_vat } = request.body;
-
-    if (price_inc_vat === undefined || price_inc_vat === null) {
-      return reply.status(400).send({ error: 'price_inc_vat is required' });
-    }
-
-    try {
-      const preview = await economicsService.previewPriceChange(listingId, parseFloat(price_inc_vat));
-      return preview;
     } catch (error) {
       if (error.message.includes('not found')) {
         return reply.status(404).send({ error: error.message });
@@ -545,22 +522,14 @@ export async function registerV2Routes(fastify) {
     }
 
     try {
-      const { query: dbQuery, transaction } = await import('../database/connection.js');
       const { validatePriceChange, calculateDaysOfCover } = await import('../services/guardrails.service.js');
-      const jobRepo = await import('../repositories/job.repository.js');
-      const listingEventRepo = await import('../repositories/listing-event.repository.js');
 
-      // Get current listing data
-      const listingResult = await dbQuery(
-        'SELECT id, price_inc_vat, available_quantity FROM listings WHERE id = $1',
-        [listingId]
-      );
-
-      if (listingResult.rows.length === 0) {
+      // Get current listing data via service
+      const listing = await listingService.getListingById(listingId);
+      if (!listing) {
         return reply.status(404).send({ error: `Listing not found: ${listingId}` });
       }
 
-      const listing = listingResult.rows[0];
       const currentPriceIncVat = parseFloat(listing.price_inc_vat) || 0;
 
       // Calculate economics for guardrails
@@ -568,17 +537,12 @@ export async function registerV2Routes(fastify) {
         price_inc_vat: newPriceIncVat,
       });
 
-      // Get sales data for days of cover
-      const salesResult = await dbQuery(`
-        SELECT COALESCE(SUM(units), 0) as total_units
-        FROM listing_sales_daily
-        WHERE listing_id = $1
-          AND date >= CURRENT_DATE - INTERVAL '30 days'
-      `, [listingId]);
-
-      const totalUnits30d = parseInt(salesResult.rows[0]?.total_units || 0, 10);
-      const salesVelocity = totalUnits30d / 30;
-      const daysOfCover = calculateDaysOfCover(listing.available_quantity || 0, salesVelocity);
+      // Get days of cover via service
+      const inventoryData = await listingService.getDaysOfCover(listingId);
+      const daysOfCover = calculateDaysOfCover(
+        listing.available_quantity || 0,
+        inventoryData.sales_velocity_30d
+      );
 
       // RE-COMPUTE guardrails (never trust UI)
       const guardrailsResult = await validatePriceChange({
@@ -599,60 +563,30 @@ export async function registerV2Routes(fastify) {
         });
       }
 
-      // Create job and event atomically
-      const result = await transaction(async (client) => {
-        // Create listing event (DRAFTED)
-        const eventResult = await client.query(`
-          INSERT INTO listing_events (
-            listing_id, event_type, before_json, after_json, reason, correlation_id, created_by
-          ) VALUES ($1, 'PRICE_CHANGE_DRAFTED', $2, $3, $4, $5, 'user')
-          RETURNING *
-        `, [
-          listingId,
-          JSON.stringify({ price_inc_vat: currentPriceIncVat }),
-          JSON.stringify({ price_inc_vat: newPriceIncVat }),
+      // Create job and event atomically via service (with deduplication)
+      const result = await listingService.createPublishJob({
+        listingId,
+        jobType: 'PUBLISH_PRICE_CHANGE',
+        inputJson: {
+          price_inc_vat: newPriceIncVat,
+          previous_price_inc_vat: currentPriceIncVat,
           reason,
-          correlation_id || null,
-        ]);
-
-        const listingEvent = eventResult.rows[0];
-
-        // Create publish job
-        const jobResult = await client.query(`
-          INSERT INTO jobs (
-            job_type, scope_type, listing_id, status, input_json, created_by
-          ) VALUES ('PUBLISH_PRICE_CHANGE', 'LISTING', $1, 'PENDING', $2, 'user')
-          RETURNING *
-        `, [
-          listingId,
-          JSON.stringify({
-            price_inc_vat: newPriceIncVat,
-            previous_price_inc_vat: currentPriceIncVat,
-            reason,
-            correlation_id: correlation_id || null,
-            listing_event_id: listingEvent.id,
-          }),
-        ]);
-
-        const job = jobResult.rows[0];
-
-        // Update event with job_id
-        await client.query(
-          'UPDATE listing_events SET job_id = $1 WHERE id = $2',
-          [job.id, listingEvent.id]
-        );
-
-        return {
-          job_id: job.id,
-          status: job.status,
-          listing_id: listingId,
-          listing_event_id: listingEvent.id,
-        };
+          correlation_id: correlation_id || null,
+        },
+        eventType: 'PRICE_CHANGE_DRAFTED',
+        beforeJson: { price_inc_vat: currentPriceIncVat },
+        afterJson: { price_inc_vat: newPriceIncVat },
+        reason,
+        correlationId: correlation_id,
       });
 
       return reply.status(201).send(result);
     } catch (error) {
       console.error('Price publish error:', error);
+      // Handle duplicate job error specifically
+      if (error.message.includes('Duplicate job')) {
+        return reply.status(409).send({ error: error.message });
+      }
       return reply.status(500).send({ error: error.message });
     }
   });
@@ -773,73 +707,36 @@ export async function registerV2Routes(fastify) {
     }
 
     try {
-      const { query: dbQuery, transaction } = await import('../database/connection.js');
-
-      // Get current listing
-      const listingResult = await dbQuery(
-        'SELECT id, available_quantity FROM listings WHERE id = $1',
-        [listingId]
-      );
-
-      if (listingResult.rows.length === 0) {
+      // Get current listing via service
+      const listing = await listingService.getListingById(listingId);
+      if (!listing) {
         return reply.status(404).send({ error: `Listing not found: ${listingId}` });
       }
 
-      const listing = listingResult.rows[0];
       const currentQuantity = listing.available_quantity || 0;
 
-      // Create job and event atomically
-      const result = await transaction(async (client) => {
-        // Create listing event (DRAFTED)
-        const eventResult = await client.query(`
-          INSERT INTO listing_events (
-            listing_id, event_type, before_json, after_json, reason, created_by
-          ) VALUES ($1, 'STOCK_CHANGE_DRAFTED', $2, $3, $4, 'user')
-          RETURNING *
-        `, [
-          listingId,
-          JSON.stringify({ available_quantity: currentQuantity }),
-          JSON.stringify({ available_quantity: newQuantity }),
+      // Create job and event atomically via service (with deduplication)
+      const result = await listingService.createPublishJob({
+        listingId,
+        jobType: 'PUBLISH_STOCK_CHANGE',
+        inputJson: {
+          available_quantity: newQuantity,
+          previous_quantity: currentQuantity,
           reason,
-        ]);
-
-        const listingEvent = eventResult.rows[0];
-
-        // Create publish job
-        const jobResult = await client.query(`
-          INSERT INTO jobs (
-            job_type, scope_type, listing_id, status, input_json, created_by
-          ) VALUES ('PUBLISH_STOCK_CHANGE', 'LISTING', $1, 'PENDING', $2, 'user')
-          RETURNING *
-        `, [
-          listingId,
-          JSON.stringify({
-            available_quantity: newQuantity,
-            previous_quantity: currentQuantity,
-            reason,
-            listing_event_id: listingEvent.id,
-          }),
-        ]);
-
-        const job = jobResult.rows[0];
-
-        // Update event with job_id
-        await client.query(
-          'UPDATE listing_events SET job_id = $1 WHERE id = $2',
-          [job.id, listingEvent.id]
-        );
-
-        return {
-          job_id: job.id,
-          status: job.status,
-          listing_id: listingId,
-          listing_event_id: listingEvent.id,
-        };
+        },
+        eventType: 'STOCK_CHANGE_DRAFTED',
+        beforeJson: { available_quantity: currentQuantity },
+        afterJson: { available_quantity: newQuantity },
+        reason,
       });
 
       return reply.status(201).send(result);
     } catch (error) {
       console.error('Stock publish error:', error);
+      // Handle duplicate job error specifically
+      if (error.message.includes('Duplicate job')) {
+        return reply.status(409).send({ error: error.message });
+      }
       return reply.status(500).send({ error: error.message });
     }
   });

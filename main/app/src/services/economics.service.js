@@ -18,7 +18,8 @@ import { query } from '../database/connection.js';
  * @returns {number}
  */
 function roundMoney(value) {
-  return Math.round(value * 100) / 100;
+  const result = Math.round(value * 100) / 100;
+  return result === 0 ? 0 : result;  // Normalize -0 to 0
 }
 
 /**
