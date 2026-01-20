@@ -1229,6 +1229,171 @@ async function removeComponentFromBOM(componentId) {
   }
 }
 
+// ============================================
+// ECONOMICS PANEL (v2 API) - DATA_CONTRACTS.md compliant
+// ============================================
+
+/**
+ * Load economics data for a listing using the v2 API
+ * Returns economics DTO per DATA_CONTRACTS.md §4
+ */
+async function loadEconomicsV2(listingId) {
+  try {
+    const res = await fetch(`/api/v2/listings/${listingId}/economics`);
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to load economics');
+    }
+    return await res.json();
+  } catch (e) {
+    console.error('Economics load error:', e);
+    return null;
+  }
+}
+
+/**
+ * Render economics panel HTML
+ * @param {Object} econ - Economics DTO from v2 API
+ * @returns {string} HTML string
+ */
+function renderEconomicsPanel(econ) {
+  if (!econ || econ.error) {
+    return `<div class="p-4 bg-red-50 text-red-600 rounded">Unable to load economics data</div>`;
+  }
+
+  const profitColor = econ.profit_ex_vat >= 0 ? 'text-green-600' : 'text-red-600';
+  const marginPct = (econ.margin * 100).toFixed(1);
+  const vatPct = (econ.vat_rate * 100).toFixed(0);
+
+  return `
+    <div class="bg-white border rounded-lg p-4 mb-4">
+      <h3 class="font-semibold text-lg mb-3 flex items-center">
+        <span class="mr-2">📊</span> Economics (VAT ${vatPct}%)
+      </h3>
+
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div class="bg-gray-50 p-3 rounded">
+          <p class="text-xs text-gray-500">Price (inc VAT)</p>
+          <p class="font-bold text-lg">£${safeToFixed(econ.price_inc_vat)}</p>
+        </div>
+        <div class="bg-gray-50 p-3 rounded">
+          <p class="text-xs text-gray-500">Price (ex VAT)</p>
+          <p class="font-bold text-lg">£${safeToFixed(econ.price_ex_vat)}</p>
+        </div>
+        <div class="bg-${econ.profit_ex_vat >= 0 ? 'green' : 'red'}-50 p-3 rounded">
+          <p class="text-xs text-gray-500">Profit (ex VAT)</p>
+          <p class="font-bold text-lg ${profitColor}">£${safeToFixed(econ.profit_ex_vat)}</p>
+        </div>
+        <div class="bg-${econ.margin >= 0.15 ? 'green' : econ.margin >= 0 ? 'yellow' : 'red'}-50 p-3 rounded">
+          <p class="text-xs text-gray-500">Margin</p>
+          <p class="font-bold text-lg">${marginPct}%</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
+        <div class="bg-gray-50 p-2 rounded text-center">
+          <p class="text-xs text-gray-500">BOM Cost</p>
+          <p class="font-semibold">£${safeToFixed(econ.bom_cost_ex_vat)}</p>
+        </div>
+        <div class="bg-gray-50 p-2 rounded text-center">
+          <p class="text-xs text-gray-500">Shipping</p>
+          <p class="font-semibold">£${safeToFixed(econ.shipping_cost_ex_vat)}</p>
+        </div>
+        <div class="bg-gray-50 p-2 rounded text-center">
+          <p class="text-xs text-gray-500">Packaging</p>
+          <p class="font-semibold">£${safeToFixed(econ.packaging_cost_ex_vat)}</p>
+        </div>
+        <div class="bg-gray-50 p-2 rounded text-center">
+          <p class="text-xs text-gray-500">Amazon Fees</p>
+          <p class="font-semibold">£${safeToFixed(econ.amazon_fees_ex_vat)}</p>
+        </div>
+        <div class="bg-gray-100 p-2 rounded text-center">
+          <p class="text-xs text-gray-500">Total Cost</p>
+          <p class="font-semibold">£${safeToFixed(econ.total_cost_ex_vat)}</p>
+        </div>
+      </div>
+
+      <div class="mt-3 pt-3 border-t flex justify-between text-sm text-gray-600">
+        <span>Break-even: £${safeToFixed(econ.break_even_price_inc_vat)} inc VAT</span>
+        <span>BOM v${econ.bom_version || '-'}</span>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Preview price change economics
+ * @param {number} listingId
+ * @param {number} newPriceIncVat
+ */
+async function previewPriceChangeV2(listingId, newPriceIncVat) {
+  try {
+    const res = await fetch(`/api/v2/listings/${listingId}/price/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ price_inc_vat: newPriceIncVat })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Preview failed');
+    }
+    return await res.json();
+  } catch (e) {
+    console.error('Price preview error:', e);
+    return null;
+  }
+}
+
+/**
+ * Render price change preview comparison
+ * @param {Object} preview - { current, proposed, diff }
+ * @returns {string} HTML string
+ */
+function renderPricePreview(preview) {
+  if (!preview) {
+    return `<div class="p-4 bg-red-50 text-red-600 rounded">Unable to preview price change</div>`;
+  }
+
+  const { current, proposed, diff } = preview;
+  const profitChangeColor = diff.profit_ex_vat >= 0 ? 'text-green-600' : 'text-red-600';
+  const profitChangeSign = diff.profit_ex_vat >= 0 ? '+' : '';
+
+  return `
+    <div class="bg-white border rounded-lg p-4">
+      <h4 class="font-semibold mb-3">Price Change Preview</h4>
+
+      <div class="grid grid-cols-3 gap-4 text-sm">
+        <div>
+          <p class="text-xs text-gray-500 mb-1">Current</p>
+          <p class="font-semibold">£${safeToFixed(current.price_inc_vat)}</p>
+          <p class="text-gray-600">Profit: £${safeToFixed(current.profit_ex_vat)}</p>
+          <p class="text-gray-600">Margin: ${(current.margin * 100).toFixed(1)}%</p>
+        </div>
+
+        <div class="flex items-center justify-center">
+          <span class="text-2xl text-gray-400">→</span>
+        </div>
+
+        <div>
+          <p class="text-xs text-gray-500 mb-1">Proposed</p>
+          <p class="font-semibold">£${safeToFixed(proposed.price_inc_vat)}</p>
+          <p class="${profitChangeColor}">Profit: £${safeToFixed(proposed.profit_ex_vat)}</p>
+          <p class="${diff.margin >= 0 ? 'text-green-600' : 'text-red-600'}">Margin: ${(proposed.margin * 100).toFixed(1)}%</p>
+        </div>
+      </div>
+
+      <div class="mt-3 pt-3 border-t text-sm">
+        <span class="${profitChangeColor} font-semibold">
+          ${profitChangeSign}£${safeToFixed(diff.profit_ex_vat)} profit change
+        </span>
+        <span class="text-gray-500 ml-2">
+          (${profitChangeSign}${(diff.margin * 100).toFixed(1)}% margin)
+        </span>
+      </div>
+    </div>
+  `;
+}
+
 async function saveBOMData() {
   if (!currentBOMSku) return;
 

@@ -29,9 +29,14 @@ import { MODULE_TYPES, APLUS_TEMPLATES, generateAPlusContent, saveAPlusContent, 
 import { trackCompetitor, untrackCompetitor, getTrackedCompetitors, getAllTrackedCompetitors, recordCompetitorPrice, getCompetitorPriceHistory, analyzePriceTrends, calculateBuyBoxWinRate, getBulkBuyBoxAnalysis, analyzeMarketGaps, getCompetitorPositionSummary, generateCompetitiveReport } from './competitor-intelligence.js';
 import * as OrderRepository from './repositories/order.repository.js';
 import { syncOrders, getSyncStatus } from './orders-sync.js';
+import { registerV2Routes } from './routes/v2.routes.js';
 
 const fastify = Fastify({ logger: true });
 await fastify.register(cors, { origin: true });
+
+// Register v2 API routes
+await registerV2Routes(fastify);
+console.log('API v2 routes registered');
 
 const DATA_DIR = '/opt/alh/data';
 const CREDS_FILE = `${DATA_DIR}/credentials.json`;
