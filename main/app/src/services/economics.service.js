@@ -301,6 +301,14 @@ export async function calculateBatchEconomics(listingIds) {
   return results;
 }
 
+// Named exports for testing
+export {
+  roundMoney,
+  calculatePriceExVat,
+  calculateBreakEvenPriceIncVat,
+  calculateAmazonFeesExVat,
+};
+
 export default {
   calculateEconomics,
   previewPriceChange,
