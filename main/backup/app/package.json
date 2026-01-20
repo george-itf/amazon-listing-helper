@@ -1,0 +1,11 @@
+{
+  "name": "alh-api",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "fastify": "^4.25.0"
+  }
+}

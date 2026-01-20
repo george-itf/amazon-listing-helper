@@ -1,0 +1,405 @@
+{
+  "data": {
+    "B07MF2LZFV": {
+      "salesRank": 314013,
+      "buyBoxPrice": 350,
+      "newOfferCount": 1,
+      "rating": 4.4,
+      "reviewCount": 6,
+      "competitorCount": 5
+    },
+    "B00HUVZI0Y": {
+      "salesRank": 165617,
+      "buyBoxPrice": 13.99,
+      "newOfferCount": 2,
+      "rating": 4.6,
+      "reviewCount": 583,
+      "competitorCount": 10
+    },
+    "B0DB1Z6SDD": {
+      "salesRank": 237049,
+      "buyBoxPrice": 15.99,
+      "newOfferCount": 3,
+      "rating": 4.2,
+      "reviewCount": 7,
+      "competitorCount": 3
+    },
+    "B00HUVZ8TA": {
+      "salesRank": 257757,
+      "buyBoxPrice": 33.99,
+      "newOfferCount": 4,
+      "rating": 4.2,
+      "reviewCount": 40,
+      "competitorCount": 11
+    },
+    "B0759N5QCR": {
+      "salesRank": 7162,
+      "buyBoxPrice": 128.99,
+      "newOfferCount": 14,
+      "rating": 4.7,
+      "reviewCount": 184,
+      "competitorCount": 27
+    },
+    "B07PF9FJ9L": {
+      "salesRank": 28788,
+      "buyBoxPrice": 11.83,
+      "newOfferCount": 5,
+      "rating": 4.5,
+      "reviewCount": 50,
+      "competitorCount": 18
+    },
+    "B01MDPDBIX": {
+      "salesRank": 299463,
+      "buyBoxPrice": 169.99,
+      "newOfferCount": 6,
+      "rating": 4.3,
+      "reviewCount": 31,
+      "competitorCount": 14
+    },
+    "B07NQVYL3V": {
+      "salesRank": 49932,
+      "buyBoxPrice": 59.99,
+      "newOfferCount": 4,
+      "rating": 5,
+      "reviewCount": 13,
+      "competitorCount": 12
+    },
+    "B00HUVZ5JI": {
+      "salesRank": 257757,
+      "buyBoxPrice": 36.35,
+      "newOfferCount": 2,
+      "rating": 4.2,
+      "reviewCount": 40,
+      "competitorCount": 10
+    },
+    "B07N6PHKHT": {
+      "salesRank": -1,
+      "buyBoxPrice": 77.99,
+      "newOfferCount": 2,
+      "rating": -0.1,
+      "reviewCount": -1,
+      "competitorCount": 3
+    },
+    "B07PZ8G9J4": {
+      "salesRank": 255497,
+      "buyBoxPrice": 33.99,
+      "newOfferCount": 3,
+      "rating": 5,
+      "reviewCount": 1,
+      "competitorCount": 6
+    },
+    "B076X6HZ4V": {
+      "salesRank": 71498,
+      "buyBoxPrice": 229.98,
+      "newOfferCount": 10,
+      "rating": 4.4,
+      "reviewCount": 10,
+      "competitorCount": 27
+    },
+    "B0052MILZM": {
+      "salesRank": 120489,
+      "buyBoxPrice": 44,
+      "newOfferCount": 3,
+      "rating": 4.8,
+      "reviewCount": 19572,
+      "competitorCount": 34
+    },
+    "B08F9MMC67": {
+      "salesRank": 130773,
+      "buyBoxPrice": 179.99,
+      "newOfferCount": 5,
+      "rating": 4.8,
+      "reviewCount": 11,
+      "competitorCount": 9
+    },
+    "B0728DM67B": {
+      "salesRank": -1,
+      "buyBoxPrice": 109.98,
+      "newOfferCount": 10,
+      "rating": 4.6,
+      "reviewCount": 118,
+      "competitorCount": 21
+    },
+    "B09996SGYF": {
+      "salesRank": 231637,
+      "buyBoxPrice": 149.99,
+      "newOfferCount": 3,
+      "rating": 4.8,
+      "reviewCount": 7,
+      "competitorCount": 7
+    },
+    "B09998KPZP": {
+      "salesRank": 28916,
+      "buyBoxPrice": 80,
+      "newOfferCount": 6,
+      "rating": 4.6,
+      "reviewCount": 51,
+      "competitorCount": 16
+    },
+    "B0BB2W1KZQ": {
+      "salesRank": 136051,
+      "buyBoxPrice": 198.45,
+      "newOfferCount": 5,
+      "rating": 5,
+      "reviewCount": 5,
+      "competitorCount": 9
+    },
+    "B075T77K36": {
+      "salesRank": 258884,
+      "buyBoxPrice": 147.99,
+      "newOfferCount": 7,
+      "rating": 4.7,
+      "reviewCount": 1197,
+      "competitorCount": 62
+    },
+    "B072PYLD2B": {
+      "salesRank": 75158,
+      "buyBoxPrice": 216.94,
+      "newOfferCount": 5,
+      "rating": 4.3,
+      "reviewCount": 48,
+      "competitorCount": 22
+    },
+    "B099K51QX6": {
+      "salesRank": 185457,
+      "buyBoxPrice": 299,
+      "newOfferCount": 1,
+      "rating": 5,
+      "reviewCount": 3,
+      "competitorCount": 6
+    },
+    "B099KF11KL": {
+      "salesRank": 102806,
+      "buyBoxPrice": 242,
+      "newOfferCount": 1,
+      "rating": 4.8,
+      "reviewCount": 5,
+      "competitorCount": 6
+    },
+    "B0991NS87P": {
+      "salesRank": 134613,
+      "buyBoxPrice": 185,
+      "newOfferCount": 2,
+      "rating": 5,
+      "reviewCount": 5,
+      "competitorCount": 7
+    },
+    "B084ZL6MWB": {
+      "salesRank": 154693,
+      "buyBoxPrice": 95,
+      "newOfferCount": 2,
+      "rating": 3.6,
+      "reviewCount": 34,
+      "competitorCount": 14
+    },
+    "B0767PGYF3": {
+      "salesRank": 238229,
+      "buyBoxPrice": -0.01,
+      "newOfferCount": 11,
+      "rating": 4.3,
+      "reviewCount": 110,
+      "competitorCount": 70
+    },
+    "B07QJY4GSD": {
+      "salesRank": 873732,
+      "buyBoxPrice": 399.99,
+      "newOfferCount": 2,
+      "rating": 5,
+      "reviewCount": 1,
+      "competitorCount": 4
+    },
+    "B07CY6KZDN": {
+      "salesRank": 391980,
+      "buyBoxPrice": -0.01,
+      "newOfferCount": 3,
+      "rating": 4.6,
+      "reviewCount": 8,
+      "competitorCount": 6
+    },
+    "B078F1KBG6": {
+      "salesRank": 443415,
+      "buyBoxPrice": -0.01,
+      "newOfferCount": 3,
+      "rating": 4,
+      "reviewCount": 4,
+      "competitorCount": 5
+    },
+    "B0C248KZXY": {
+      "salesRank": 80081,
+      "buyBoxPrice": 41.63,
+      "newOfferCount": 3,
+      "rating": 4.6,
+      "reviewCount": 76,
+      "competitorCount": 8
+    },
+    "B07Q419MXM": {
+      "salesRank": 33260,
+      "buyBoxPrice": 17.99,
+      "newOfferCount": 3,
+      "rating": 4.4,
+      "reviewCount": 35,
+      "competitorCount": 8
+    },
+    "B0BCJVTMC5": {
+      "salesRank": 106605,
+      "buyBoxPrice": 195,
+      "newOfferCount": 3,
+      "rating": 4.8,
+      "reviewCount": 26,
+      "competitorCount": 8
+    },
+    "B0FVYG57MP": {
+      "salesRank": 134294,
+      "buyBoxPrice": 8.5,
+      "newOfferCount": 5,
+      "rating": -0.1,
+      "reviewCount": -1,
+      "competitorCount": 5
+    },
+    "B01MYMY2NC": {
+      "salesRank": 880635,
+      "buyBoxPrice": 229.99,
+      "newOfferCount": 4,
+      "rating": -0.1,
+      "reviewCount": -1,
+      "competitorCount": 6
+    },
+    "B07MHPF2VC": {
+      "salesRank": 225232,
+      "buyBoxPrice": 269.99,
+      "newOfferCount": 1,
+      "rating": 5,
+      "reviewCount": 2,
+      "competitorCount": 3
+    },
+    "B00HUVZJBM": {
+      "salesRank": 402779,
+      "buyBoxPrice": 72.85,
+      "newOfferCount": 2,
+      "rating": 3.4,
+      "reviewCount": 14,
+      "competitorCount": 7
+    },
+    "B0D1YGWH93": {
+      "salesRank": 31637,
+      "buyBoxPrice": 29.99,
+      "newOfferCount": 4,
+      "rating": 3.3,
+      "reviewCount": 3,
+      "competitorCount": 6
+    },
+    "B00H3JZV3C": {
+      "salesRank": 342722,
+      "buyBoxPrice": 13.84,
+      "newOfferCount": 9,
+      "rating": 4,
+      "reviewCount": 462,
+      "competitorCount": 72
+    },
+    "B0CHWHS6J5": {
+      "salesRank": 1179983,
+      "buyBoxPrice": 182.84,
+      "newOfferCount": 3,
+      "rating": 3.6,
+      "reviewCount": 3,
+      "competitorCount": 4
+    },
+    "B08WRC7Q92": {
+      "salesRank": 454518,
+      "buyBoxPrice": 199.99,
+      "newOfferCount": 4,
+      "rating": 4.5,
+      "reviewCount": 3,
+      "competitorCount": 11
+    },
+    "B00KTDTO2I": {
+      "salesRank": 10587,
+      "buyBoxPrice": 44.49,
+      "newOfferCount": 15,
+      "rating": 4.7,
+      "reviewCount": 380,
+      "competitorCount": 26
+    },
+    "B07MFB6DKF": {
+      "salesRank": 596564,
+      "buyBoxPrice": 190,
+      "newOfferCount": 1,
+      "rating": 3,
+      "reviewCount": 1,
+      "competitorCount": 4
+    },
+    "B0042CDLBW": {
+      "salesRank": -1,
+      "buyBoxPrice": 29.99,
+      "newOfferCount": 1,
+      "rating": 5,
+      "reviewCount": 1,
+      "competitorCount": 4
+    },
+    "B07N6NXQZT": {
+      "salesRank": -1,
+      "buyBoxPrice": 99.99,
+      "newOfferCount": 1,
+      "rating": -0.1,
+      "reviewCount": -1,
+      "competitorCount": 2
+    },
+    "B0BFJCLHT7": {
+      "salesRank": 542144,
+      "buyBoxPrice": 87.95,
+      "newOfferCount": 6,
+      "rating": -0.1,
+      "reviewCount": -1,
+      "competitorCount": 7
+    },
+    "B01M0HTEDW": {
+      "salesRank": 38422,
+      "buyBoxPrice": 239.5,
+      "newOfferCount": 6,
+      "rating": 4.6,
+      "reviewCount": 3538,
+      "competitorCount": 41
+    },
+    "B0193F91VG": {
+      "salesRank": 3249,
+      "buyBoxPrice": 7.99,
+      "newOfferCount": 5,
+      "rating": 4.5,
+      "reviewCount": 1961,
+      "competitorCount": 39
+    },
+    "B0193E19YO": {
+      "salesRank": 161126,
+      "buyBoxPrice": 24.5,
+      "newOfferCount": 4,
+      "rating": 3.9,
+      "reviewCount": 47,
+      "competitorCount": 14
+    },
+    "B07NSQW536": {
+      "salesRank": 184833,
+      "buyBoxPrice": -0.01,
+      "newOfferCount": 3,
+      "rating": 4.6,
+      "reviewCount": 143,
+      "competitorCount": 13
+    },
+    "B08FNYKHF5": {
+      "salesRank": 775,
+      "buyBoxPrice": 55.79,
+      "newOfferCount": 25,
+      "rating": 4.7,
+      "reviewCount": 5152,
+      "competitorCount": 90
+    },
+    "B07THLFY4H": {
+      "salesRank": -1,
+      "buyBoxPrice": 109.99,
+      "newOfferCount": 2,
+      "rating": 5,
+      "reviewCount": 1,
+      "competitorCount": 4
+    }
+  },
+  "lastSync": "2026-01-19T13:08:42.740Z"
+}

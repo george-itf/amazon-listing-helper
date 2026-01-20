@@ -1,0 +1,319 @@
+/**
+ * Listing Repository
+ * Handles all database operations for listings
+ */
+
+import { query, transaction } from '../database/connection.js';
+
+/**
+ * Get all listings with optional filters
+ * @param {Object} filters - Filter options (status, category, search)
+ * @returns {Promise<Array>} Array of listings
+ */
+export async function getAll(filters = {}) {
+  let sql = `
+    SELECT
+      l.*,
+      COALESCE(
+        json_agg(
+          DISTINCT jsonb_build_object(
+            'id', li.id,
+            'url', li.url,
+            'position', li.position,
+            'variant', li.variant
+          )
+        ) FILTER (WHERE li.id IS NOT NULL),
+        '[]'
+      ) as images
+    FROM listings l
+    LEFT JOIN listing_images li ON l.id = li."listingId"
+    WHERE 1=1
+  `;
+
+  const params = [];
+  let paramCount = 1;
+
+  if (filters.status) {
+    sql += ` AND l.status = $${paramCount++}`;
+    params.push(filters.status);
+  }
+
+  if (filters.category) {
+    sql += ` AND l.category = $${paramCount++}`;
+    params.push(filters.category);
+  }
+
+  if (filters.search) {
+    sql += ` AND (l.title ILIKE $${paramCount} OR l.sku ILIKE $${paramCount} OR l.asin ILIKE $${paramCount++})`;
+    params.push(`%${filters.search}%`);
+  }
+
+  sql += ` GROUP BY l.id ORDER BY l."updatedAt" DESC`;
+
+  if (filters.limit) {
+    sql += ` LIMIT $${paramCount++}`;
+    params.push(filters.limit);
+  }
+
+  if (filters.offset) {
+    sql += ` OFFSET $${paramCount++}`;
+    params.push(filters.offset);
+  }
+
+  const result = await query(sql, params);
+  return result.rows;
+}
+
+/**
+ * Get a single listing by ID
+ * @param {string} id - Listing ID
+ * @returns {Promise<Object|null>} Listing object or null
+ */
+export async function getById(id) {
+  const sql = `
+    SELECT
+      l.*,
+      COALESCE(
+        json_agg(
+          DISTINCT jsonb_build_object(
+            'id', li.id,
+            'url', li.url,
+            'position', li.position,
+            'variant', li.variant
+          )
+        ) FILTER (WHERE li.id IS NOT NULL),
+        '[]'
+      ) as images
+    FROM listings l
+    LEFT JOIN listing_images li ON l.id = li."listingId"
+    WHERE l.id = $1
+    GROUP BY l.id
+  `;
+
+  const result = await query(sql, [id]);
+  return result.rows[0] || null;
+}
+
+/**
+ * Get a listing by SKU
+ * @param {string} sku - SKU
+ * @returns {Promise<Object|null>} Listing object or null
+ */
+export async function getBySku(sku) {
+  const sql = `
+    SELECT
+      l.*,
+      COALESCE(
+        json_agg(
+          DISTINCT jsonb_build_object(
+            'id', li.id,
+            'url', li.url,
+            'position', li.position,
+            'variant', li.variant
+          )
+        ) FILTER (WHERE li.id IS NOT NULL),
+        '[]'
+      ) as images
+    FROM listings l
+    LEFT JOIN listing_images li ON l.id = li."listingId"
+    WHERE l.sku = $1
+    GROUP BY l.id
+  `;
+
+  const result = await query(sql, [sku]);
+  return result.rows[0] || null;
+}
+
+/**
+ * Get a listing by ASIN
+ * @param {string} asin - ASIN
+ * @returns {Promise<Object|null>} Listing object or null
+ */
+export async function getByAsin(asin) {
+  const sql = `
+    SELECT
+      l.*,
+      COALESCE(
+        json_agg(
+          DISTINCT jsonb_build_object(
+            'id', li.id,
+            'url', li.url,
+            'position', li.position,
+            'variant', li.variant
+          )
+        ) FILTER (WHERE li.id IS NOT NULL),
+        '[]'
+      ) as images
+    FROM listings l
+    LEFT JOIN listing_images li ON l.id = li."listingId"
+    WHERE l.asin = $1
+    GROUP BY l.id
+  `;
+
+  const result = await query(sql, [asin]);
+  return result.rows[0] || null;
+}
+
+/**
+ * Create a new listing
+ * @param {Object} data - Listing data
+ * @returns {Promise<Object>} Created listing
+ */
+export async function create(data) {
+  return transaction(async (client) => {
+    const listingSql = `
+      INSERT INTO listings (
+        sku, asin, title, description, "bulletPoints", price, quantity,
+        status, category, "fulfillmentChannel", "createdAt", "updatedAt"
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+      RETURNING *
+    `;
+
+    const listingResult = await client.query(listingSql, [
+      data.sku,
+      data.asin,
+      data.title,
+      data.description || null,
+      JSON.stringify(data.bulletPoints || []),
+      data.price || 0,
+      data.quantity || 0,
+      data.status || 'active',
+      data.category || null,
+      data.fulfillmentChannel || 'FBM',
+    ]);
+
+    const listing = listingResult.rows[0];
+
+    // Insert images if provided
+    if (data.images && data.images.length > 0) {
+      for (const image of data.images) {
+        await client.query(
+          `INSERT INTO listing_images ("listingId", url, position, variant)
+           VALUES ($1, $2, $3, $4)`,
+          [listing.id, image.url, image.position || 0, image.variant || null]
+        );
+      }
+    }
+
+    return getById(listing.id);
+  });
+}
+
+/**
+ * Update a listing
+ * @param {string} id - Listing ID
+ * @param {Object} data - Updated data
+ * @returns {Promise<Object>} Updated listing
+ */
+export async function update(id, data) {
+  return transaction(async (client) => {
+    const fields = [];
+    const values = [];
+    let paramCount = 1;
+
+    const allowedFields = [
+      'sku', 'asin', 'title', 'description', 'bulletPoints', 'price',
+      'quantity', 'status', 'category', 'fulfillmentChannel'
+    ];
+
+    for (const field of allowedFields) {
+      if (data[field] !== undefined) {
+        const dbField = field === 'bulletPoints' ? '"bulletPoints"' :
+                       field === 'fulfillmentChannel' ? '"fulfillmentChannel"' : field;
+        fields.push(`${dbField} = $${paramCount++}`);
+        values.push(field === 'bulletPoints' ? JSON.stringify(data[field]) : data[field]);
+      }
+    }
+
+    if (fields.length === 0) {
+      return getById(id);
+    }
+
+    fields.push(`"updatedAt" = NOW()`);
+    values.push(id);
+
+    const sql = `
+      UPDATE listings
+      SET ${fields.join(', ')}
+      WHERE id = $${paramCount}
+      RETURNING *
+    `;
+
+    await client.query(sql, values);
+
+    // Update images if provided
+    if (data.images !== undefined) {
+      // Delete existing images
+      await client.query('DELETE FROM listing_images WHERE "listingId" = $1', [id]);
+
+      // Insert new images
+      for (const image of data.images || []) {
+        await client.query(
+          `INSERT INTO listing_images ("listingId", url, position, variant)
+           VALUES ($1, $2, $3, $4)`,
+          [id, image.url, image.position || 0, image.variant || null]
+        );
+      }
+    }
+
+    return getById(id);
+  });
+}
+
+/**
+ * Delete a listing
+ * @param {string} id - Listing ID
+ * @returns {Promise<boolean>} True if deleted
+ */
+export async function remove(id) {
+  const result = await query('DELETE FROM listings WHERE id = $1 RETURNING id', [id]);
+  return result.rowCount > 0;
+}
+
+/**
+ * Get listing count by status
+ * @returns {Promise<Object>} Count by status
+ */
+export async function getCountByStatus() {
+  const sql = `
+    SELECT status, COUNT(*) as count
+    FROM listings
+    GROUP BY status
+  `;
+
+  const result = await query(sql);
+  return result.rows.reduce((acc, row) => {
+    acc[row.status] = parseInt(row.count);
+    return acc;
+  }, {});
+}
+
+/**
+ * Get listings with low scores
+ * @param {number} threshold - Score threshold
+ * @returns {Promise<Array>} Listings below threshold
+ */
+export async function getLowScoreListings(threshold = 50) {
+  const sql = `
+    SELECT l.*, ls."totalScore"
+    FROM listings l
+    INNER JOIN listing_scores ls ON l.id = ls."listingId"
+    WHERE ls."totalScore" < $1
+    ORDER BY ls."totalScore" ASC
+  `;
+
+  const result = await query(sql, [threshold]);
+  return result.rows;
+}
+
+export default {
+  getAll,
+  getById,
+  getBySku,
+  getByAsin,
+  create,
+  update,
+  remove,
+  getCountByStatus,
+  getLowScoreListings,
+};
