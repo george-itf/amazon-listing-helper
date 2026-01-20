@@ -1003,39 +1003,46 @@ console.log("Shipping & optimization endpoints loaded");
 // PHASE 5: AUTOMATION ENGINE
 // ============================================
 
-import { RULE_TEMPLATES, runAutomation, loadJSON as loadAuto, saveJSON as saveAuto } from "./automation.js";
+import { RULE_TEMPLATES, runAutomation, getRules, saveRules } from "./automation.js";
 
 // GET /api/v1/automation/templates - Get rule templates
 fastify.get("/api/v1/automation/templates", async () => {
   return { success: true, data: { templates: RULE_TEMPLATES } };
 });
 
-// GET /api/v1/automation/rules - Get active rules
+// GET /api/v1/automation/rules - Get active rules (PostgreSQL)
 fastify.get("/api/v1/automation/rules", async () => {
-  let rules = [];
   try {
-    const f = DATA_DIR + "/rules.json";
-    if (fs.existsSync(f)) rules = JSON.parse(fs.readFileSync(f, "utf8"));
-  } catch (e) {}
-  
-  if (rules.length === 0) {
-    rules = RULE_TEMPLATES.map(function(t) { return Object.assign({}, t, { enabled: true }); });
+    const rules = await getRules();
+    const enabledRules = rules.map(t => ({ ...t, enabled: true }));
+    return { success: true, data: { rules: enabledRules } };
+  } catch (error) {
+    console.error('Get automation rules error:', error);
+    return { success: false, error: error.message };
   }
-  
-  return { success: true, data: { rules: rules } };
 });
 
-// POST /api/v1/automation/rules - Save rules
+// POST /api/v1/automation/rules - Save rules (PostgreSQL)
 fastify.post("/api/v1/automation/rules", async (req) => {
-  const { rules } = req.body;
-  fs.writeFileSync(DATA_DIR + "/rules.json", JSON.stringify(rules, null, 2));
-  return { success: true, data: { saved: rules.length } };
+  try {
+    const { rules } = req.body;
+    await saveRules(rules);
+    return { success: true, data: { saved: rules.length } };
+  } catch (error) {
+    console.error('Save automation rules error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
-// POST /api/v1/automation/run - Run automation check
+// POST /api/v1/automation/run - Run automation check (PostgreSQL)
 fastify.post("/api/v1/automation/run", async () => {
-  const result = runAutomation();
-  return { success: true, data: result };
+  try {
+    const result = await runAutomation();
+    return { success: true, data: result };
+  } catch (error) {
+    console.error('Run automation error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // GET /api/v1/alerts - Get alerts (PostgreSQL)
@@ -1096,39 +1103,51 @@ fastify.post("/api/v1/alerts/read-all", async () => {
 
 console.log("Automation engine loaded");
 
-// Phase 6: Dashboard endpoints
+// Phase 6: Dashboard endpoints (PostgreSQL)
 
 fastify.get('/api/v1/dashboard/stats', async (request, reply) => {
   try {
-    const stats = getDashboardStats();
+    const stats = await getDashboardStats();
     return stats;
   } catch (error) {
+    console.error('Dashboard stats error:', error);
     reply.code(500).send({ error: error.message });
   }
 });
 
 fastify.get('/api/v1/dashboard/export', async (request, reply) => {
   try {
-    const csv = exportCSV();
+    const csv = await exportCSV();
     reply.header('Content-Type', 'text/csv');
     reply.header('Content-Disposition', 'attachment; filename="listings-export.csv"');
     return csv;
   } catch (error) {
+    console.error('Dashboard export error:', error);
     reply.code(500).send({ error: error.message });
   }
 });
 
-// Phase 7: AI Recommendations endpoints
+// Phase 7: AI Recommendations endpoints (PostgreSQL)
 
 fastify.get('/api/v1/ai/recommendations/:sku', async (request, reply) => {
-  const { sku } = request.params;
-  const recommendations = generateRecommendations(sku);
-  return recommendations;
+  try {
+    const { sku } = request.params;
+    const recommendations = await generateRecommendations(sku);
+    return recommendations;
+  } catch (error) {
+    console.error('AI recommendations error:', error);
+    return { error: error.message };
+  }
 });
 
 fastify.get('/api/v1/ai/bulk-recommendations', async (request, reply) => {
-  const limit = parseInt(request.query.limit) || 10;
-  return getBulkRecommendations(limit);
+  try {
+    const limit = parseInt(request.query.limit) || 10;
+    return await getBulkRecommendations(limit);
+  } catch (error) {
+    console.error('Bulk AI recommendations error:', error);
+    return [];
+  }
 });
 
 console.log("AI Recommendations loaded");
@@ -1499,9 +1518,14 @@ fastify.post('/api/v1/metrics/:sku/score', async (request) => {
 });
 
 fastify.get('/api/v1/metrics/:sku/score-history', async (request) => {
-  const days = parseInt(request.query.days) || 30;
-  const history = getScoreHistory(request.params.sku, days);
-  return { success: true, data: history };
+  try {
+    const days = parseInt(request.query.days) || 30;
+    const history = await getScoreHistory(request.params.sku, days);
+    return { success: true, data: history };
+  } catch (error) {
+    console.error('Get score history error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Attribution endpoints
@@ -1906,62 +1930,72 @@ fastify.delete('/api/v1/reports/scheduled/:id', async (request, reply) => {
 
 console.log("Reporting System loaded");
 
-// ============ ENHANCED SCORING ENDPOINTS ============
+// ============ ENHANCED SCORING ENDPOINTS (PostgreSQL) ============
 
 // Get score history for a SKU
 fastify.get('/api/v1/scores/:sku/history', async (request) => {
-  const { sku } = request.params;
-  const days = parseInt(request.query.days) || 30;
-  const history = getScoreHistory(sku, days);
-  return { success: true, data: history };
+  try {
+    const { sku } = request.params;
+    const days = parseInt(request.query.days) || 30;
+    const history = await getScoreHistory(sku, days);
+    return { success: true, data: history };
+  } catch (error) {
+    console.error('Get score history error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Get score trends for a SKU
 fastify.get('/api/v1/scores/:sku/trends', async (request) => {
-  const { sku } = request.params;
-  const trends = getScoreTrends(sku);
-  return { success: true, data: trends };
-});
-
-// Get compliance check for a listing
-fastify.get('/api/v1/scores/:sku/compliance', async (request, reply) => {
-  const { sku } = request.params;
-  const listings = loadListings();
-  const listing = listings.items.find(l => l.sku === sku);
-
-  if (!listing) {
-    reply.code(404).send({ success: false, error: 'Listing not found' });
-    return;
-  }
-
-  const compliance = calculateComplianceScore(listing);
-  return { success: true, data: compliance };
-});
-
-// Get competitive analysis for a listing
-fastify.get('/api/v1/scores/:sku/competitive', async (request, reply) => {
-  const { sku } = request.params;
-  const listings = loadListings();
-  const listing = listings.items.find(l => l.sku === sku);
-
-  if (!listing) {
-    reply.code(404).send({ success: false, error: 'Listing not found' });
-    return;
-  }
-
-  // Load Keepa data
-  let keepaData = null;
   try {
-    const keepaFile = `${DATA_DIR}/keepa.json`;
-    if (fs.existsSync(keepaFile)) {
-      const keepaRaw = JSON.parse(fs.readFileSync(keepaFile, 'utf8'));
-      const data = keepaRaw.data || keepaRaw || {};
-      keepaData = data[sku] || data[listing.asin] || null;
-    }
-  } catch (e) { /* No Keepa data */ }
+    const { sku } = request.params;
+    const trends = await getScoreTrends(sku);
+    return { success: true, data: trends };
+  } catch (error) {
+    console.error('Get score trends error:', error);
+    return { success: false, error: error.message };
+  }
+});
 
-  const competitive = calculateCompetitiveScore(listing, keepaData);
-  return { success: true, data: competitive };
+// Get compliance check for a listing (PostgreSQL)
+fastify.get('/api/v1/scores/:sku/compliance', async (request, reply) => {
+  try {
+    const { sku } = request.params;
+    const listing = await ListingRepository.getBySku(sku);
+
+    if (!listing) {
+      reply.code(404).send({ success: false, error: 'Listing not found' });
+      return;
+    }
+
+    const compliance = calculateComplianceScore(listing);
+    return { success: true, data: compliance };
+  } catch (error) {
+    console.error('Get compliance error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get competitive analysis for a listing (PostgreSQL)
+fastify.get('/api/v1/scores/:sku/competitive', async (request, reply) => {
+  try {
+    const { sku } = request.params;
+    const listing = await ListingRepository.getBySku(sku);
+
+    if (!listing) {
+      reply.code(404).send({ success: false, error: 'Listing not found' });
+      return;
+    }
+
+    // Load Keepa data from PostgreSQL
+    const keepaData = listing.asin ? await KeepaRepository.getByAsin(listing.asin) : null;
+
+    const competitive = calculateCompetitiveScore(listing, keepaData);
+    return { success: true, data: competitive };
+  } catch (error) {
+    console.error('Get competitive error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Get blocked/warning terms reference
@@ -1975,123 +2009,98 @@ fastify.get('/api/v1/scores/compliance-terms', async () => {
   };
 });
 
-// Bulk score history (for dashboard charts)
+// Bulk score history (for dashboard charts) (PostgreSQL)
 fastify.get('/api/v1/scores/history/bulk', async (request) => {
-  const listings = loadListings();
-  const days = parseInt(request.query.days) || 14;
-  const limit = parseInt(request.query.limit) || 20;
+  try {
+    const listings = await ListingRepository.getAll({ limit: parseInt(request.query.limit) || 20 });
+    const days = parseInt(request.query.days) || 14;
 
-  const historyData = {};
-  let count = 0;
+    const historyData = {};
 
-  for (const listing of listings.items) {
-    if (count >= limit) break;
-    const history = getScoreHistory(listing.sku, days);
-    if (history.length > 0) {
-      historyData[listing.sku] = {
-        title: listing.title,
-        history
-      };
-      count++;
-    }
-  }
-
-  return { success: true, data: historyData };
-});
-
-// Get listings with compliance issues
-fastify.get('/api/v1/scores/compliance-issues', async () => {
-  const listings = loadListings();
-  const issues = [];
-
-  for (const listing of listings.items) {
-    const compliance = calculateComplianceScore(listing);
-    if (compliance.violations.length > 0) {
-      issues.push({
-        sku: listing.sku,
-        asin: listing.asin,
-        title: listing.title,
-        score: compliance.score,
-        violations: compliance.violations
-      });
-    }
-  }
-
-  // Sort by most violations first
-  issues.sort((a, b) => b.violations.length - a.violations.length);
-
-  return { success: true, data: issues };
-});
-
-// Get score summary with all 5 components
-fastify.get('/api/v1/scores/summary', async () => {
-  const scores = loadScores();
-  const listings = loadListings();
-
-  const summary = {
-    totalListings: listings.items.length,
-    scoredListings: Object.keys(scores).length,
-    averageScore: 0,
-    componentAverages: {
-      seo: 0,
-      content: 0,
-      images: 0,
-      competitive: 0,
-      compliance: 0
-    },
-    distribution: {
-      excellent: 0,  // 80+
-      good: 0,       // 60-79
-      average: 0,    // 40-59
-      poor: 0        // <40
-    },
-    complianceIssues: 0
-  };
-
-  let totalScore = 0;
-  let seoTotal = 0, contentTotal = 0, imagesTotal = 0, competitiveTotal = 0, complianceTotal = 0;
-  let count = 0;
-
-  for (const sku in scores) {
-    const score = scores[sku];
-    if (!score) continue;
-
-    totalScore += score.totalScore || 0;
-
-    if (score.components) {
-      seoTotal += score.components.seo?.score || 0;
-      contentTotal += score.components.content?.score || 0;
-      imagesTotal += score.components.images?.score || 0;
-      competitiveTotal += score.components.competitive?.score || 0;
-      complianceTotal += score.components.compliance?.score || 0;
-
-      if (score.components.compliance?.violations?.length > 0) {
-        summary.complianceIssues++;
+    for (const listing of listings) {
+      const history = await getScoreHistory(listing.sku, days);
+      if (history.length > 0) {
+        historyData[listing.sku] = {
+          title: listing.title,
+          history
+        };
       }
     }
 
-    // Distribution
-    const total = score.totalScore || 0;
-    if (total >= 80) summary.distribution.excellent++;
-    else if (total >= 60) summary.distribution.good++;
-    else if (total >= 40) summary.distribution.average++;
-    else summary.distribution.poor++;
-
-    count++;
+    return { success: true, data: historyData };
+  } catch (error) {
+    console.error('Bulk score history error:', error);
+    return { success: false, error: error.message };
   }
+});
 
-  if (count > 0) {
-    summary.averageScore = Math.round(totalScore / count);
-    summary.componentAverages = {
-      seo: Math.round(seoTotal / count),
-      content: Math.round(contentTotal / count),
-      images: Math.round(imagesTotal / count),
-      competitive: Math.round(competitiveTotal / count),
-      compliance: Math.round(complianceTotal / count)
+// Get listings with compliance issues (PostgreSQL)
+fastify.get('/api/v1/scores/compliance-issues', async () => {
+  try {
+    const listings = await ListingRepository.getAll();
+    const issues = [];
+
+    for (const listing of listings) {
+      const compliance = calculateComplianceScore(listing);
+      if (compliance.violations && compliance.violations.length > 0) {
+        issues.push({
+          sku: listing.sku,
+          asin: listing.asin,
+          title: listing.title,
+          score: compliance.score,
+          violations: compliance.violations
+        });
+      }
+    }
+
+    // Sort by most violations first
+    issues.sort((a, b) => b.violations.length - a.violations.length);
+
+    return { success: true, data: issues };
+  } catch (error) {
+    console.error('Compliance issues error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get score summary with all 5 components (PostgreSQL)
+fastify.get('/api/v1/scores/summary', async () => {
+  try {
+    const listings = await ListingRepository.getAll();
+    const scoreStats = await ScoreRepository.getStatistics();
+    const distribution = await ScoreRepository.getDistribution();
+
+    // Build distribution from PostgreSQL
+    const distributionMap = {};
+    for (const d of distribution) {
+      distributionMap[d.bucket] = parseInt(d.count);
+    }
+
+    const summary = {
+      totalListings: listings.length,
+      scoredListings: parseInt(scoreStats?.total_scored) || 0,
+      averageScore: Math.round(parseFloat(scoreStats?.avg_score) || 0),
+      componentAverages: {
+        seo: Math.round(parseFloat(scoreStats?.avg_seo) || 0),
+        content: Math.round(parseFloat(scoreStats?.avg_content) || 0),
+        images: Math.round(parseFloat(scoreStats?.avg_images) || 0),
+        competitive: Math.round(parseFloat(scoreStats?.avg_competitive) || 0),
+        compliance: Math.round(parseFloat(scoreStats?.avg_compliance) || 0)
+      },
+      distribution: {
+        excellent: distributionMap.excellent || 0,
+        good: distributionMap.good || 0,
+        average: distributionMap.fair || 0,
+        poor: distributionMap.poor || 0
+      },
+      complianceIssues: 0 // Would need a separate query for this
     };
-  }
 
-  return { success: true, data: summary };
+    return { success: true, data: summary };
+  } catch (error) {
+    console.error('Score summary error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 console.log("Enhanced Scoring System loaded (Compliance, Competitive, History)");

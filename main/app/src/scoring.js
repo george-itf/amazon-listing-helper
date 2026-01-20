@@ -1,10 +1,9 @@
 // Scoring Engine - Enhanced with Compliance, Competitive, and History
 // Weights: SEO 20%, Content 20%, Images 15%, Competitive 20%, Compliance 25%
+// Updated to use PostgreSQL repositories
 
-import fs from 'fs';
-import path from 'path';
-
-const DATA_DIR = path.join(process.cwd(), '..', 'data');
+import * as ScoreRepository from './repositories/score.repository.js';
+import * as ListingRepository from './repositories/listing.repository.js';
 
 // Amazon blocked/restricted words and phrases
 const BLOCKED_TERMS = {
@@ -57,19 +56,7 @@ const WARNING_TERMS = {
   ]
 };
 
-function loadJSON(filename) {
-  try {
-    const filepath = path.join(DATA_DIR, filename);
-    return JSON.parse(fs.readFileSync(filepath, 'utf8'));
-  } catch (e) {
-    return null;
-  }
-}
-
-function saveJSON(filename, data) {
-  const filepath = path.join(DATA_DIR, filename);
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
-}
+// Legacy loadJSON/saveJSON removed - using PostgreSQL repositories now
 
 // Main scoring function - now accepts keepaData for competitive scoring
 export function calculateScore(listing, keepaData = null, competitorData = null) {
@@ -107,76 +94,75 @@ export function calculateScore(listing, keepaData = null, competitorData = null)
   };
 }
 
-// Calculate and save score with history tracking
-export function calculateAndSaveScore(listing, keepaData = null, competitorData = null) {
+// Calculate and save score with history tracking (PostgreSQL)
+export async function calculateAndSaveScore(listing, keepaData = null, competitorData = null) {
   const sku = listing.sku;
-  if (!sku) return null;
+  if (!sku || !listing.id) return null;
 
   const score = calculateScore(listing, keepaData, competitorData);
 
-  // Load existing scores
-  const scoresData = loadJSON('scores.json') || {};
-  const historyData = loadJSON('score-history.json') || {};
+  try {
+    // Save score to PostgreSQL
+    await ScoreRepository.create({
+      listingId: listing.id,
+      totalScore: score.totalScore,
+      seoScore: score.components.seo.score,
+      contentScore: score.components.content.score,
+      imageScore: score.components.images.score,
+      competitiveScore: score.components.competitive.score,
+      complianceScore: score.components.compliance.score,
+      seoViolations: score.components.seo.violations || [],
+      contentViolations: score.components.content.violations || [],
+      imageViolations: score.components.images.violations || [],
+      competitiveViolations: score.components.competitive.violations || [],
+      complianceViolations: score.components.compliance.violations || [],
+      breakdown: score.components,
+      recommendations: score.recommendations || []
+    });
 
-  // Save current score
-  scoresData[sku] = {
-    ...score,
-    lastUpdated: new Date().toISOString()
-  };
-
-  // Add to history
-  if (!historyData[sku]) {
-    historyData[sku] = [];
+    // Update denormalized score on listing
+    await ListingRepository.update(sku, {
+      currentScore: score.totalScore
+    });
+  } catch (error) {
+    console.error('Error saving score:', error.message);
   }
-
-  // Add new history entry
-  const historyEntry = {
-    date: new Date().toISOString().split('T')[0], // YYYY-MM-DD
-    timestamp: new Date().toISOString(),
-    totalScore: score.totalScore,
-    components: {
-      seo: score.components.seo.score,
-      content: score.components.content.score,
-      images: score.components.images.score,
-      competitive: score.components.competitive.score,
-      compliance: score.components.compliance.score
-    }
-  };
-
-  // Only add if different date or score changed significantly
-  const lastEntry = historyData[sku][historyData[sku].length - 1];
-  if (!lastEntry ||
-      lastEntry.date !== historyEntry.date ||
-      Math.abs(lastEntry.totalScore - historyEntry.totalScore) >= 2) {
-    historyData[sku].push(historyEntry);
-
-    // Keep last 90 entries (about 3 months of daily scores)
-    if (historyData[sku].length > 90) {
-      historyData[sku] = historyData[sku].slice(-90);
-    }
-  }
-
-  // Save both files
-  saveJSON('scores.json', scoresData);
-  saveJSON('score-history.json', historyData);
 
   return score;
 }
 
-// Get score history for a SKU
-export function getScoreHistory(sku, days = 30) {
-  const historyData = loadJSON('score-history.json') || {};
-  const history = historyData[sku] || [];
+// Get score history for a SKU (PostgreSQL)
+export async function getScoreHistory(sku, days = 30) {
+  try {
+    // Get listing ID from SKU
+    const listing = await ListingRepository.getBySku(sku);
+    if (!listing) return [];
 
-  if (days && history.length > days) {
-    return history.slice(-days);
+    // Get score history from PostgreSQL
+    const history = await ScoreRepository.getHistoryByListingId(listing.id, days);
+
+    // Format for compatibility with existing code
+    return history.map(h => ({
+      date: h.calculatedAt ? h.calculatedAt.toISOString().split('T')[0] : null,
+      timestamp: h.calculatedAt ? h.calculatedAt.toISOString() : null,
+      totalScore: parseFloat(h.totalScore),
+      components: {
+        seo: parseFloat(h.seoScore) || 0,
+        content: parseFloat(h.contentScore) || 0,
+        images: parseFloat(h.imageScore) || 0,
+        competitive: parseFloat(h.competitiveScore) || 0,
+        compliance: parseFloat(h.complianceScore) || 0
+      }
+    }));
+  } catch (error) {
+    console.error('Error getting score history:', error.message);
+    return [];
   }
-  return history;
 }
 
-// Get score trends (improvement/decline analysis)
-export function getScoreTrends(sku) {
-  const history = getScoreHistory(sku, 30);
+// Get score trends (improvement/decline analysis) (PostgreSQL)
+export async function getScoreTrends(sku) {
+  const history = await getScoreHistory(sku, 30);
 
   if (history.length < 2) {
     return { trend: 'insufficient_data', change: 0, entries: history.length };

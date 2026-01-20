@@ -1,46 +1,55 @@
 // Dashboard Analytics for Amazon Listings Helper
-import fs from 'fs';
-import path from 'path';
+// Updated to use PostgreSQL repositories
 
-const DATA_DIR = path.join(process.cwd(), '..', 'data');
+import * as ListingRepository from './repositories/listing.repository.js';
+import * as ScoreRepository from './repositories/score.repository.js';
+import * as AlertRepository from './repositories/alert.repository.js';
+import * as SettingsRepository from './repositories/settings.repository.js';
 
-function loadJSON(filename) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(DATA_DIR, filename), 'utf8'));
-  } catch { return null; }
-}
+/**
+ * Get comprehensive dashboard statistics
+ * @returns {Promise<Object>} Dashboard stats
+ */
+async function getDashboardStats() {
+  // Get data from PostgreSQL
+  const listings = await ListingRepository.getAll();
+  const scoreStats = await ScoreRepository.getStatistics();
+  const scoreDistribution = await ScoreRepository.getDistribution();
+  const unreadAlertCount = await AlertRepository.getUnreadCount();
+  const alertsGrouped = await AlertRepository.getGroupedByType();
+  const lastSync = await SettingsRepository.getValue('last_sync');
 
-function getDashboardStats() {
-  const listings = loadJSON('listings.json');
-  const scores = loadJSON('scores.json') || {};
-  const keepa = loadJSON('keepa.json') || {};
-  const costs = loadJSON('costs.json') || {};
-  const alerts = loadJSON('alerts.json') || [];
-  
-  const items = listings?.items || [];
-  const totalListings = items.length;
-  
+  const totalListings = listings.length;
+
   // Price statistics
-  const prices = items.map(i => i.price).filter(p => p > 0);
-  const avgPrice = prices.length ? prices.reduce((a,b) => a+b, 0) / prices.length : 0;
+  const prices = listings.map(l => parseFloat(l.price)).filter(p => p > 0);
+  const avgPrice = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
   const minPrice = prices.length ? Math.min(...prices) : 0;
   const maxPrice = prices.length ? Math.max(...prices) : 0;
-  
-  // Score statistics
-  const scoreValues = Object.values(scores).map(s => s.totalScore).filter(s => s !== undefined);
-  const avgScore = scoreValues.length ? scoreValues.reduce((a,b) => a+b, 0) / scoreValues.length : 0;
-  const lowScoreCount = scoreValues.filter(s => s < 60).length;
-  const goodScoreCount = scoreValues.filter(s => s >= 80).length;
-  
-  // Score distribution for chart
-  const scoreDistribution = [
-    { range: '0-20', count: scoreValues.filter(s => s < 20).length },
-    { range: '21-40', count: scoreValues.filter(s => s >= 20 && s < 40).length },
-    { range: '41-60', count: scoreValues.filter(s => s >= 40 && s < 60).length },
-    { range: '61-80', count: scoreValues.filter(s => s >= 60 && s < 80).length },
-    { range: '81-100', count: scoreValues.filter(s => s >= 80).length }
+
+  // Score statistics from repository
+  const avgScore = parseFloat(scoreStats?.avg_score) || 0;
+  const totalScored = parseInt(scoreStats?.total_scored) || 0;
+
+  // Count listings by score range
+  const scores = listings.map(l => parseFloat(l.currentScore)).filter(s => !isNaN(s));
+  const lowScoreCount = scores.filter(s => s < 60).length;
+  const goodScoreCount = scores.filter(s => s >= 80).length;
+
+  // Score distribution for chart (convert from PostgreSQL format)
+  const distributionMap = {};
+  for (const d of scoreDistribution) {
+    distributionMap[d.bucket] = parseInt(d.count);
+  }
+
+  const scoreDistributionChart = [
+    { range: '0-20', count: scores.filter(s => s < 20).length },
+    { range: '21-40', count: scores.filter(s => s >= 20 && s < 40).length },
+    { range: '41-60', count: scores.filter(s => s >= 40 && s < 60).length },
+    { range: '61-80', count: scores.filter(s => s >= 60 && s < 80).length },
+    { range: '81-100', count: scores.filter(s => s >= 80).length }
   ];
-  
+
   // Price distribution
   const priceRanges = [
     { range: '£0-25', count: prices.filter(p => p < 25).length },
@@ -49,40 +58,27 @@ function getDashboardStats() {
     { range: '£100-200', count: prices.filter(p => p >= 100 && p < 200).length },
     { range: '£200+', count: prices.filter(p => p >= 200).length }
   ];
-  
+
   // Alert summary
-  const unreadAlerts = alerts.filter(a => !a.read).length;
-  const criticalAlerts = alerts.filter(a => a.severity === 'critical' && !a.read).length;
-  const highAlerts = alerts.filter(a => a.severity === 'high' && !a.read).length;
-  
-  // Top issues (most common recommendations)
-  const issueCount = {};
-  Object.values(scores).forEach(s => {
-    if (s.components) {
-      Object.values(s.components).forEach(comp => {
-        (comp.recommendations || []).forEach(rec => {
-          issueCount[rec.title] = (issueCount[rec.title] || 0) + 1;
-        });
-      });
-    }
-  });
-  const topIssues = Object.entries(issueCount)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([issue, count]) => ({ issue, count }));
-  
+  const criticalAlerts = alertsGrouped
+    .filter(g => g.severity === 'critical')
+    .reduce((sum, g) => sum + parseInt(g.count), 0);
+  const highAlerts = alertsGrouped
+    .filter(g => g.severity === 'high')
+    .reduce((sum, g) => sum + parseInt(g.count), 0);
+
   // Listings needing attention (lowest scores)
-  const needsAttention = items
-    .filter(i => scores[i.sku]?.totalScore < 50)
-    .map(i => ({
-      sku: i.sku,
-      title: i.title || i.name || i.sku,
-      score: scores[i.sku]?.totalScore || 0,
-      price: i.price
+  const needsAttention = listings
+    .filter(l => l.currentScore !== null && parseFloat(l.currentScore) < 50)
+    .map(l => ({
+      sku: l.sku,
+      title: l.title || l.sku,
+      score: parseFloat(l.currentScore) || 0,
+      price: parseFloat(l.price) || 0
     }))
     .sort((a, b) => a.score - b.score)
     .slice(0, 10);
-  
+
   return {
     summary: {
       totalListings,
@@ -92,35 +88,41 @@ function getDashboardStats() {
       avgScore: avgScore.toFixed(1),
       lowScoreCount,
       goodScoreCount,
-      unreadAlerts,
+      unreadAlerts: unreadAlertCount,
       criticalAlerts,
       highAlerts
     },
     charts: {
-      scoreDistribution,
+      scoreDistribution: scoreDistributionChart,
       priceRanges
     },
-    topIssues,
+    topIssues: [], // Would need to aggregate from score breakdown - TODO
     needsAttention,
-    lastSync: listings?.lastSync || null
+    lastSync
   };
 }
 
-function exportCSV() {
-  const listings = loadJSON('listings.json');
-  const scores = loadJSON('scores.json') || {};
-  const items = listings?.items || [];
-  
+/**
+ * Export listings as CSV
+ * @returns {Promise<string>} CSV content
+ */
+async function exportCSV() {
+  const listings = await ListingRepository.getAll();
+
   const headers = ['SKU', 'ASIN', 'Title', 'Price', 'Score', 'Status'];
-  const rows = items.map(i => [
-    i.sku,
-    i.asin || '',
-    `"${(i.title || i.name || '').replace(/"/g, '""')}"`,
-    i.price || 0,
-    scores[i.sku]?.totalScore || 'N/A',
-    scores[i.sku]?.totalScore >= 80 ? 'Good' : scores[i.sku]?.totalScore >= 60 ? 'OK' : 'Needs Work'
-  ]);
-  
+  const rows = listings.map(l => {
+    const score = parseFloat(l.currentScore);
+    const status = isNaN(score) ? 'N/A' : score >= 80 ? 'Good' : score >= 60 ? 'OK' : 'Needs Work';
+    return [
+      l.sku,
+      l.asin || '',
+      `"${(l.title || '').replace(/"/g, '""')}"`,
+      l.price || 0,
+      isNaN(score) ? 'N/A' : score.toFixed(1),
+      status
+    ];
+  });
+
   return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
 }
 

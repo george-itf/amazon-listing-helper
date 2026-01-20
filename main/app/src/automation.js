@@ -1,8 +1,11 @@
 // Automation Rules Engine for Amazon Listings Helper
-import fs from 'fs';
-import path from 'path';
+// Updated to use PostgreSQL repositories
 
-const DATA_DIR = path.join(process.cwd(), '..', 'data');
+import * as ListingRepository from './repositories/listing.repository.js';
+import * as ScoreRepository from './repositories/score.repository.js';
+import * as AlertRepository from './repositories/alert.repository.js';
+import * as KeepaRepository from './repositories/keepa.repository.js';
+import * as SettingsRepository from './repositories/settings.repository.js';
 
 // Rule templates
 const RULE_TEMPLATES = [
@@ -36,35 +39,26 @@ const RULE_TEMPLATES = [
   }
 ];
 
-function loadJSON(filename) {
-  try {
-    const filepath = path.join(DATA_DIR, filename);
-    return JSON.parse(fs.readFileSync(filepath, 'utf8'));
-  } catch (e) {
-    return null;
-  }
-}
-
-function saveJSON(filename, data) {
-  const filepath = path.join(DATA_DIR, filename);
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
-}
-
-function evaluateRules(listings, keepa, costs, scores, rules) {
+/**
+ * Evaluate rules against listings and generate alerts
+ * @param {Array} listings - Array of listing objects
+ * @param {Object} keepaMap - Map of ASIN to Keepa data
+ * @param {Object} costsMap - Map of SKU to cost data
+ * @param {Array} rules - Array of rule objects
+ * @returns {Array} Generated alerts
+ */
+function evaluateRules(listings, keepaMap, costsMap, rules) {
   const alerts = [];
-  
-  // Handle listings.items array format
-  const listingItems = listings?.items || [];
-  
-  for (const listing of listingItems) {
+
+  for (const listing of listings) {
     const sku = listing.sku;
     if (!sku) continue;
-    
-    const score = scores?.[sku]?.totalScore;
-    const cost = costs?.[sku];
-    const keepaData = keepa?.[sku];
-    const price = listing.price || 0;
-    
+
+    const score = listing.currentScore;
+    const cost = costsMap?.[sku];
+    const keepaData = keepaMap?.[listing.asin];
+    const price = parseFloat(listing.price) || 0;
+
     // Calculate margin if we have cost data
     let margin = null;
     let profit = null;
@@ -73,23 +67,23 @@ function evaluateRules(listings, keepa, costs, scores, rules) {
       profit = price - totalCost;
       margin = (profit / price) * 100;
     }
-    
+
     for (const rule of rules) {
       let triggered = false;
       let message = '';
-      
+
       if (rule.trigger.type === 'threshold') {
         const metric = rule.trigger.metric;
         let value = null;
-        
+
         if (metric === 'margin' && margin !== null) {
           value = margin;
         } else if (metric === 'profit' && profit !== null) {
           value = profit;
-        } else if (metric === 'score' && score !== undefined) {
-          value = score;
+        } else if (metric === 'score' && score !== undefined && score !== null) {
+          value = parseFloat(score);
         }
-        
+
         if (value !== null) {
           if (rule.trigger.operator === 'lt' && value < rule.trigger.value) {
             triggered = true;
@@ -106,59 +100,113 @@ function evaluateRules(listings, keepa, costs, scores, rules) {
           message = `Price £${price} is ${((price/buyBox - 1) * 100).toFixed(1)}% above buy box £${buyBox}`;
         }
       }
-      
+
       if (triggered) {
         alerts.push({
-          id: `${rule.id}-${sku}-${Date.now()}`,
-          ruleId: rule.id,
-          ruleName: rule.name,
+          listingId: listing.id,
           sku: sku,
-          asin: listing.asin || '',
-          title: listing.title || listing.name || sku,
-          message: message,
+          type: rule.id,
           severity: rule.action.severity,
-          timestamp: new Date().toISOString(),
-          read: false
+          title: rule.name,
+          message: message,
+          metadata: {
+            ruleId: rule.id,
+            asin: listing.asin || '',
+            listingTitle: listing.title || sku
+          }
         });
       }
     }
   }
-  
+
   return alerts;
 }
 
+/**
+ * Run automation rules and generate alerts
+ * @returns {Promise<Object>} Result with new and total alerts count
+ */
 async function runAutomation() {
-  const listings = loadJSON('listings.json');
-  const keepa = loadJSON('keepa.json');
-  const costs = loadJSON('costs.json') || {};
-  const scores = loadJSON('scores.json') || {};
-  const existingAlerts = loadJSON('alerts.json') || [];
-  
-  // Use default rules (or load custom rules if they exist)
-  const rules = loadJSON('rules.json') || RULE_TEMPLATES;
-  
-  // Evaluate rules
-  const newAlerts = evaluateRules(listings, keepa, costs, scores, rules);
-  
-  // Deduplicate - don't add alert if same rule+sku alerted in last 24h
-  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-  const recentAlertKeys = new Set(
-    existingAlerts
-      .filter(a => a.timestamp && new Date(a.timestamp).getTime() > oneDayAgo)
-      .map(a => `${a.ruleId}-${a.sku}`)
-  );
-  
-  const filteredNewAlerts = newAlerts.filter(a => !recentAlertKeys.has(`${a.ruleId}-${a.sku}`));
-  
-  // Merge and save
-  const allAlerts = [...filteredNewAlerts, ...existingAlerts.filter(a => a.id)].slice(0, 500);
-  saveJSON('alerts.json', allAlerts);
-  
-  return {
-    newAlerts: filteredNewAlerts.length,
-    totalAlerts: allAlerts.length,
-    alerts: filteredNewAlerts
-  };
+  try {
+    // Load data from PostgreSQL
+    const listings = await ListingRepository.getAll({ status: 'active' });
+    const keepaRecords = await KeepaRepository.getAll();
+
+    // Convert Keepa records to map by ASIN
+    const keepaMap = {};
+    for (const record of keepaRecords) {
+      keepaMap[record.asin] = record;
+    }
+
+    // Load costs from settings (or create empty map)
+    // Note: Costs could be moved to a separate table in future
+    const costsMap = {};
+
+    // Get rules from settings or use defaults
+    const rulesSettting = await SettingsRepository.get('automation_rules');
+    const rules = rulesSettting?.value ? JSON.parse(rulesSettting.value) : RULE_TEMPLATES;
+
+    // Evaluate rules
+    const newAlerts = evaluateRules(listings, keepaMap, costsMap, rules);
+
+    // Get existing alerts from last 24 hours for deduplication
+    const existingAlerts = await AlertRepository.getAll({ dismissed: false });
+    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const recentAlertKeys = new Set(
+      existingAlerts
+        .filter(a => a.createdAt && new Date(a.createdAt).getTime() > oneDayAgo)
+        .map(a => `${a.type}-${a.sku}`)
+    );
+
+    // Filter out duplicates
+    const filteredNewAlerts = newAlerts.filter(a => !recentAlertKeys.has(`${a.type}-${a.sku}`));
+
+    // Save new alerts to PostgreSQL
+    const savedAlerts = [];
+    for (const alert of filteredNewAlerts) {
+      try {
+        const saved = await AlertRepository.create(alert);
+        savedAlerts.push(saved);
+      } catch (e) {
+        console.error('Error saving alert:', e.message);
+      }
+    }
+
+    // Get updated total count
+    const totalCount = await AlertRepository.getUnreadCount();
+
+    return {
+      newAlerts: savedAlerts.length,
+      totalAlerts: totalCount,
+      alerts: savedAlerts
+    };
+  } catch (error) {
+    console.error('Automation error:', error);
+    return {
+      newAlerts: 0,
+      totalAlerts: 0,
+      alerts: [],
+      error: error.message
+    };
+  }
 }
 
-export { RULE_TEMPLATES, evaluateRules, runAutomation, loadJSON, saveJSON };
+/**
+ * Get all automation rules
+ * @returns {Promise<Array>} Array of rules
+ */
+async function getRules() {
+  const setting = await SettingsRepository.get('automation_rules');
+  return setting?.value ? JSON.parse(setting.value) : RULE_TEMPLATES;
+}
+
+/**
+ * Save automation rules
+ * @param {Array} rules - Rules to save
+ * @returns {Promise<Object>} Saved setting
+ */
+async function saveRules(rules) {
+  return SettingsRepository.set('automation_rules', JSON.stringify(rules), 'Automation rule configurations');
+}
+
+export { RULE_TEMPLATES, evaluateRules, runAutomation, getRules, saveRules };
