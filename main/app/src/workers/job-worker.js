@@ -53,9 +53,10 @@ async function processJob(job) {
       return await processSyncAmazon(job);
 
     case 'GENERATE_RECOMMENDATIONS_LISTING':
+      return await processGenerateRecommendationsListing(job);
+
     case 'GENERATE_RECOMMENDATIONS_ASIN':
-      // TODO: Implement in Slice D
-      throw new Error(`Job type ${job.job_type} not yet implemented`);
+      return await processGenerateRecommendationsAsin(job);
 
     default:
       throw new Error(`Unknown job type: ${job.job_type}`);
@@ -501,6 +502,53 @@ async function processSyncAmazon(job) {
     default:
       throw new Error(`Unknown Amazon sync type: ${jobType}`);
   }
+}
+
+// ============================================================================
+// SLICE D: RECOMMENDATION JOBS
+// ============================================================================
+
+/**
+ * Process GENERATE_RECOMMENDATIONS_LISTING job
+ * @param {Object} job
+ * @returns {Promise<Object>}
+ */
+async function processGenerateRecommendationsListing(job) {
+  const listingId = job.listing_id;
+
+  if (!listingId) {
+    throw new Error('listing_id is required for GENERATE_RECOMMENDATIONS_LISTING job');
+  }
+
+  console.log(`[Worker] Generating recommendations for listing ${listingId}`);
+
+  const recommendationService = await import('../services/recommendation.service.js');
+
+  const result = await recommendationService.generateListingRecommendations(listingId, job.id);
+
+  return result;
+}
+
+/**
+ * Process GENERATE_RECOMMENDATIONS_ASIN job
+ * @param {Object} job
+ * @returns {Promise<Object>}
+ */
+async function processGenerateRecommendationsAsin(job) {
+  const input = job.input_json || {};
+  const asinEntityId = input.asin_entity_id || job.asin_entity_id;
+
+  if (!asinEntityId) {
+    throw new Error('asin_entity_id is required for GENERATE_RECOMMENDATIONS_ASIN job');
+  }
+
+  console.log(`[Worker] Generating recommendations for ASIN entity ${asinEntityId}`);
+
+  const recommendationService = await import('../services/recommendation.service.js');
+
+  const result = await recommendationService.generateAsinRecommendations(asinEntityId, job.id);
+
+  return result;
 }
 
 /**

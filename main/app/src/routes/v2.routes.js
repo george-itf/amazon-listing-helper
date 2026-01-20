@@ -1361,6 +1361,178 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
+  // RECOMMENDATIONS (Slice D)
+  // ============================================================================
+
+  /**
+   * GET /api/v2/recommendations
+   * Get all pending recommendations
+   */
+  fastify.get('/api/v2/recommendations', async (request, reply) => {
+    const recommendationService = await import('../services/recommendation.service.js');
+    const { entity_type, type, limit = '50' } = request.query;
+
+    const recommendations = await recommendationService.getPendingRecommendations({
+      entityType: entity_type,
+      type,
+      limit: parseInt(limit, 10),
+    });
+
+    return { recommendations };
+  });
+
+  /**
+   * GET /api/v2/recommendations/:id
+   * Get a specific recommendation
+   */
+  fastify.get('/api/v2/recommendations/:id', async (request, reply) => {
+    const recommendationService = await import('../services/recommendation.service.js');
+    const recommendationId = parseInt(request.params.id, 10);
+
+    const recommendation = await recommendationService.getRecommendation(recommendationId);
+    if (!recommendation) {
+      return reply.status(404).send({ error: 'Recommendation not found' });
+    }
+
+    return recommendation;
+  });
+
+  /**
+   * POST /api/v2/recommendations/:id/accept
+   * Accept a recommendation
+   */
+  fastify.post('/api/v2/recommendations/:id/accept', async (request, reply) => {
+    const recommendationService = await import('../services/recommendation.service.js');
+    const recommendationId = parseInt(request.params.id, 10);
+    const { reason } = request.body || {};
+
+    try {
+      const result = await recommendationService.acceptRecommendation(recommendationId, reason);
+      return result;
+    } catch (error) {
+      return reply.status(400).send({ error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/recommendations/:id/reject
+   * Reject a recommendation
+   */
+  fastify.post('/api/v2/recommendations/:id/reject', async (request, reply) => {
+    const recommendationService = await import('../services/recommendation.service.js');
+    const recommendationId = parseInt(request.params.id, 10);
+    const { reason } = request.body || {};
+
+    try {
+      const result = await recommendationService.rejectRecommendation(recommendationId, reason);
+      return result;
+    } catch (error) {
+      return reply.status(400).send({ error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/recommendations/:id/snooze
+   * Snooze a recommendation
+   */
+  fastify.post('/api/v2/recommendations/:id/snooze', async (request, reply) => {
+    const recommendationService = await import('../services/recommendation.service.js');
+    const recommendationId = parseInt(request.params.id, 10);
+    const { days = 7, reason } = request.body || {};
+
+    try {
+      const result = await recommendationService.snoozeRecommendation(recommendationId, days, reason);
+      return result;
+    } catch (error) {
+      return reply.status(400).send({ error: error.message });
+    }
+  });
+
+  /**
+   * GET /api/v2/listings/:listingId/recommendations
+   * Get recommendations for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/recommendations', async (request, reply) => {
+    const recommendationService = await import('../services/recommendation.service.js');
+    const listingId = parseInt(request.params.listingId, 10);
+    const { status, limit = '20' } = request.query;
+
+    const recommendations = await recommendationService.getRecommendationsForEntity(
+      'LISTING',
+      listingId,
+      { status, limit: parseInt(limit, 10) }
+    );
+
+    return { listing_id: listingId, recommendations };
+  });
+
+  /**
+   * POST /api/v2/listings/:listingId/recommendations/refresh
+   * Trigger recommendation generation for a listing
+   */
+  fastify.post('/api/v2/listings/:listingId/recommendations/refresh', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const listingId = parseInt(request.params.listingId, 10);
+
+    // Verify listing exists
+    const listingResult = await dbQuery('SELECT id FROM listings WHERE id = $1', [listingId]);
+    if (listingResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'Listing not found' });
+    }
+
+    // Create recommendation generation job
+    const jobResult = await dbQuery(`
+      INSERT INTO jobs (job_type, scope_type, listing_id, created_by)
+      VALUES ('GENERATE_RECOMMENDATIONS_LISTING', 'LISTING', $1, 'user')
+      RETURNING *
+    `, [listingId]);
+
+    return { job_id: jobResult.rows[0].id, status: 'PENDING' };
+  });
+
+  /**
+   * GET /api/v2/asins/:id/recommendations
+   * Get recommendations for an ASIN entity
+   */
+  fastify.get('/api/v2/asins/:id/recommendations', async (request, reply) => {
+    const recommendationService = await import('../services/recommendation.service.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+    const { status, limit = '20' } = request.query;
+
+    const recommendations = await recommendationService.getRecommendationsForEntity(
+      'ASIN',
+      asinEntityId,
+      { status, limit: parseInt(limit, 10) }
+    );
+
+    return { asin_entity_id: asinEntityId, recommendations };
+  });
+
+  /**
+   * POST /api/v2/asins/:id/recommendations/refresh
+   * Trigger recommendation generation for an ASIN entity
+   */
+  fastify.post('/api/v2/asins/:id/recommendations/refresh', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    // Verify entity exists
+    const entityResult = await dbQuery('SELECT id FROM asin_entities WHERE id = $1', [asinEntityId]);
+    if (entityResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    // Create recommendation generation job
+    const jobResult = await dbQuery(`
+      INSERT INTO jobs (job_type, scope_type, asin_entity_id, input_json, created_by)
+      VALUES ('GENERATE_RECOMMENDATIONS_ASIN', 'ASIN', $1, $2, 'user')
+      RETURNING *
+    `, [asinEntityId, JSON.stringify({ asin_entity_id: asinEntityId })]);
+
+    return { job_id: jobResult.rows[0].id, status: 'PENDING' };
+  });
+
+  // ============================================================================
   // HEALTH CHECK
   // ============================================================================
 
