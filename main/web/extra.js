@@ -3768,3 +3768,578 @@ function formatEventChange(before, after) {
 
   return changes.join(' | ') || '';
 }
+
+// ============================================
+// SLICE E: ASIN ANALYZER + RESEARCH POOL
+// ============================================
+
+let currentAsinEntityId = null;
+let researchPoolData = [];
+
+/**
+ * Initialize ASIN Analyzer UI
+ */
+async function initAsinAnalyzer() {
+  await loadResearchPoolSummary();
+  await loadResearchPool();
+}
+
+/**
+ * Analyze an ASIN - triggers Keepa sync and feature computation
+ */
+async function analyzeAsin(asin, marketplaceId = 1) {
+  if (!asin || asin.trim().length === 0) {
+    alert('Please enter an ASIN');
+    return null;
+  }
+
+  const sanitized = asin.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+  if (sanitized.length !== 10) {
+    alert('ASIN must be exactly 10 characters');
+    return null;
+  }
+
+  try {
+    const res = await fetch('/api/v2/asins/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asin: sanitized, marketplace_id: marketplaceId })
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to analyze ASIN');
+
+    currentAsinEntityId = data.asin_entity_id;
+    return data;
+  } catch (error) {
+    console.error('ASIN analyze error:', error);
+    alert('Error: ' + error.message);
+    return null;
+  }
+}
+
+/**
+ * Get ASIN entity details with features
+ */
+async function getAsinDetails(asinEntityId) {
+  try {
+    const res = await fetch(`/api/v2/asins/${asinEntityId}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to get ASIN details');
+    return data;
+  } catch (error) {
+    console.error('Get ASIN details error:', error);
+    return null;
+  }
+}
+
+/**
+ * Track/untrack an ASIN in research pool
+ */
+async function toggleAsinTracking(asinEntityId, track) {
+  try {
+    const method = track ? 'POST' : 'DELETE';
+    const res = await fetch(`/api/v2/asins/${asinEntityId}/track`, { method });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update tracking');
+    await loadResearchPool();
+    return data;
+  } catch (error) {
+    console.error('Toggle tracking error:', error);
+    alert('Error: ' + error.message);
+    return null;
+  }
+}
+
+/**
+ * Load research pool summary stats
+ */
+async function loadResearchPoolSummary() {
+  const summaryEl = document.getElementById('research-pool-summary');
+  if (!summaryEl) return;
+
+  try {
+    const res = await fetch('/api/v2/research-pool/summary');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load summary');
+
+    summaryEl.innerHTML = `
+      <div class="grid grid-cols-5 gap-4">
+        <div class="bg-blue-50 p-3 rounded text-center">
+          <div class="text-2xl font-bold text-blue-600">${data.total_tracked}</div>
+          <div class="text-xs text-gray-600">Tracked ASINs</div>
+        </div>
+        <div class="bg-green-50 p-3 rounded text-center">
+          <div class="text-2xl font-bold text-green-600">${data.converted_count}</div>
+          <div class="text-xs text-gray-600">Converted</div>
+        </div>
+        <div class="bg-yellow-50 p-3 rounded text-center">
+          <div class="text-2xl font-bold text-yellow-600">${data.unconverted_count}</div>
+          <div class="text-xs text-gray-600">Pending</div>
+        </div>
+        <div class="bg-purple-50 p-3 rounded text-center">
+          <div class="text-2xl font-bold text-purple-600">${data.with_scenario_bom}</div>
+          <div class="text-xs text-gray-600">With BOM</div>
+        </div>
+        <div class="bg-emerald-50 p-3 rounded text-center">
+          <div class="text-2xl font-bold text-emerald-600">${data.high_opportunity_count}</div>
+          <div class="text-xs text-gray-600">High Opportunity</div>
+        </div>
+      </div>
+    `;
+  } catch (error) {
+    summaryEl.innerHTML = `<div class="text-red-600">Error loading summary: ${error.message}</div>`;
+  }
+}
+
+/**
+ * Load research pool list
+ */
+async function loadResearchPool(sortBy = 'opportunity_margin', sortDir = 'desc') {
+  const listEl = document.getElementById('research-pool-list');
+  if (!listEl) return;
+
+  listEl.innerHTML = '<div class="text-gray-500 text-center py-8">Loading research pool...</div>';
+
+  try {
+    const res = await fetch(`/api/v2/research-pool?sort_by=${sortBy}&sort_dir=${sortDir}&limit=50`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load research pool');
+
+    researchPoolData = data.items;
+
+    if (data.items.length === 0) {
+      listEl.innerHTML = `
+        <div class="text-center py-8">
+          <p class="text-gray-500 mb-4">No ASINs in research pool</p>
+          <p class="text-sm text-gray-400">Use the ASIN Analyzer to find and track ASINs</p>
+        </div>
+      `;
+      return;
+    }
+
+    listEl.innerHTML = `
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="text-left p-2">ASIN</th>
+              <th class="text-left p-2">Title</th>
+              <th class="text-right p-2">Price</th>
+              <th class="text-right p-2">BOM Cost</th>
+              <th class="text-right p-2 cursor-pointer hover:bg-gray-200" onclick="loadResearchPool('opportunity_margin', '${sortBy === 'opportunity_margin' && sortDir === 'desc' ? 'asc' : 'desc'}')">
+                Margin ${sortBy === 'opportunity_margin' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+              </th>
+              <th class="text-right p-2">Score</th>
+              <th class="text-center p-2">Status</th>
+              <th class="text-center p-2">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.items.map(item => renderResearchPoolRow(item)).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="text-xs text-gray-500 mt-2">Showing ${data.items.length} of ${data.total} tracked ASINs</div>
+    `;
+  } catch (error) {
+    listEl.innerHTML = `<div class="text-red-600">Error: ${error.message}</div>`;
+  }
+}
+
+/**
+ * Render a single research pool row
+ */
+function renderResearchPoolRow(item) {
+  const marginColor = item.opportunity_margin > 0.15 ? 'text-green-600' :
+                      item.opportunity_margin > 0.10 ? 'text-yellow-600' :
+                      item.opportunity_margin > 0 ? 'text-orange-600' : 'text-gray-500';
+
+  const scoreColor = item.opportunity_score >= 50 ? 'bg-green-100 text-green-800' :
+                     item.opportunity_score >= 30 ? 'bg-yellow-100 text-yellow-800' :
+                     'bg-gray-100 text-gray-600';
+
+  const statusBadge = item.is_converted ?
+    `<span class="px-2 py-1 text-xs bg-green-100 text-green-700 rounded">Converted</span>` :
+    item.has_scenario_bom ?
+    `<span class="px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded">Has BOM</span>` :
+    `<span class="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded">Pending</span>`;
+
+  return `
+    <tr class="border-b hover:bg-gray-50">
+      <td class="p-2">
+        <a href="https://www.amazon.co.uk/dp/${item.asin}" target="_blank" class="text-blue-600 hover:underline font-mono">
+          ${item.asin}
+        </a>
+      </td>
+      <td class="p-2 max-w-xs truncate" title="${escapeHtml(item.title || '')}">${escapeHtml((item.title || '').substring(0, 40))}...</td>
+      <td class="p-2 text-right">${item.current_price ? '£' + safeToFixed(item.current_price) : '-'}</td>
+      <td class="p-2 text-right">${item.scenario_bom_cost ? '£' + safeToFixed(item.scenario_bom_cost) : '-'}</td>
+      <td class="p-2 text-right ${marginColor} font-semibold">
+        ${item.opportunity_margin ? (item.opportunity_margin * 100).toFixed(1) + '%' : '-'}
+      </td>
+      <td class="p-2 text-center">
+        <span class="px-2 py-1 text-xs rounded ${scoreColor}">${item.opportunity_score}</span>
+      </td>
+      <td class="p-2 text-center">${statusBadge}</td>
+      <td class="p-2 text-center">
+        <div class="flex gap-1 justify-center">
+          <button onclick="openAsinDetailModal(${item.asin_entity_id})" class="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600">View</button>
+          ${!item.is_converted ? `
+            <button onclick="openScenarioBomModal(${item.asin_entity_id})" class="px-2 py-1 text-xs bg-purple-500 text-white rounded hover:bg-purple-600">BOM</button>
+            <button onclick="openConvertToListingModal(${item.asin_entity_id})" class="px-2 py-1 text-xs bg-green-500 text-white rounded hover:bg-green-600">Convert</button>
+          ` : ''}
+          <button onclick="toggleAsinTracking(${item.asin_entity_id}, false)" class="px-2 py-1 text-xs bg-gray-400 text-white rounded hover:bg-gray-500">Untrack</button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+/**
+ * Open ASIN detail modal
+ */
+async function openAsinDetailModal(asinEntityId) {
+  const details = await getAsinDetails(asinEntityId);
+  if (!details) return;
+
+  currentAsinEntityId = asinEntityId;
+  const features = details.features || {};
+  const keepa = details.latest_keepa?.parsed_json?.metrics || {};
+
+  const modalHtml = `
+    <div id="asin-detail-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+        <div class="p-4 border-b flex justify-between items-center">
+          <h3 class="text-lg font-semibold">ASIN Details: ${details.asin}</h3>
+          <button onclick="closeAsinDetailModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+        </div>
+        <div class="p-4">
+          <div class="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <h4 class="font-semibold mb-2">Basic Info</h4>
+              <div class="text-sm space-y-1">
+                <p><span class="text-gray-500">Title:</span> ${escapeHtml(details.title || 'N/A')}</p>
+                <p><span class="text-gray-500">Brand:</span> ${escapeHtml(details.brand || 'N/A')}</p>
+                <p><span class="text-gray-500">Category:</span> ${escapeHtml(details.category || 'N/A')}</p>
+                <p><span class="text-gray-500">Marketplace:</span> ${escapeHtml(details.marketplace_name)}</p>
+              </div>
+            </div>
+            <div>
+              <h4 class="font-semibold mb-2">Keepa Metrics</h4>
+              <div class="text-sm space-y-1">
+                <p><span class="text-gray-500">Current Price:</span> ${keepa.price_current ? '£' + safeToFixed(keepa.price_current) : 'N/A'}</p>
+                <p><span class="text-gray-500">90d Median:</span> ${keepa.price_median_90d ? '£' + safeToFixed(keepa.price_median_90d) : 'N/A'}</p>
+                <p><span class="text-gray-500">Competitors:</span> ${keepa.offers_count_current || 'N/A'}</p>
+                <p><span class="text-gray-500">Sales Rank:</span> ${keepa.sales_rank_current || 'N/A'}</p>
+              </div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <h4 class="font-semibold mb-2">Scenario Economics</h4>
+              <div class="text-sm space-y-1">
+                <p><span class="text-gray-500">BOM Cost:</span> ${features.scenario_bom_cost_ex_vat ? '£' + safeToFixed(features.scenario_bom_cost_ex_vat) : 'Not set'}</p>
+                <p><span class="text-gray-500">Est. Profit:</span> ${features.opportunity_profit ? '£' + safeToFixed(features.opportunity_profit) : 'N/A'}</p>
+                <p><span class="text-gray-500">Est. Margin:</span> ${features.opportunity_margin ? (features.opportunity_margin * 100).toFixed(1) + '%' : 'N/A'}</p>
+              </div>
+            </div>
+            <div>
+              <h4 class="font-semibold mb-2">Tracking Status</h4>
+              <div class="text-sm space-y-1">
+                <p><span class="text-gray-500">Tracked:</span> ${details.is_tracked ? 'Yes' : 'No'}</p>
+                <p><span class="text-gray-500">Tracked Since:</span> ${details.tracked_at ? new Date(details.tracked_at).toLocaleDateString() : 'N/A'}</p>
+                <p><span class="text-gray-500">Converted:</span> ${details.listing_id ? 'Yes' : 'No'}</p>
+                ${details.listing_id ? `<p><span class="text-gray-500">Listing ID:</span> ${details.listing_id}</p>` : ''}
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2 mt-4 pt-4 border-t">
+            ${!details.is_tracked ? `<button onclick="toggleAsinTracking(${asinEntityId}, true); closeAsinDetailModal();" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Add to Research Pool</button>` : ''}
+            ${!details.listing_id && details.is_tracked ? `
+              <button onclick="closeAsinDetailModal(); openScenarioBomModal(${asinEntityId});" class="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600">Set Scenario BOM</button>
+              <button onclick="closeAsinDetailModal(); openConvertToListingModal(${asinEntityId});" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Convert to Listing</button>
+            ` : ''}
+            <button onclick="refreshAsinData(${asinEntityId})" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600">Refresh Data</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  closeAsinDetailModal();
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function closeAsinDetailModal() {
+  const modal = document.getElementById('asin-detail-modal');
+  if (modal) modal.remove();
+}
+
+async function refreshAsinData(asinEntityId) {
+  try {
+    await fetch(`/api/v2/asins/${asinEntityId}/keepa/refresh`, { method: 'POST' });
+    alert('Data refresh jobs queued. Refresh the page in a few moments.');
+  } catch (error) {
+    alert('Error refreshing data: ' + error.message);
+  }
+}
+
+/**
+ * Open scenario BOM modal for an ASIN
+ */
+async function openScenarioBomModal(asinEntityId) {
+  currentAsinEntityId = asinEntityId;
+
+  const bomRes = await fetch(`/api/v2/asins/${asinEntityId}/bom`);
+  const bomData = await bomRes.json();
+  const existingBom = bomData.bom;
+
+  const componentsRes = await fetch('/api/v2/components');
+  const componentsData = await componentsRes.json();
+  const components = componentsData.items || [];
+
+  const modalHtml = `
+    <div id="scenario-bom-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+        <div class="p-4 border-b flex justify-between items-center">
+          <h3 class="text-lg font-semibold">Scenario BOM ${existingBom ? '(v' + existingBom.version + ')' : ''}</h3>
+          <button onclick="closeScenarioBomModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+        </div>
+        <div class="p-4">
+          <div id="scenario-bom-lines" class="space-y-2 mb-4">
+            ${existingBom && existingBom.lines.length > 0 ? existingBom.lines.map((line, idx) => `
+              <div class="flex gap-2 items-center bom-line" data-idx="${idx}">
+                <select class="flex-1 p-2 border rounded bom-component-select">
+                  ${components.map(c => `<option value="${c.id}" ${c.id === line.component_id ? 'selected' : ''}>${escapeHtml(c.name)} (£${safeToFixed(c.unit_cost_ex_vat)})</option>`).join('')}
+                </select>
+                <input type="number" class="w-20 p-2 border rounded bom-quantity" value="${line.quantity}" min="0.01" step="0.01" placeholder="Qty">
+                <input type="number" class="w-20 p-2 border rounded bom-wastage" value="${(line.wastage_rate * 100).toFixed(1)}" min="0" step="0.1" placeholder="Waste%">
+                <button onclick="this.closest('.bom-line').remove()" class="px-2 py-1 bg-red-500 text-white rounded text-sm">x</button>
+              </div>
+            `).join('') : '<p class="text-gray-500 text-sm">No BOM lines. Add components below.</p>'}
+          </div>
+
+          <div class="flex gap-2 mb-4">
+            <select id="new-bom-component" class="flex-1 p-2 border rounded">
+              <option value="">Select component to add...</option>
+              ${components.map(c => `<option value="${c.id}">${escapeHtml(c.name)} (£${safeToFixed(c.unit_cost_ex_vat)})</option>`).join('')}
+            </select>
+            <button onclick="addScenarioBomLine()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Add Line</button>
+          </div>
+
+          ${existingBom ? `<div class="bg-gray-50 p-3 rounded mb-4"><p class="text-sm"><span class="text-gray-500">Current Total:</span> <span class="font-semibold">£${safeToFixed(existingBom.total_cost_ex_vat)}</span></p></div>` : ''}
+
+          <div class="flex gap-2 mt-4 pt-4 border-t">
+            <button onclick="saveScenarioBom()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Save BOM</button>
+            <button onclick="closeScenarioBomModal()" class="px-4 py-2 bg-gray-300 rounded hover:bg-gray-400">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  closeScenarioBomModal();
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function addScenarioBomLine() {
+  const componentSelect = document.getElementById('new-bom-component');
+  const componentId = componentSelect.value;
+  if (!componentId) { alert('Please select a component'); return; }
+
+  const container = document.getElementById('scenario-bom-lines');
+  const emptyMsg = container.querySelector('p.text-gray-500');
+  if (emptyMsg) emptyMsg.remove();
+
+  const idx = container.querySelectorAll('.bom-line').length;
+  const lineHtml = `
+    <div class="flex gap-2 items-center bom-line" data-idx="${idx}">
+      <select class="flex-1 p-2 border rounded bom-component-select">
+        ${Array.from(componentSelect.options).filter(o => o.value).map(o =>
+          `<option value="${o.value}" ${o.value === componentId ? 'selected' : ''}>${escapeHtml(o.text)}</option>`
+        ).join('')}
+      </select>
+      <input type="number" class="w-20 p-2 border rounded bom-quantity" value="1" min="0.01" step="0.01" placeholder="Qty">
+      <input type="number" class="w-20 p-2 border rounded bom-wastage" value="0" min="0" step="0.1" placeholder="Waste%">
+      <button onclick="this.closest('.bom-line').remove()" class="px-2 py-1 bg-red-500 text-white rounded text-sm">x</button>
+    </div>
+  `;
+  container.insertAdjacentHTML('beforeend', lineHtml);
+  componentSelect.value = '';
+}
+
+async function saveScenarioBom() {
+  const lines = [];
+  document.querySelectorAll('#scenario-bom-lines .bom-line').forEach(lineEl => {
+    const componentId = lineEl.querySelector('.bom-component-select').value;
+    const quantity = parseFloat(lineEl.querySelector('.bom-quantity').value) || 0;
+    const wastagePercent = parseFloat(lineEl.querySelector('.bom-wastage').value) || 0;
+
+    if (componentId && quantity > 0) {
+      lines.push({ component_id: parseInt(componentId, 10), quantity, wastage_rate: wastagePercent / 100 });
+    }
+  });
+
+  if (lines.length === 0) { alert('Please add at least one BOM line'); return; }
+
+  try {
+    const res = await fetch(`/api/v2/asins/${currentAsinEntityId}/bom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save BOM');
+
+    alert('Scenario BOM saved! Total cost: £' + safeToFixed(data.total_cost_ex_vat));
+    closeScenarioBomModal();
+    await loadResearchPool();
+  } catch (error) {
+    alert('Error saving BOM: ' + error.message);
+  }
+}
+
+function closeScenarioBomModal() {
+  const modal = document.getElementById('scenario-bom-modal');
+  if (modal) modal.remove();
+}
+
+/**
+ * Open convert to listing modal
+ */
+async function openConvertToListingModal(asinEntityId) {
+  currentAsinEntityId = asinEntityId;
+  const details = await getAsinDetails(asinEntityId);
+  if (!details) return;
+
+  const keepa = details.latest_keepa?.parsed_json?.metrics || {};
+
+  const modalHtml = `
+    <div id="convert-listing-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg shadow-xl max-w-lg w-full">
+        <div class="p-4 border-b flex justify-between items-center">
+          <h3 class="text-lg font-semibold">Convert ASIN to Listing</h3>
+          <button onclick="closeConvertListingModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+        </div>
+        <div class="p-4">
+          <div class="mb-4">
+            <p class="text-sm text-gray-600 mb-2">Converting: <span class="font-mono font-semibold">${details.asin}</span></p>
+            <p class="text-sm text-gray-500">${escapeHtml(details.title || 'No title')}</p>
+          </div>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">SKU *</label>
+              <input type="text" id="convert-sku" class="w-full p-2 border rounded" placeholder="Enter unique SKU" required>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Title (optional)</label>
+              <input type="text" id="convert-title" class="w-full p-2 border rounded" value="${escapeHtml(details.title || '')}">
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Price (inc VAT)</label>
+                <input type="number" id="convert-price" class="w-full p-2 border rounded" value="${keepa.price_current || ''}" step="0.01" min="0">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Initial Stock</label>
+                <input type="number" id="convert-quantity" class="w-full p-2 border rounded" value="0" min="0">
+              </div>
+            </div>
+            <div class="flex items-center">
+              <input type="checkbox" id="convert-copy-bom" checked class="mr-2">
+              <label for="convert-copy-bom" class="text-sm text-gray-700">Copy scenario BOM to listing BOM</label>
+            </div>
+          </div>
+          <div class="flex gap-2 mt-6 pt-4 border-t">
+            <button onclick="convertAsinToListing()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Create Listing</button>
+            <button onclick="closeConvertListingModal()" class="px-4 py-2 bg-gray-300 rounded hover:bg-gray-400">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  closeConvertListingModal();
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+async function convertAsinToListing() {
+  const sku = document.getElementById('convert-sku').value.trim();
+  const title = document.getElementById('convert-title').value.trim();
+  const priceIncVat = parseFloat(document.getElementById('convert-price').value) || 0;
+  const quantity = parseInt(document.getElementById('convert-quantity').value, 10) || 0;
+  const copyBom = document.getElementById('convert-copy-bom').checked;
+
+  if (!sku) { alert('SKU is required'); return; }
+
+  try {
+    const res = await fetch(`/api/v2/asins/${currentAsinEntityId}/convert-to-listing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku, title: title || undefined, price_inc_vat: priceIncVat || undefined, available_quantity: quantity, copy_scenario_bom: copyBom })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to convert');
+
+    alert('Listing created successfully!\n\nListing ID: ' + data.listing_id + '\nSKU: ' + data.sku + '\nBOM copied: ' + (data.bom_copied ? 'Yes' : 'No'));
+    closeConvertListingModal();
+    await loadResearchPool();
+  } catch (error) {
+    alert('Error converting to listing: ' + error.message);
+  }
+}
+
+function closeConvertListingModal() {
+  const modal = document.getElementById('convert-listing-modal');
+  if (modal) modal.remove();
+}
+
+/**
+ * Render ASIN analyzer input section
+ */
+function renderAsinAnalyzerInput(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  container.innerHTML = `
+    <div class="bg-white p-4 rounded-lg shadow mb-4">
+      <h3 class="font-semibold mb-3">Analyze New ASIN</h3>
+      <div class="flex gap-2">
+        <input type="text" id="analyze-asin-input" class="flex-1 p-2 border rounded font-mono uppercase" placeholder="Enter ASIN (e.g., B08N5WRWNW)" maxlength="10">
+        <select id="analyze-marketplace-select" class="p-2 border rounded">
+          <option value="1">UK (amazon.co.uk)</option>
+          <option value="2">US (amazon.com)</option>
+          <option value="3">DE (amazon.de)</option>
+        </select>
+        <button onclick="handleAnalyzeAsin()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Analyze</button>
+      </div>
+      <div id="analyze-result" class="mt-3"></div>
+    </div>
+  `;
+}
+
+async function handleAnalyzeAsin() {
+  const asin = document.getElementById('analyze-asin-input').value;
+  const marketplaceId = parseInt(document.getElementById('analyze-marketplace-select').value, 10);
+  const resultEl = document.getElementById('analyze-result');
+
+  resultEl.innerHTML = '<p class="text-gray-500">Analyzing...</p>';
+  const result = await analyzeAsin(asin, marketplaceId);
+
+  if (result) {
+    resultEl.innerHTML = `
+      <div class="p-3 bg-green-50 border border-green-200 rounded">
+        <p class="font-semibold text-green-700">Analysis started!</p>
+        <p class="text-sm text-gray-600">ASIN Entity ID: ${result.asin_entity_id}</p>
+        <div class="mt-2 flex gap-2">
+          <button onclick="openAsinDetailModal(${result.asin_entity_id})" class="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600">View Details</button>
+          <button onclick="toggleAsinTracking(${result.asin_entity_id}, true)" class="px-3 py-1 bg-purple-500 text-white rounded text-sm hover:bg-purple-600">Add to Research Pool</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('analyze-asin-input').value = '';
+  } else {
+    resultEl.innerHTML = '<p class="text-red-600">Analysis failed. Check the console for details.</p>';
+  }
+}

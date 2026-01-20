@@ -1533,6 +1533,492 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
+  // SLICE E: ASIN ANALYZER + RESEARCH POOL + CONVERT TO LISTING
+  // ============================================================================
+
+  /**
+   * GET /api/v2/asins/:id/bom
+   * Get scenario BOM for an ASIN entity
+   */
+  fastify.get('/api/v2/asins/:id/bom', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    // Get active scenario BOM for this ASIN
+    const bomResult = await dbQuery(`
+      SELECT b.id, b.name, b.version, b.is_active, b.created_at, b.updated_at
+      FROM boms b
+      WHERE b.asin_entity_id = $1 AND b.scope_type = 'ASIN_SCENARIO' AND b.is_active = true
+      ORDER BY b.version DESC
+      LIMIT 1
+    `, [asinEntityId]);
+
+    if (bomResult.rows.length === 0) {
+      return { asin_entity_id: asinEntityId, bom: null, message: 'No scenario BOM exists' };
+    }
+
+    const bom = bomResult.rows[0];
+
+    // Get BOM lines with component details
+    const linesResult = await dbQuery(`
+      SELECT bl.id, bl.component_id, bl.quantity, bl.wastage_rate, bl.notes,
+             c.name as component_name, c.sku as component_sku, c.unit_cost_ex_vat,
+             ROUND(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat, 2) as line_cost_ex_vat
+      FROM bom_lines bl
+      JOIN components c ON c.id = bl.component_id
+      WHERE bl.bom_id = $1
+      ORDER BY c.name
+    `, [bom.id]);
+
+    const totalCost = linesResult.rows.reduce((sum, line) => sum + parseFloat(line.line_cost_ex_vat || 0), 0);
+
+    return {
+      asin_entity_id: asinEntityId,
+      bom: {
+        ...bom,
+        lines: linesResult.rows,
+        total_cost_ex_vat: Math.round(totalCost * 100) / 100,
+      },
+    };
+  });
+
+  /**
+   * POST /api/v2/asins/:id/bom
+   * Create or update scenario BOM for an ASIN entity
+   * Body: { name?, lines: [{ component_id, quantity, wastage_rate?, notes? }] }
+   */
+  fastify.post('/api/v2/asins/:id/bom', async (request, reply) => {
+    const { query: dbQuery, transaction } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+    const { name, lines = [] } = request.body;
+
+    // Verify ASIN entity exists
+    const entityResult = await dbQuery(
+      'SELECT id, asin FROM asin_entities WHERE id = $1',
+      [asinEntityId]
+    );
+
+    if (entityResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    const entity = entityResult.rows[0];
+
+    try {
+      const result = await transaction(async (client) => {
+        // Get current active BOM version for this ASIN
+        const currentBomResult = await client.query(`
+          SELECT id, version FROM boms
+          WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO' AND is_active = true
+          ORDER BY version DESC
+          LIMIT 1
+        `, [asinEntityId]);
+
+        let newVersion = 1;
+        if (currentBomResult.rows.length > 0) {
+          // Deactivate current BOM
+          await client.query(
+            'UPDATE boms SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+            [currentBomResult.rows[0].id]
+          );
+          newVersion = currentBomResult.rows[0].version + 1;
+        }
+
+        // Create new BOM
+        const bomName = name || `Scenario BOM for ${entity.asin} v${newVersion}`;
+        const newBomResult = await client.query(`
+          INSERT INTO boms (asin_entity_id, scope_type, name, version, is_active, created_by)
+          VALUES ($1, 'ASIN_SCENARIO', $2, $3, true, 'user')
+          RETURNING *
+        `, [asinEntityId, bomName, newVersion]);
+
+        const newBom = newBomResult.rows[0];
+
+        // Insert BOM lines
+        const insertedLines = [];
+        for (const line of lines) {
+          if (!line.component_id || !line.quantity) continue;
+
+          const lineResult = await client.query(`
+            INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+          `, [
+            newBom.id,
+            line.component_id,
+            line.quantity,
+            line.wastage_rate || 0,
+            line.notes || null,
+          ]);
+          insertedLines.push(lineResult.rows[0]);
+        }
+
+        return { bom: newBom, lines: insertedLines };
+      });
+
+      // Calculate total cost
+      const linesWithCost = await dbQuery(`
+        SELECT bl.*, c.unit_cost_ex_vat,
+               ROUND(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat, 2) as line_cost_ex_vat
+        FROM bom_lines bl
+        JOIN components c ON c.id = bl.component_id
+        WHERE bl.bom_id = $1
+      `, [result.bom.id]);
+
+      const totalCost = linesWithCost.rows.reduce((sum, line) => sum + parseFloat(line.line_cost_ex_vat || 0), 0);
+
+      // Trigger feature recomputation
+      await dbQuery(`
+        INSERT INTO jobs (job_type, scope_type, asin_entity_id, input_json, created_by)
+        VALUES ('COMPUTE_FEATURES_ASIN', 'ASIN', $1, $2, 'system')
+      `, [asinEntityId, JSON.stringify({ asin_entity_id: asinEntityId, trigger: 'bom_update' })]);
+
+      return reply.status(201).send({
+        asin_entity_id: asinEntityId,
+        bom_id: result.bom.id,
+        version: result.bom.version,
+        lines_count: result.lines.length,
+        total_cost_ex_vat: Math.round(totalCost * 100) / 100,
+      });
+    } catch (error) {
+      return reply.status(500).send({ error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/asins/:id/convert-to-listing
+   * Convert an ASIN entity to a listing
+   * Body: { sku, title?, price_inc_vat?, available_quantity?, copy_scenario_bom? }
+   */
+  fastify.post('/api/v2/asins/:id/convert-to-listing', async (request, reply) => {
+    const { query: dbQuery, transaction } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+    const {
+      sku,
+      title,
+      price_inc_vat,
+      available_quantity = 0,
+      copy_scenario_bom = true,
+    } = request.body;
+
+    if (!sku) {
+      return reply.status(400).send({ error: 'SKU is required' });
+    }
+
+    // Verify ASIN entity exists and get its data
+    const entityResult = await dbQuery(`
+      SELECT ae.*, m.vat_rate
+      FROM asin_entities ae
+      JOIN marketplaces m ON m.id = ae.marketplace_id
+      WHERE ae.id = $1
+    `, [asinEntityId]);
+
+    if (entityResult.rows.length === 0) {
+      return reply.status(404).send({ error: 'ASIN entity not found' });
+    }
+
+    const entity = entityResult.rows[0];
+
+    // Check if listing already exists for this ASIN in this marketplace
+    const existingListingResult = await dbQuery(`
+      SELECT id, sku FROM listings
+      WHERE asin = $1 AND marketplace_id = $2
+    `, [entity.asin, entity.marketplace_id]);
+
+    if (existingListingResult.rows.length > 0) {
+      return reply.status(409).send({
+        error: 'A listing already exists for this ASIN',
+        existing_listing_id: existingListingResult.rows[0].id,
+        existing_sku: existingListingResult.rows[0].sku,
+      });
+    }
+
+    // Check if SKU already exists
+    const existingSkuResult = await dbQuery(
+      'SELECT id FROM listings WHERE sku = $1 AND marketplace_id = $2',
+      [sku, entity.marketplace_id]
+    );
+
+    if (existingSkuResult.rows.length > 0) {
+      return reply.status(409).send({
+        error: 'SKU already exists in this marketplace',
+        existing_listing_id: existingSkuResult.rows[0].id,
+      });
+    }
+
+    try {
+      const result = await transaction(async (client) => {
+        // Get price from Keepa data if not provided
+        let finalPrice = price_inc_vat;
+        if (!finalPrice) {
+          const keepaResult = await client.query(`
+            SELECT parsed_json FROM keepa_snapshots
+            WHERE asin_entity_id = $1
+            ORDER BY captured_at DESC
+            LIMIT 1
+          `, [asinEntityId]);
+
+          if (keepaResult.rows.length > 0 && keepaResult.rows[0].parsed_json?.metrics?.price_current) {
+            finalPrice = keepaResult.rows[0].parsed_json.metrics.price_current;
+          } else {
+            finalPrice = 0; // Placeholder, user must edit
+          }
+        }
+
+        // Create listing
+        const listingResult = await client.query(`
+          INSERT INTO listings (
+            marketplace_id, sku, asin, title, price_inc_vat,
+            available_quantity, status, created_by
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, 'ACTIVE', 'user')
+          RETURNING *
+        `, [
+          entity.marketplace_id,
+          sku,
+          entity.asin,
+          title || entity.title || `Listing for ${entity.asin}`,
+          finalPrice,
+          available_quantity,
+        ]);
+
+        const listing = listingResult.rows[0];
+
+        // Link ASIN entity to listing
+        await client.query(`
+          UPDATE asin_entities
+          SET listing_id = $1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = $2
+        `, [listing.id, asinEntityId]);
+
+        // Copy scenario BOM to listing BOM if requested
+        let copiedBomId = null;
+        if (copy_scenario_bom) {
+          const scenarioBomResult = await client.query(`
+            SELECT id FROM boms
+            WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO' AND is_active = true
+            ORDER BY version DESC
+            LIMIT 1
+          `, [asinEntityId]);
+
+          if (scenarioBomResult.rows.length > 0) {
+            const scenarioBomId = scenarioBomResult.rows[0].id;
+
+            // Create new BOM for listing
+            const newBomResult = await client.query(`
+              INSERT INTO boms (listing_id, scope_type, name, version, is_active, created_by)
+              VALUES ($1, 'LISTING', $2, 1, true, 'user')
+              RETURNING *
+            `, [listing.id, `BOM for ${sku}`]);
+
+            copiedBomId = newBomResult.rows[0].id;
+
+            // Copy BOM lines
+            await client.query(`
+              INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
+              SELECT $1, component_id, quantity, wastage_rate, notes
+              FROM bom_lines
+              WHERE bom_id = $2
+            `, [copiedBomId, scenarioBomId]);
+          }
+        }
+
+        return { listing, copiedBomId };
+      });
+
+      // Create jobs to compute features and economics
+      await dbQuery(`
+        INSERT INTO jobs (job_type, scope_type, listing_id, created_by)
+        VALUES ('COMPUTE_FEATURES_LISTING', 'LISTING', $1, 'system')
+      `, [result.listing.id]);
+
+      return reply.status(201).send({
+        success: true,
+        listing_id: result.listing.id,
+        sku: result.listing.sku,
+        asin: result.listing.asin,
+        asin_entity_id: asinEntityId,
+        bom_copied: result.copiedBomId !== null,
+        bom_id: result.copiedBomId,
+        message: 'ASIN converted to listing successfully',
+      });
+    } catch (error) {
+      return reply.status(500).send({ error: error.message });
+    }
+  });
+
+  /**
+   * GET /api/v2/research-pool
+   * Get research pool (tracked ASINs) with computed opportunity metrics
+   */
+  fastify.get('/api/v2/research-pool', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const { limit = '50', offset = '0', sort_by = 'opportunity_margin', sort_dir = 'desc' } = request.query;
+
+    // Valid sort columns
+    const validSortColumns = ['opportunity_margin', 'opportunity_profit', 'tracked_at', 'updated_at', 'asin'];
+    const sortColumn = validSortColumns.includes(sort_by) ? sort_by : 'tracked_at';
+    const sortDirection = sort_dir.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    // Get tracked ASINs with their latest features
+    const result = await dbQuery(`
+      SELECT
+        ae.id as asin_entity_id,
+        ae.asin,
+        ae.marketplace_id,
+        ae.title,
+        ae.brand,
+        ae.category,
+        ae.is_tracked,
+        ae.tracked_at,
+        ae.listing_id,
+        ae.updated_at,
+        m.name as marketplace_name,
+        m.currency_code,
+        fs.features_json,
+        fs.computed_at as features_computed_at,
+        ks.parsed_json as keepa_data,
+        ks.captured_at as keepa_captured_at,
+        -- Extract key metrics for sorting
+        COALESCE((fs.features_json->>'opportunity_margin')::numeric, 0) as opportunity_margin,
+        COALESCE((fs.features_json->>'opportunity_profit')::numeric, 0) as opportunity_profit,
+        COALESCE((fs.features_json->>'scenario_bom_cost_ex_vat')::numeric, 0) as bom_cost,
+        COALESCE(ks.parsed_json->'metrics'->>'price_current', '0')::numeric as current_price,
+        COALESCE(ks.parsed_json->'metrics'->>'offers_count_current', '0')::int as competition_count
+      FROM asin_entities ae
+      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN LATERAL (
+        SELECT features_json, computed_at
+        FROM feature_store
+        WHERE entity_type = 'ASIN' AND entity_id = ae.id
+        ORDER BY computed_at DESC
+        LIMIT 1
+      ) fs ON true
+      LEFT JOIN LATERAL (
+        SELECT parsed_json, captured_at
+        FROM keepa_snapshots
+        WHERE asin_entity_id = ae.id
+        ORDER BY captured_at DESC
+        LIMIT 1
+      ) ks ON true
+      WHERE ae.is_tracked = true
+      ORDER BY ${sortColumn} ${sortDirection} NULLS LAST
+      LIMIT $1 OFFSET $2
+    `, [parseInt(limit, 10), parseInt(offset, 10)]);
+
+    // Get total count
+    const countResult = await dbQuery(
+      'SELECT COUNT(*) as total FROM asin_entities WHERE is_tracked = true'
+    );
+
+    // Transform results to include computed opportunity metrics
+    const items = result.rows.map(row => {
+      const features = row.features_json || {};
+      const keepaMetrics = row.keepa_data?.metrics || {};
+
+      // Calculate opportunity score (simple weighted score)
+      let opportunityScore = 0;
+      if (features.opportunity_margin > 0.15) opportunityScore += 30;
+      else if (features.opportunity_margin > 0.10) opportunityScore += 20;
+      else if (features.opportunity_margin > 0.05) opportunityScore += 10;
+
+      if (row.competition_count < 5) opportunityScore += 20;
+      else if (row.competition_count < 10) opportunityScore += 10;
+
+      if (features.has_scenario_bom) opportunityScore += 15;
+
+      return {
+        asin_entity_id: row.asin_entity_id,
+        asin: row.asin,
+        marketplace_id: row.marketplace_id,
+        marketplace_name: row.marketplace_name,
+        currency_code: row.currency_code,
+        title: row.title,
+        brand: row.brand,
+        category: row.category,
+        tracked_at: row.tracked_at,
+        listing_id: row.listing_id,
+        is_converted: row.listing_id !== null,
+
+        // Keepa metrics
+        current_price: keepaMetrics.price_current || null,
+        price_median_90d: keepaMetrics.price_median_90d || null,
+        competition_count: keepaMetrics.offers_count_current || null,
+        sales_rank: keepaMetrics.sales_rank_current || null,
+
+        // Scenario metrics
+        has_scenario_bom: features.has_scenario_bom || false,
+        scenario_bom_cost: features.scenario_bom_cost_ex_vat || null,
+        opportunity_profit: features.opportunity_profit || null,
+        opportunity_margin: features.opportunity_margin || null,
+
+        // Computed score
+        opportunity_score: opportunityScore,
+
+        // Data freshness
+        features_computed_at: row.features_computed_at,
+        keepa_captured_at: row.keepa_captured_at,
+      };
+    });
+
+    return {
+      items,
+      total: parseInt(countResult.rows[0].total, 10),
+      limit: parseInt(limit, 10),
+      offset: parseInt(offset, 10),
+    };
+  });
+
+  /**
+   * GET /api/v2/research-pool/summary
+   * Get summary statistics for the research pool
+   */
+  fastify.get('/api/v2/research-pool/summary', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+
+    const result = await dbQuery(`
+      SELECT
+        COUNT(*) as total_tracked,
+        COUNT(CASE WHEN listing_id IS NOT NULL THEN 1 END) as converted_count,
+        COUNT(CASE WHEN listing_id IS NULL THEN 1 END) as unconverted_count
+      FROM asin_entities
+      WHERE is_tracked = true
+    `);
+
+    // Get ASINs with high opportunity (margin > 15%)
+    const opportunityResult = await dbQuery(`
+      SELECT COUNT(*) as high_opportunity_count
+      FROM asin_entities ae
+      JOIN LATERAL (
+        SELECT features_json
+        FROM feature_store
+        WHERE entity_type = 'ASIN' AND entity_id = ae.id
+        ORDER BY computed_at DESC
+        LIMIT 1
+      ) fs ON true
+      WHERE ae.is_tracked = true
+        AND (fs.features_json->>'opportunity_margin')::numeric > 0.15
+    `);
+
+    // Get ASINs with scenario BOMs
+    const bomResult = await dbQuery(`
+      SELECT COUNT(DISTINCT asin_entity_id) as with_bom_count
+      FROM boms
+      WHERE scope_type = 'ASIN_SCENARIO' AND is_active = true AND asin_entity_id IS NOT NULL
+    `);
+
+    const stats = result.rows[0];
+
+    return {
+      total_tracked: parseInt(stats.total_tracked, 10),
+      converted_count: parseInt(stats.converted_count, 10),
+      unconverted_count: parseInt(stats.unconverted_count, 10),
+      with_scenario_bom: parseInt(bomResult.rows[0].with_bom_count, 10),
+      high_opportunity_count: parseInt(opportunityResult.rows[0].high_opportunity_count, 10),
+    };
+  });
+
+  // ============================================================================
   // HEALTH CHECK
   // ============================================================================
 
