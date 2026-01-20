@@ -30,6 +30,7 @@ import { trackCompetitor, untrackCompetitor, getTrackedCompetitors, getAllTracke
 import * as OrderRepository from './repositories/order.repository.js';
 import { syncOrders, getSyncStatus } from './orders-sync.js';
 import { registerV2Routes } from './routes/v2.routes.js';
+import { startWorker, stopWorker } from './workers/job-worker.js';
 
 const fastify = Fastify({ logger: true });
 await fastify.register(cors, { origin: true });
@@ -2778,9 +2779,29 @@ const start = async () => {
   try {
     await fastify.listen({ port: 4000, host: '0.0.0.0' });
     console.log('Server running on http://0.0.0.0:4000');
+
+    // Start the job worker (Slice B)
+    if (process.env.DISABLE_WORKER !== 'true') {
+      startWorker();
+      console.log('Job worker started');
+    }
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);
   }
 };
+
+// Graceful shutdown
+const gracefulShutdown = async (signal) => {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+  stopWorker();
+  await fastify.close();
+  await closePool();
+  console.log('Server shutdown complete');
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 start();

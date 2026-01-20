@@ -3091,3 +3091,680 @@ async function executeImport() {
   btn.disabled = false;
   btn.textContent = 'Import';
 }
+
+// ============================================================================
+// EDIT PRICE MODAL (Slice B - API v2)
+// ============================================================================
+
+let currentPriceEditListingId = null;
+let currentPricePreviewData = null;
+
+/**
+ * Open the Edit Price modal for a listing
+ * @param {number} listingId
+ */
+async function openEditPriceModal(listingId) {
+  currentPriceEditListingId = listingId;
+  currentPricePreviewData = null;
+
+  // Create modal if not exists
+  if (!document.getElementById('edit-price-modal')) {
+    createEditPriceModal();
+  }
+
+  // Get current economics
+  const modal = document.getElementById('edit-price-modal');
+  const contentDiv = document.getElementById('edit-price-content');
+  const previewDiv = document.getElementById('edit-price-preview');
+  const publishBtn = document.getElementById('btn-publish-price');
+
+  publishBtn.disabled = true;
+  previewDiv.innerHTML = '';
+
+  try {
+    const economics = await loadEconomicsV2(listingId);
+
+    contentDiv.innerHTML = `
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Current Price (inc VAT)</label>
+        <div class="text-lg font-bold">£${economics.price_inc_vat.toFixed(2)}</div>
+      </div>
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Current Profit (ex VAT)</label>
+        <div class="text-lg ${economics.profit_ex_vat >= 0 ? 'text-green-600' : 'text-red-600'}">
+          £${economics.profit_ex_vat.toFixed(2)} (${(economics.margin * 100).toFixed(1)}%)
+        </div>
+      </div>
+      <div class="mb-4">
+        <label for="new-price-input" class="block text-sm font-medium text-gray-700 mb-1">New Price (inc VAT)</label>
+        <div class="flex">
+          <span class="inline-flex items-center px-3 bg-gray-100 border border-r-0 rounded-l">£</span>
+          <input type="number" id="new-price-input" step="0.01" min="0"
+                 class="flex-1 border rounded-r px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                 value="${economics.price_inc_vat.toFixed(2)}"
+                 onchange="previewPriceChange()">
+        </div>
+      </div>
+      <div class="mb-4">
+        <label for="price-reason-input" class="block text-sm font-medium text-gray-700 mb-1">Reason for Change</label>
+        <textarea id="price-reason-input" rows="2"
+                  class="w-full border rounded px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g., Competitor price adjustment, Buy Box recovery"></textarea>
+      </div>
+      <button onclick="previewPriceChange()" class="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600">
+        Preview Change
+      </button>
+    `;
+
+    modal.classList.remove('hidden');
+  } catch (error) {
+    contentDiv.innerHTML = `<div class="text-red-600">Error loading listing: ${error.message}</div>`;
+    modal.classList.remove('hidden');
+  }
+}
+
+/**
+ * Create the Edit Price modal HTML
+ */
+function createEditPriceModal() {
+  const modal = document.createElement('div');
+  modal.id = 'edit-price-modal';
+  modal.className = 'fixed inset-0 bg-black bg-opacity-50 hidden z-50 flex items-center justify-center';
+  modal.innerHTML = `
+    <div class="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between px-6 py-4 border-b">
+        <h2 class="text-xl font-bold">Edit Price</h2>
+        <button onclick="closeEditPriceModal()" class="text-gray-500 hover:text-gray-700">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="p-6">
+        <div id="edit-price-content">Loading...</div>
+        <div id="edit-price-preview" class="mt-4"></div>
+        <div class="mt-4 flex gap-2">
+          <button onclick="closeEditPriceModal()" class="flex-1 bg-gray-200 text-gray-800 py-2 rounded hover:bg-gray-300">
+            Cancel
+          </button>
+          <button id="btn-publish-price" onclick="publishPriceChange()" disabled
+                  class="flex-1 bg-green-500 text-white py-2 rounded hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed">
+            Publish to Amazon
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+
+/**
+ * Preview price change with guardrails
+ */
+async function previewPriceChange() {
+  const newPrice = parseFloat(document.getElementById('new-price-input').value);
+  const previewDiv = document.getElementById('edit-price-preview');
+  const publishBtn = document.getElementById('btn-publish-price');
+
+  if (isNaN(newPrice) || newPrice <= 0) {
+    previewDiv.innerHTML = '<div class="text-red-600">Please enter a valid price</div>';
+    publishBtn.disabled = true;
+    return;
+  }
+
+  previewDiv.innerHTML = '<div class="text-gray-500">Loading preview...</div>';
+
+  try {
+    const res = await fetch(`/api/v2/listings/${currentPriceEditListingId}/price/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ price_inc_vat: newPrice })
+    });
+
+    const preview = await res.json();
+
+    if (!res.ok) {
+      throw new Error(preview.error || 'Preview failed');
+    }
+
+    currentPricePreviewData = preview;
+
+    const guardrailsHtml = preview.guardrails.passed
+      ? '<div class="flex items-center text-green-600"><span class="mr-2">✓</span> Guardrails passed</div>'
+      : `<div class="text-red-600">
+           <div class="font-medium">⚠ Guardrails violations:</div>
+           <ul class="list-disc ml-4 text-sm">
+             ${preview.guardrails.violations.map(v => `<li>${v.message}</li>`).join('')}
+           </ul>
+         </div>`;
+
+    previewDiv.innerHTML = `
+      <div class="bg-gray-50 rounded p-4">
+        <div class="text-sm font-medium text-gray-500 mb-2">Preview</div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <div class="text-xs text-gray-500">New Price (ex VAT)</div>
+            <div class="font-medium">£${preview.proposed.price_ex_vat.toFixed(2)}</div>
+          </div>
+          <div>
+            <div class="text-xs text-gray-500">Price Change</div>
+            <div class="font-medium ${preview.impact.price_change >= 0 ? 'text-green-600' : 'text-red-600'}">
+              ${preview.impact.price_change >= 0 ? '+' : ''}£${preview.impact.price_change.toFixed(2)}
+              (${(preview.impact.price_change_pct * 100).toFixed(1)}%)
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-gray-500">New Profit (ex VAT)</div>
+            <div class="font-medium ${preview.proposed.profit_ex_vat >= 0 ? 'text-green-600' : 'text-red-600'}">
+              £${preview.proposed.profit_ex_vat.toFixed(2)}
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-gray-500">New Margin</div>
+            <div class="font-medium ${preview.proposed.margin >= 0.15 ? 'text-green-600' : 'text-amber-600'}">
+              ${(preview.proposed.margin * 100).toFixed(1)}%
+            </div>
+          </div>
+        </div>
+        <div class="mt-4 pt-4 border-t">
+          ${guardrailsHtml}
+        </div>
+        ${preview.inventory.days_of_cover !== null ? `
+          <div class="mt-2 text-xs text-gray-500">
+            Stock: ${preview.inventory.available_quantity} units (${preview.inventory.days_of_cover} days cover)
+          </div>
+        ` : ''}
+      </div>
+    `;
+
+    publishBtn.disabled = !preview.guardrails.passed;
+
+  } catch (error) {
+    previewDiv.innerHTML = `<div class="text-red-600">Error: ${error.message}</div>`;
+    publishBtn.disabled = true;
+  }
+}
+
+/**
+ * Publish price change to Amazon
+ */
+async function publishPriceChange() {
+  const newPrice = parseFloat(document.getElementById('new-price-input').value);
+  const reason = document.getElementById('price-reason-input').value.trim();
+  const publishBtn = document.getElementById('btn-publish-price');
+  const previewDiv = document.getElementById('edit-price-preview');
+
+  if (!reason) {
+    alert('Please provide a reason for the price change');
+    return;
+  }
+
+  publishBtn.disabled = true;
+  publishBtn.textContent = 'Publishing...';
+
+  try {
+    const res = await fetch(`/api/v2/listings/${currentPriceEditListingId}/price/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        price_inc_vat: newPrice,
+        reason: reason
+      })
+    });
+
+    const result = await res.json();
+
+    if (!res.ok) {
+      throw new Error(result.error || 'Publish failed');
+    }
+
+    previewDiv.innerHTML = `
+      <div class="bg-green-50 border border-green-200 rounded p-4 text-green-800">
+        <div class="font-medium">✓ Price change submitted!</div>
+        <div class="text-sm mt-1">Job ID: ${result.job_id}</div>
+        <div class="text-sm">The change will be processed shortly.</div>
+      </div>
+    `;
+
+    // Close modal after delay
+    setTimeout(() => {
+      closeEditPriceModal();
+      // Refresh listing if we have a refresh function
+      if (typeof refreshListingData === 'function') {
+        refreshListingData(currentPriceEditListingId);
+      }
+    }, 2000);
+
+  } catch (error) {
+    previewDiv.innerHTML += `<div class="mt-2 text-red-600">Error: ${error.message}</div>`;
+    publishBtn.disabled = false;
+    publishBtn.textContent = 'Publish to Amazon';
+  }
+}
+
+/**
+ * Close the Edit Price modal
+ */
+function closeEditPriceModal() {
+  const modal = document.getElementById('edit-price-modal');
+  if (modal) modal.classList.add('hidden');
+  currentPriceEditListingId = null;
+  currentPricePreviewData = null;
+}
+
+// ============================================================================
+// EDIT STOCK MODAL (Slice B - API v2)
+// ============================================================================
+
+let currentStockEditListingId = null;
+let currentStockPreviewData = null;
+
+/**
+ * Open the Edit Stock modal for a listing
+ * @param {number} listingId
+ */
+async function openEditStockModal(listingId) {
+  currentStockEditListingId = listingId;
+  currentStockPreviewData = null;
+
+  // Create modal if not exists
+  if (!document.getElementById('edit-stock-modal')) {
+    createEditStockModal();
+  }
+
+  const modal = document.getElementById('edit-stock-modal');
+  const contentDiv = document.getElementById('edit-stock-content');
+  const previewDiv = document.getElementById('edit-stock-preview');
+  const publishBtn = document.getElementById('btn-publish-stock');
+
+  publishBtn.disabled = true;
+  previewDiv.innerHTML = '';
+
+  try {
+    // Get current listing data
+    const res = await fetch(`/api/v2/listings/${listingId}/guardrails-summary`);
+    const summary = await res.json();
+
+    if (!res.ok) {
+      throw new Error(summary.error || 'Failed to load listing');
+    }
+
+    contentDiv.innerHTML = `
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Current Stock</label>
+        <div class="text-lg font-bold">${summary.current_state.available_quantity} units</div>
+      </div>
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Sales Velocity</label>
+        <div class="text-lg">${summary.current_state.sales_velocity_30d} units/day</div>
+      </div>
+      ${summary.current_state.days_of_cover !== null ? `
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Days of Cover</label>
+          <div class="text-lg ${summary.current_state.stockout_risk === 'HIGH' ? 'text-red-600' : summary.current_state.stockout_risk === 'MEDIUM' ? 'text-amber-600' : 'text-green-600'}">
+            ${summary.current_state.days_of_cover} days (${summary.current_state.stockout_risk} risk)
+          </div>
+        </div>
+      ` : ''}
+      <div class="mb-4">
+        <label for="new-stock-input" class="block text-sm font-medium text-gray-700 mb-1">New Stock Quantity</label>
+        <input type="number" id="new-stock-input" min="0" step="1"
+               class="w-full border rounded px-3 py-2 focus:ring-2 focus:ring-blue-500"
+               value="${summary.current_state.available_quantity}"
+               onchange="previewStockChange()">
+      </div>
+      <div class="mb-4">
+        <label for="stock-reason-input" class="block text-sm font-medium text-gray-700 mb-1">Reason for Change</label>
+        <textarea id="stock-reason-input" rows="2"
+                  class="w-full border rounded px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g., New shipment received, Inventory adjustment"></textarea>
+      </div>
+      <button onclick="previewStockChange()" class="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600">
+        Preview Change
+      </button>
+    `;
+
+    modal.classList.remove('hidden');
+  } catch (error) {
+    contentDiv.innerHTML = `<div class="text-red-600">Error loading listing: ${error.message}</div>`;
+    modal.classList.remove('hidden');
+  }
+}
+
+/**
+ * Create the Edit Stock modal HTML
+ */
+function createEditStockModal() {
+  const modal = document.createElement('div');
+  modal.id = 'edit-stock-modal';
+  modal.className = 'fixed inset-0 bg-black bg-opacity-50 hidden z-50 flex items-center justify-center';
+  modal.innerHTML = `
+    <div class="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between px-6 py-4 border-b">
+        <h2 class="text-xl font-bold">Edit Stock</h2>
+        <button onclick="closeEditStockModal()" class="text-gray-500 hover:text-gray-700">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="p-6">
+        <div id="edit-stock-content">Loading...</div>
+        <div id="edit-stock-preview" class="mt-4"></div>
+        <div class="mt-4 flex gap-2">
+          <button onclick="closeEditStockModal()" class="flex-1 bg-gray-200 text-gray-800 py-2 rounded hover:bg-gray-300">
+            Cancel
+          </button>
+          <button id="btn-publish-stock" onclick="publishStockChange()" disabled
+                  class="flex-1 bg-green-500 text-white py-2 rounded hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed">
+            Publish to Amazon
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+
+/**
+ * Preview stock change
+ */
+async function previewStockChange() {
+  const newQuantity = parseInt(document.getElementById('new-stock-input').value, 10);
+  const previewDiv = document.getElementById('edit-stock-preview');
+  const publishBtn = document.getElementById('btn-publish-stock');
+
+  if (isNaN(newQuantity) || newQuantity < 0) {
+    previewDiv.innerHTML = '<div class="text-red-600">Please enter a valid quantity</div>';
+    publishBtn.disabled = true;
+    return;
+  }
+
+  previewDiv.innerHTML = '<div class="text-gray-500">Loading preview...</div>';
+
+  try {
+    const res = await fetch(`/api/v2/listings/${currentStockEditListingId}/stock/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ available_quantity: newQuantity })
+    });
+
+    const preview = await res.json();
+
+    if (!res.ok) {
+      throw new Error(preview.error || 'Preview failed');
+    }
+
+    currentStockPreviewData = preview;
+
+    const riskColor = {
+      'LOW': 'text-green-600',
+      'MEDIUM': 'text-amber-600',
+      'HIGH': 'text-red-600'
+    };
+
+    const warningsHtml = preview.guardrails.violations.length > 0
+      ? `<div class="text-amber-600 mt-2">
+           <div class="font-medium">⚠ Warnings:</div>
+           <ul class="list-disc ml-4 text-sm">
+             ${preview.guardrails.violations.map(v => `<li>${v.message}</li>`).join('')}
+           </ul>
+         </div>`
+      : '';
+
+    previewDiv.innerHTML = `
+      <div class="bg-gray-50 rounded p-4">
+        <div class="text-sm font-medium text-gray-500 mb-2">Preview</div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <div class="text-xs text-gray-500">New Stock</div>
+            <div class="font-medium">${preview.proposed.available_quantity} units</div>
+          </div>
+          <div>
+            <div class="text-xs text-gray-500">Stock Change</div>
+            <div class="font-medium ${preview.impact.quantity_change >= 0 ? 'text-green-600' : 'text-red-600'}">
+              ${preview.impact.quantity_change >= 0 ? '+' : ''}${preview.impact.quantity_change} units
+            </div>
+          </div>
+          ${preview.proposed.days_of_cover !== null ? `
+            <div>
+              <div class="text-xs text-gray-500">New Days of Cover</div>
+              <div class="font-medium">${preview.proposed.days_of_cover} days</div>
+            </div>
+            <div>
+              <div class="text-xs text-gray-500">Stockout Risk</div>
+              <div class="font-medium ${riskColor[preview.proposed.stockout_risk]}">
+                ${preview.proposed.stockout_risk}
+              </div>
+            </div>
+          ` : ''}
+        </div>
+        ${warningsHtml}
+      </div>
+    `;
+
+    // Stock changes are less restrictive, enable publish even with warnings
+    publishBtn.disabled = false;
+
+  } catch (error) {
+    previewDiv.innerHTML = `<div class="text-red-600">Error: ${error.message}</div>`;
+    publishBtn.disabled = true;
+  }
+}
+
+/**
+ * Publish stock change to Amazon
+ */
+async function publishStockChange() {
+  const newQuantity = parseInt(document.getElementById('new-stock-input').value, 10);
+  const reason = document.getElementById('stock-reason-input').value.trim();
+  const publishBtn = document.getElementById('btn-publish-stock');
+  const previewDiv = document.getElementById('edit-stock-preview');
+
+  if (!reason) {
+    alert('Please provide a reason for the stock change');
+    return;
+  }
+
+  publishBtn.disabled = true;
+  publishBtn.textContent = 'Publishing...';
+
+  try {
+    const res = await fetch(`/api/v2/listings/${currentStockEditListingId}/stock/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        available_quantity: newQuantity,
+        reason: reason
+      })
+    });
+
+    const result = await res.json();
+
+    if (!res.ok) {
+      throw new Error(result.error || 'Publish failed');
+    }
+
+    previewDiv.innerHTML = `
+      <div class="bg-green-50 border border-green-200 rounded p-4 text-green-800">
+        <div class="font-medium">✓ Stock change submitted!</div>
+        <div class="text-sm mt-1">Job ID: ${result.job_id}</div>
+        <div class="text-sm">The change will be processed shortly.</div>
+      </div>
+    `;
+
+    // Close modal after delay
+    setTimeout(() => {
+      closeEditStockModal();
+      if (typeof refreshListingData === 'function') {
+        refreshListingData(currentStockEditListingId);
+      }
+    }, 2000);
+
+  } catch (error) {
+    previewDiv.innerHTML += `<div class="mt-2 text-red-600">Error: ${error.message}</div>`;
+    publishBtn.disabled = false;
+    publishBtn.textContent = 'Publish to Amazon';
+  }
+}
+
+/**
+ * Close the Edit Stock modal
+ */
+function closeEditStockModal() {
+  const modal = document.getElementById('edit-stock-modal');
+  if (modal) modal.classList.add('hidden');
+  currentStockEditListingId = null;
+  currentStockPreviewData = null;
+}
+
+// ============================================================================
+// JOBS PANEL (Slice B - API v2)
+// ============================================================================
+
+/**
+ * Load and display recent jobs
+ * @param {string} containerId - ID of container element
+ * @param {Object} options - Filter options
+ */
+async function loadJobsPanel(containerId, options = {}) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  container.innerHTML = '<div class="text-gray-500">Loading jobs...</div>';
+
+  try {
+    const params = new URLSearchParams();
+    if (options.types) params.set('types', options.types.join(','));
+    if (options.statuses) params.set('statuses', options.statuses.join(','));
+    if (options.limit) params.set('limit', options.limit);
+
+    const res = await fetch(`/api/v2/jobs?${params.toString()}`);
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to load jobs');
+    }
+
+    if (data.jobs.length === 0) {
+      container.innerHTML = '<div class="text-gray-500 text-center py-4">No jobs found</div>';
+      return;
+    }
+
+    const statusBadge = (status) => {
+      const colors = {
+        'PENDING': 'bg-yellow-100 text-yellow-800',
+        'RUNNING': 'bg-blue-100 text-blue-800',
+        'SUCCEEDED': 'bg-green-100 text-green-800',
+        'FAILED': 'bg-red-100 text-red-800',
+        'CANCELLED': 'bg-gray-100 text-gray-800',
+      };
+      return `<span class="px-2 py-0.5 rounded text-xs ${colors[status] || 'bg-gray-100'}">${status}</span>`;
+    };
+
+    container.innerHTML = `
+      <div class="space-y-2">
+        ${data.jobs.map(job => `
+          <div class="bg-white border rounded p-3 hover:bg-gray-50">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="font-medium">#${job.id}</span>
+                ${statusBadge(job.status)}
+                <span class="text-sm text-gray-600">${job.job_type.replace(/_/g, ' ')}</span>
+              </div>
+              <span class="text-xs text-gray-400">${new Date(job.created_at).toLocaleString()}</span>
+            </div>
+            ${job.listing_sku ? `<div class="text-sm text-gray-500 mt-1">SKU: ${job.listing_sku}</div>` : ''}
+            ${job.error_message ? `<div class="text-xs text-red-600 mt-1">${job.error_message}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `;
+
+  } catch (error) {
+    container.innerHTML = `<div class="text-red-600">Error: ${error.message}</div>`;
+  }
+}
+
+/**
+ * Load listing event history
+ * @param {number} listingId
+ * @param {string} containerId
+ */
+async function loadListingEventHistory(listingId, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  container.innerHTML = '<div class="text-gray-500">Loading history...</div>';
+
+  try {
+    const res = await fetch(`/api/v2/listings/${listingId}/events?limit=20`);
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to load events');
+    }
+
+    if (data.events.length === 0) {
+      container.innerHTML = '<div class="text-gray-500 text-center py-4">No events found</div>';
+      return;
+    }
+
+    const eventIcon = (type) => {
+      if (type.includes('PRICE')) return '💰';
+      if (type.includes('STOCK')) return '📦';
+      if (type.includes('BOM')) return '🔧';
+      if (type.includes('SYNC')) return '🔄';
+      return '📋';
+    };
+
+    const eventColor = (type) => {
+      if (type.includes('SUCCEEDED')) return 'border-green-200 bg-green-50';
+      if (type.includes('FAILED')) return 'border-red-200 bg-red-50';
+      if (type.includes('DRAFTED') || type.includes('PUBLISHED')) return 'border-blue-200 bg-blue-50';
+      return 'border-gray-200';
+    };
+
+    container.innerHTML = `
+      <div class="space-y-2">
+        ${data.events.map(event => `
+          <div class="border rounded p-3 ${eventColor(event.event_type)}">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span>${eventIcon(event.event_type)}</span>
+                <span class="text-sm font-medium">${event.event_type.replace(/_/g, ' ')}</span>
+              </div>
+              <span class="text-xs text-gray-400">${new Date(event.created_at).toLocaleString()}</span>
+            </div>
+            ${event.reason ? `<div class="text-sm text-gray-600 mt-1">${event.reason}</div>` : ''}
+            ${event.before_json && event.after_json ? `
+              <div class="text-xs text-gray-500 mt-1">
+                ${formatEventChange(event.before_json, event.after_json)}
+              </div>
+            ` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `;
+
+  } catch (error) {
+    container.innerHTML = `<div class="text-red-600">Error: ${error.message}</div>`;
+  }
+}
+
+/**
+ * Format event change for display
+ */
+function formatEventChange(before, after) {
+  const changes = [];
+
+  if (before.price_inc_vat !== undefined && after.price_inc_vat !== undefined) {
+    changes.push(`Price: £${before.price_inc_vat} → £${after.price_inc_vat}`);
+  }
+
+  if (before.available_quantity !== undefined && after.available_quantity !== undefined) {
+    changes.push(`Stock: ${before.available_quantity} → ${after.available_quantity}`);
+  }
+
+  return changes.join(' | ') || '';
+}
