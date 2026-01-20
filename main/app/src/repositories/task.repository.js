@@ -7,15 +7,14 @@ import { query } from '../database/connection.js';
 
 /**
  * Get all tasks with optional filters
- * @param {Object} filters - Filter options (stage, priority, archived)
+ * @param {Object} filters - Filter options (stage, priority, archived, taskType)
  * @returns {Promise<Array>} Array of tasks
  */
 export async function getAll(filters = {}) {
   let sql = `
     SELECT
       t.*,
-      l.title as listing_title,
-      l.sku as listing_sku
+      l.title as listing_title
     FROM tasks t
     LEFT JOIN listings l ON t."listingId" = l.id
     WHERE 1=1
@@ -46,14 +45,14 @@ export async function getAll(filters = {}) {
     params.push(filters.listingId);
   }
 
-  if (filters.type) {
-    sql += ` AND t.type = $${paramCount++}`;
-    params.push(filters.type);
+  if (filters.taskType) {
+    sql += ` AND t."taskType" = $${paramCount++}`;
+    params.push(filters.taskType);
   }
 
-  if (filters.assignedTo) {
-    sql += ` AND t."assignedTo" = $${paramCount++}`;
-    params.push(filters.assignedTo);
+  if (filters.sku) {
+    sql += ` AND t.sku = $${paramCount++}`;
+    params.push(filters.sku);
   }
 
   sql += ` ORDER BY
@@ -63,6 +62,7 @@ export async function getAll(filters = {}) {
       WHEN 'medium' THEN 3
       WHEN 'low' THEN 4
     END,
+    t."order" ASC,
     t."createdAt" DESC
   `;
 
@@ -84,8 +84,7 @@ export async function getById(id) {
   const sql = `
     SELECT
       t.*,
-      l.title as listing_title,
-      l.sku as listing_sku
+      l.title as listing_title
     FROM tasks t
     LEFT JOIN listings l ON t."listingId" = l.id
     WHERE t.id = $1
@@ -103,24 +102,25 @@ export async function getById(id) {
 export async function create(data) {
   const sql = `
     INSERT INTO tasks (
-      "listingId", title, description, type, priority, stage,
-      "dueDate", "assignedTo", tags, metadata,
+      "listingId", sku, asin, title, description, "taskType", priority, stage,
+      "dueDate", "order", "createdBy",
       "createdAt", "updatedAt"
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
     RETURNING *
   `;
 
   const result = await query(sql, [
     data.listingId || null,
+    data.sku || null,
+    data.asin || null,
     data.title,
     data.description || null,
-    data.type || 'manual',
+    data.taskType || data.type || 'optimization',
     data.priority || 'medium',
     data.stage || 'backlog',
     data.dueDate || null,
-    data.assignedTo || null,
-    JSON.stringify(data.tags || []),
-    JSON.stringify(data.metadata || {}),
+    data.order || 0,
+    data.createdBy || 'system',
   ]);
 
   return result.rows[0];
@@ -137,30 +137,29 @@ export async function update(id, data) {
   const values = [];
   let paramCount = 1;
 
-  const allowedFields = [
-    'listingId', 'title', 'description', 'type', 'priority',
-    'stage', 'dueDate', 'assignedTo', 'archived', 'completedAt'
-  ];
+  // Map of field names to their DB column names (with quotes for camelCase)
+  const fieldMappings = {
+    'listingId': '"listingId"',
+    'sku': 'sku',
+    'asin': 'asin',
+    'title': 'title',
+    'description': 'description',
+    'taskType': '"taskType"',
+    'type': '"taskType"', // alias for backward compat
+    'priority': 'priority',
+    'stage': 'stage',
+    'dueDate': '"dueDate"',
+    'order': '"order"',
+    'archived': 'archived',
+    'completedAt': '"completedAt"',
+    'createdBy': '"createdBy"'
+  };
 
-  for (const field of allowedFields) {
-    if (data[field] !== undefined) {
-      const dbField = ['listingId', 'dueDate', 'assignedTo', 'completedAt'].includes(field)
-        ? `"${field}"`
-        : field;
+  for (const [inputField, dbField] of Object.entries(fieldMappings)) {
+    if (data[inputField] !== undefined) {
       fields.push(`${dbField} = $${paramCount++}`);
-      values.push(data[field]);
+      values.push(data[inputField]);
     }
-  }
-
-  // Handle JSON fields
-  if (data.tags !== undefined) {
-    fields.push(`tags = $${paramCount++}`);
-    values.push(JSON.stringify(data.tags));
-  }
-
-  if (data.metadata !== undefined) {
-    fields.push(`metadata = $${paramCount++}`);
-    values.push(JSON.stringify(data.metadata));
   }
 
   if (fields.length === 0) {
@@ -247,8 +246,7 @@ export async function getOverdue() {
   const sql = `
     SELECT
       t.*,
-      l.title as listing_title,
-      l.sku as listing_sku
+      l.title as listing_title
     FROM tasks t
     LEFT JOIN listings l ON t."listingId" = l.id
     WHERE t."dueDate" < NOW()
@@ -270,6 +268,54 @@ export async function getByListingId(listingId) {
   return getAll({ listingId });
 }
 
+/**
+ * Get tasks grouped by stage for Kanban board
+ * @returns {Promise<Object>} Tasks grouped by stage
+ */
+export async function getByStage() {
+  const tasks = await getAll();
+
+  // Group tasks by stage
+  const stages = {
+    backlog: [],
+    todo: [],
+    in_progress: [],
+    review: [],
+    done: []
+  };
+
+  for (const task of tasks) {
+    const stage = task.stage || 'backlog';
+    if (stages[stage]) {
+      stages[stage].push(task);
+    } else {
+      stages.backlog.push(task);
+    }
+  }
+
+  return stages;
+}
+
+/**
+ * Get task statistics
+ * @returns {Promise<Object>} Task statistics
+ */
+export async function getStats() {
+  const sql = `
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN stage = 'done' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN stage != 'done' AND (archived = false OR archived IS NULL) THEN 1 ELSE 0 END) as active,
+      SUM(CASE WHEN priority = 'high' OR priority = 'critical' THEN 1 ELSE 0 END) as high_priority,
+      SUM(CASE WHEN "dueDate" < NOW() AND stage != 'done' THEN 1 ELSE 0 END) as overdue
+    FROM tasks
+    WHERE archived = false OR archived IS NULL
+  `;
+
+  const result = await query(sql);
+  return result.rows[0];
+}
+
 export default {
   getAll,
   getById,
@@ -281,4 +327,6 @@ export default {
   getCountByStage,
   getOverdue,
   getByListingId,
+  getByStage,
+  getStats,
 };

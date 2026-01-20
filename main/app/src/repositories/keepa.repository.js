@@ -18,16 +18,20 @@ export async function getByAsin(asin) {
 
 /**
  * Get all Keepa data
- * @param {number} limit - Maximum records to return
+ * @param {number} limit - Maximum records to return (null for no limit)
  * @returns {Promise<Array>} Array of Keepa data
  */
-export async function getAll(limit = 100) {
-  const sql = `
+export async function getAll(limit = null) {
+  let sql = `
     SELECT * FROM keepa_data
     ORDER BY "lastSyncedAt" DESC
-    LIMIT $1
   `;
-  const result = await query(sql, [limit]);
+  const params = [];
+  if (limit !== null) {
+    sql += ` LIMIT $1`;
+    params.push(limit);
+  }
+  const result = await query(sql, params);
   return result.rows;
 }
 
@@ -93,9 +97,9 @@ export async function upsert(data) {
     INSERT INTO keepa_data (
       asin, "currentPrice", "currentBSR", "avgPrice30", "avgBSR30",
       "competitorCount", "amazonOnListing", "buyBoxSeller", "buyBoxPrice",
-      "priceHistory", "bsrHistory", "salesEstimate",
+      rating, "reviewCount", "priceHistory", "bsrHistory", "salesEstimate",
       "lastSyncedAt"
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
     ON CONFLICT (asin) DO UPDATE SET
       "currentPrice" = EXCLUDED."currentPrice",
       "currentBSR" = EXCLUDED."currentBSR",
@@ -105,6 +109,8 @@ export async function upsert(data) {
       "amazonOnListing" = EXCLUDED."amazonOnListing",
       "buyBoxSeller" = EXCLUDED."buyBoxSeller",
       "buyBoxPrice" = EXCLUDED."buyBoxPrice",
+      rating = EXCLUDED.rating,
+      "reviewCount" = EXCLUDED."reviewCount",
       "priceHistory" = EXCLUDED."priceHistory",
       "bsrHistory" = EXCLUDED."bsrHistory",
       "salesEstimate" = EXCLUDED."salesEstimate",
@@ -122,6 +128,8 @@ export async function upsert(data) {
     data.amazonOnListing || false,
     data.buyBoxSeller || null,
     data.buyBoxPrice || null,
+    data.rating || null,
+    data.reviewCount || null,
     JSON.stringify(data.priceHistory || []),
     JSON.stringify(data.bsrHistory || []),
     data.salesEstimate || null,

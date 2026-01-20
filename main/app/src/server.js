@@ -2,6 +2,15 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fs from 'fs';
 import SellingPartner from 'amazon-sp-api';
+
+// PostgreSQL Repositories
+import * as ListingRepository from './repositories/listing.repository.js';
+import * as ScoreRepository from './repositories/score.repository.js';
+import * as TaskRepository from './repositories/task.repository.js';
+import * as AlertRepository from './repositories/alert.repository.js';
+import * as KeepaRepository from './repositories/keepa.repository.js';
+import * as SettingsRepository from './repositories/settings.repository.js';
+import { closePool } from './database/connection.js';
 import { calculateScore, calculateAndSaveScore, getScoreHistory, getScoreTrends, calculateComplianceScore, calculateCompetitiveScore, BLOCKED_TERMS, WARNING_TERMS } from './scoring.js';
 import { getDashboardStats, exportCSV } from './dashboard.js';
 import { generateRecommendations, getBulkRecommendations } from './ai-recommendations.js';
@@ -110,117 +119,192 @@ function getSpClient() {
 // Health
 fastify.get('/api/v1/health', async () => ({ status: 'ok' }));
 
-// Settings
+// Settings (hybrid: SP-API creds in file for security, app settings in PostgreSQL)
 fastify.get('/api/v1/settings', async () => {
-  const c = loadCreds();
-  return {
-    success: true,
-    data: {
-      configured: !!(c.clientId && c.clientSecret && c.refreshToken),
-      clientIdPreview: c.clientId ? c.clientId.substring(0, 20) + '...' : ''
-    }
-  };
+  try {
+    const c = loadCreds();
+    // Get additional app settings from PostgreSQL
+    const appSettings = await SettingsRepository.getAllAsObject();
+
+    return {
+      success: true,
+      data: {
+        configured: !!(c.clientId && c.clientSecret && c.refreshToken),
+        clientIdPreview: c.clientId ? c.clientId.substring(0, 20) + '...' : '',
+        keepaConfigured: !!c.keepaKey,
+        scoringWeights: appSettings.scoring_weights || null,
+        lastSync: appSettings.last_sync || null,
+        keepaLastSync: appSettings.keepa_last_sync || null
+      }
+    };
+  } catch (error) {
+    console.error('Get settings error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 fastify.post('/api/v1/settings', async (req) => {
-  const body = req.body;
-  const current = loadCreds();
-  if (body.clientId) current.clientId = body.clientId;
-  if (body.clientSecret) current.clientSecret = body.clientSecret;
-  if (body.refreshToken) current.refreshToken = body.refreshToken;
-  if (body.keepaKey) current.keepaKey = body.keepaKey;
-  saveCreds(current);
-  return { success: true };
+  try {
+    const body = req.body;
+
+    // SP-API credentials stored in file for security
+    const current = loadCreds();
+    if (body.clientId) current.clientId = body.clientId;
+    if (body.clientSecret) current.clientSecret = body.clientSecret;
+    if (body.refreshToken) current.refreshToken = body.refreshToken;
+    if (body.keepaKey) current.keepaKey = body.keepaKey;
+    saveCreds(current);
+
+    // App settings stored in PostgreSQL
+    if (body.scoringWeights) {
+      await SettingsRepository.setScoringWeights(body.scoringWeights);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Save settings error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Dashboard
 fastify.get('/api/v1/dashboard', async () => {
-  const c = loadCreds();
-  const configured = !!(c.clientId && c.clientSecret && c.refreshToken);
-  const listings = loadListings();
-  const scores = loadScores();
-  
-  const active = listings.items.filter(i => i.status === 'Active').length;
-  const inactive = listings.items.filter(i => i.status !== 'Active').length;
-  
-  // Calculate average score
-  const scoreValues = Object.values(scores);
-  const avgScore = scoreValues.length > 0 
-    ? Math.round(scoreValues.reduce((sum, s) => sum + s.totalScore, 0) / scoreValues.length)
-    : 0;
-  
-  // Count by score range
-  const excellent = scoreValues.filter(s => s.totalScore >= 80).length;
-  const good = scoreValues.filter(s => s.totalScore >= 60 && s.totalScore < 80).length;
-  const needsWork = scoreValues.filter(s => s.totalScore < 60).length;
-  
-  return {
-    success: true,
-    data: {
-      configured,
-      totalSkus: listings.items.length,
-      active,
-      inactive,
-      lastSync: listings.lastSync,
-      avgScore,
-      scoreBreakdown: { excellent, good, needsWork },
-      scored: scoreValues.length
-    }
-  };
+  try {
+    const c = loadCreds();
+    const configured = !!(c.clientId && c.clientSecret && c.refreshToken);
+
+    // Get listings from PostgreSQL
+    const listings = await ListingRepository.getAll();
+    const statusCounts = await ListingRepository.getStatusCounts();
+
+    // Get score statistics from PostgreSQL
+    const scoreStats = await ScoreRepository.getStatistics();
+    const scoreDistribution = await ScoreRepository.getDistribution();
+
+    const active = statusCounts.find(s => s.status === 'active')?.count || 0;
+    const inactive = listings.length - active;
+
+    // Map distribution buckets
+    const excellent = scoreDistribution.find(d => d.bucket === 'excellent')?.count || 0;
+    const good = scoreDistribution.find(d => d.bucket === 'good')?.count || 0;
+    const fair = scoreDistribution.find(d => d.bucket === 'fair')?.count || 0;
+    const poor = scoreDistribution.find(d => d.bucket === 'poor')?.count || 0;
+    const needsWork = parseInt(fair) + parseInt(poor);
+
+    return {
+      success: true,
+      data: {
+        configured,
+        totalSkus: listings.length,
+        active: parseInt(active),
+        inactive,
+        lastSync: null, // TODO: Track last sync time in settings
+        avgScore: Math.round(parseFloat(scoreStats?.avg_score) || 0),
+        scoreBreakdown: { excellent: parseInt(excellent), good: parseInt(good), needsWork },
+        scored: parseInt(scoreStats?.total_scored) || 0
+      }
+    };
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Get all listings with scores
-fastify.get('/api/v1/listings', async () => {
-  const listings = loadListings();
-  const scores = loadScores();
-  
-  // Merge scores into listings
-  const items = listings.items.map(item => ({
-    ...item,
-    score: scores[item.sku]?.totalScore || null
-  }));
-  
-  return { success: true, data: { items, lastSync: listings.lastSync } };
+fastify.get('/api/v1/listings', async (req) => {
+  try {
+    const { status, category, minScore, maxScore, limit = 100, offset = 0 } = req.query;
+    const filters = {};
+    if (status) filters.status = status;
+    if (category) filters.category = category;
+    if (minScore) filters.minScore = parseFloat(minScore);
+    if (maxScore) filters.maxScore = parseFloat(maxScore);
+
+    const listings = await ListingRepository.getAll(filters);
+
+    // Map to expected format with score included
+    const items = listings.map(item => ({
+      sku: item.sku,
+      asin: item.asin,
+      title: item.title,
+      price: parseFloat(item.price) || 0,
+      quantity: item.quantity,
+      status: item.status,
+      fulfillment: item.fulfillment || item.fulfillmentChannel,
+      openDate: item.openDate,
+      imageUrl: item.imageUrl,
+      score: item.currentScore ? parseFloat(item.currentScore) : null,
+      images: item.images || []
+    }));
+
+    return { success: true, data: { items, lastSync: null } };
+  } catch (error) {
+    console.error('Get listings error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Get single listing with full score details
 fastify.get('/api/v1/listings/:sku', async (req) => {
-  const listings = loadListings();
-  const scores = loadScores();
-  const sku = req.params.sku;
-  
-  const listing = listings.items.find(i => i.sku === sku);
-  if (!listing) return { success: false, error: 'Listing not found' };
-  
-  const score = scores[sku] || null;
-  
-  return { success: true, data: { listing, score } };
+  try {
+    const sku = req.params.sku;
+    const listing = await ListingRepository.getBySku(sku);
+    if (!listing) return { success: false, error: 'Listing not found' };
+
+    // Get the latest score for this listing
+    const score = listing.id ? await ScoreRepository.getLatestByListingId(listing.id) : null;
+
+    return { success: true, data: { listing, score } };
+  } catch (error) {
+    console.error('Get listing error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Calculate scores for all listings (enhanced with Keepa data)
 fastify.post('/api/v1/score', async () => {
-  const listings = loadListings();
-
-  // Load Keepa data for competitive scoring
-  let keepaData = {};
   try {
-    const keepaFile = `${DATA_DIR}/keepa.json`;
-    if (fs.existsSync(keepaFile)) {
-      const keepaRaw = JSON.parse(fs.readFileSync(keepaFile, 'utf8'));
-      keepaData = keepaRaw.data || keepaRaw || {};
+    const listings = await ListingRepository.getAll({ status: 'active' });
+
+    let scoredCount = 0;
+    for (const listing of listings) {
+      // Get Keepa data for this listing from PostgreSQL
+      const keepaData = listing.asin ? await KeepaRepository.getByAsin(listing.asin) : null;
+
+      // Calculate score using existing scoring logic
+      const scoreResult = calculateScore(listing, keepaData);
+
+      // Save score to PostgreSQL
+      await ScoreRepository.create({
+        listingId: listing.id,
+        totalScore: scoreResult.totalScore,
+        seoScore: scoreResult.components?.seo?.score,
+        contentScore: scoreResult.components?.content?.score,
+        imageScore: scoreResult.components?.images?.score,
+        competitiveScore: scoreResult.components?.competitive?.score,
+        complianceScore: scoreResult.components?.compliance?.score,
+        seoViolations: scoreResult.components?.seo?.violations || [],
+        contentViolations: scoreResult.components?.content?.violations || [],
+        imageViolations: scoreResult.components?.images?.violations || [],
+        competitiveViolations: scoreResult.components?.competitive?.violations || [],
+        complianceViolations: scoreResult.components?.compliance?.violations || [],
+        breakdown: scoreResult.components,
+        recommendations: scoreResult.recommendations || []
+      });
+
+      // Update denormalized score on listing
+      await ListingRepository.update(listing.sku, {
+        currentScore: scoreResult.totalScore
+      });
+
+      scoredCount++;
     }
-  } catch (e) {
-    console.log('No Keepa data available for competitive scoring');
-  }
 
-  const scores = {};
-  for (const listing of listings.items) {
-    // Get Keepa data for this SKU if available
-    const skuKeepaData = keepaData[listing.sku] || keepaData[listing.asin] || null;
-    scores[listing.sku] = calculateAndSaveScore(listing, skuKeepaData);
+    return { success: true, data: { scored: scoredCount } };
+  } catch (error) {
+    console.error('Score calculation error:', error);
+    return { success: false, error: error.message };
   }
-
-  return { success: true, data: { scored: Object.keys(scores).length } };
 });
 
 // Sync FBM listings from Amazon
@@ -269,7 +353,7 @@ fastify.post('/api/v1/sync', async () => {
 
     const lines = text.split('\n').filter(l => l.trim());
     const headers = lines[0].split('\t');
-    
+
     const items = lines.slice(1).map(line => {
       const vals = line.split('\t');
       const item = {};
@@ -280,31 +364,57 @@ fastify.post('/api/v1/sync', async () => {
         title: item['item-name'] || item['product-name'],
         price: parseFloat(item['price']) || 0,
         quantity: parseInt(item['quantity']) || 0,
-        status: item['status'] || 'Active',
+        status: (item['status'] || 'Active').toLowerCase(),
         fulfillment: 'FBM',
         openDate: item['open-date'],
         imageUrl: item['image-url']
       };
-    }).filter(i => i.sku);
+    }).filter(i => i.sku && i.title);
 
-    saveListings({ items, lastSync: new Date().toISOString() });
-
-    // Auto-calculate scores after sync (with Keepa data if available)
-    let keepaData = {};
-    try {
-      const keepaFile = `${DATA_DIR}/keepa.json`;
-      if (fs.existsSync(keepaFile)) {
-        const keepaRaw = JSON.parse(fs.readFileSync(keepaFile, 'utf8'));
-        keepaData = keepaRaw.data || keepaRaw || {};
+    // Save listings to PostgreSQL (upsert)
+    let syncedCount = 0;
+    for (const item of items) {
+      try {
+        await ListingRepository.upsert(item);
+        syncedCount++;
+      } catch (e) {
+        console.error(`Error syncing ${item.sku}:`, e.message);
       }
-    } catch (e) { /* No Keepa data */ }
-
-    for (const listing of items) {
-      const skuKeepaData = keepaData[listing.sku] || keepaData[listing.asin] || null;
-      calculateAndSaveScore(listing, skuKeepaData);
     }
 
-    return { success: true, data: { synced: items.length, scored: items.length } };
+    // Save last sync time to settings
+    await SettingsRepository.set('last_sync', new Date().toISOString(), 'Last Amazon sync timestamp');
+
+    // Auto-calculate scores after sync
+    let scoredCount = 0;
+    for (const item of items) {
+      try {
+        const listing = await ListingRepository.getBySku(item.sku);
+        if (!listing) continue;
+
+        const keepaData = listing.asin ? await KeepaRepository.getByAsin(listing.asin) : null;
+        const scoreResult = calculateScore(listing, keepaData);
+
+        await ScoreRepository.create({
+          listingId: listing.id,
+          totalScore: scoreResult.totalScore,
+          seoScore: scoreResult.components?.seo?.score,
+          contentScore: scoreResult.components?.content?.score,
+          imageScore: scoreResult.components?.images?.score,
+          competitiveScore: scoreResult.components?.competitive?.score,
+          complianceScore: scoreResult.components?.compliance?.score,
+          breakdown: scoreResult.components,
+          recommendations: scoreResult.recommendations || []
+        });
+
+        await ListingRepository.update(item.sku, { currentScore: scoreResult.totalScore });
+        scoredCount++;
+      } catch (e) {
+        console.error(`Error scoring ${item.sku}:`, e.message);
+      }
+    }
+
+    return { success: true, data: { synced: syncedCount, scored: scoredCount } };
   } catch (e) {
     console.error('Sync error:', e);
     return { success: false, error: e.message };
@@ -313,46 +423,41 @@ fastify.post('/api/v1/sync', async () => {
 
 fastify.listen({ port: 4000, host: '0.0.0.0' });
 
-// Keepa Integration
+// Keepa Integration (PostgreSQL)
 fastify.get('/api/v1/keepa/:asin', async (req) => {
   const c = loadCreds();
   if (!c.keepaKey) return { success: false, error: 'Keepa API key not configured' };
-  
-  const asin = req.params.asin;
+
+  const asin = sanitizeASIN(req.params.asin);
   try {
     const url = `https://api.keepa.com/product?key=${c.keepaKey}&domain=2&asin=${asin}&stats=180&history=1&offers=20`;
     const res = await fetch(url);
     const data = await res.json();
-    
+
     if (data.error) return { success: false, error: data.error.message };
     if (!data.products || data.products.length === 0) return { success: false, error: 'Product not found' };
-    
+
     const product = data.products[0];
-    
+
     // Parse Keepa data
     const result = {
       asin,
-      title: product.title,
-      brand: product.brand,
-      category: product.categoryTree?.[0]?.name,
-      salesRank: product.stats?.current?.[3],
-      salesRankReference: product.stats?.avg90?.[3],
+      currentPrice: product.stats?.current?.[0] ? product.stats.current[0] / 100 : null,
+      currentBSR: product.stats?.current?.[3],
+      avgPrice30: product.stats?.avg30?.[0] ? product.stats.avg30[0] / 100 : null,
+      avgBSR30: product.stats?.avg30?.[3],
+      competitorCount: (product.offers || []).filter(o => o.condition === 1).length,
+      amazonOnListing: product.offers?.some(o => o.isAmazon) || false,
+      buyBoxSeller: product.offers?.find(o => o.isBuyBox)?.sellerName || null,
       buyBoxPrice: product.stats?.current?.[18] ? product.stats.current[18] / 100 : null,
-      amazonPrice: product.stats?.current?.[0] ? product.stats.current[0] / 100 : null,
-      newOfferCount: product.stats?.current?.[11],
       rating: product.stats?.current?.[16] ? product.stats.current[16] / 10 : null,
       reviewCount: product.stats?.current?.[17],
-      lastUpdate: new Date().toISOString(),
-      // Competitor offers
-      offers: (product.offers || []).slice(0, 10).map(o => ({
-        seller: o.sellerName || 'Unknown',
-        price: o.offerCSV?.[o.offerCSV.length - 1] ? o.offerCSV[o.offerCSV.length - 1] / 100 : null,
-        isFBA: o.isFBA,
-        rating: o.sellerRating,
-        condition: o.condition === 1 ? 'New' : 'Used'
-      })).filter(o => o.price)
+      salesEstimate: null // Keepa doesn't provide direct sales estimate
     };
-    
+
+    // Save to PostgreSQL
+    await KeepaRepository.upsert(result);
+
     return { success: true, data: result };
   } catch (e) {
     console.error('Keepa error:', e);
@@ -360,61 +465,83 @@ fastify.get('/api/v1/keepa/:asin', async (req) => {
   }
 });
 
-// Bulk Keepa fetch for all listings
+// Bulk Keepa fetch for all listings (PostgreSQL)
 fastify.post('/api/v1/keepa/sync', async () => {
   const c = loadCreds();
   if (!c.keepaKey) return { success: false, error: 'Keepa API key not configured' };
-  
-  const listings = loadListings();
-  const asins = [...new Set(listings.items.map(i => i.asin).filter(a => a))];
-  
-  // Keepa allows up to 100 ASINs per request
-  const batchSize = 100;
-  const keepaData = {};
-  
-  for (let i = 0; i < asins.length; i += batchSize) {
-    const batch = asins.slice(i, i + batchSize);
-    const url = `https://api.keepa.com/product?key=${c.keepaKey}&domain=2&asin=${batch.join(',')}&stats=180&offers=20`;
-    
-    try {
-      const res = await fetch(url);
-      const data = await res.json();
-      
-      if (data.products) {
-        data.products.forEach(p => {
-          keepaData[p.asin] = {
-            salesRank: p.stats?.current?.[3],
-            buyBoxPrice: p.stats?.current?.[18] ? p.stats.current[18] / 100 : null,
-            newOfferCount: p.stats?.current?.[11],
-            rating: p.stats?.current?.[16] ? p.stats.current[16] / 10 : null,
-            reviewCount: p.stats?.current?.[17],
-            competitorCount: (p.offers || []).filter(o => o.condition === 1).length
-          };
-        });
+
+  try {
+    // Get listings from PostgreSQL
+    const listings = await ListingRepository.getAll({ status: 'active' });
+    const asins = [...new Set(listings.map(l => l.asin).filter(a => a))];
+
+    // Keepa allows up to 100 ASINs per request
+    const batchSize = 100;
+    let syncedCount = 0;
+
+    for (let i = 0; i < asins.length; i += batchSize) {
+      const batch = asins.slice(i, i + batchSize);
+      const url = `https://api.keepa.com/product?key=${c.keepaKey}&domain=2&asin=${batch.join(',')}&stats=180&offers=20`;
+
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.products) {
+          for (const p of data.products) {
+            const keepaRecord = {
+              asin: p.asin,
+              currentPrice: p.stats?.current?.[0] ? p.stats.current[0] / 100 : null,
+              currentBSR: p.stats?.current?.[3],
+              avgPrice30: p.stats?.avg30?.[0] ? p.stats.avg30[0] / 100 : null,
+              avgBSR30: p.stats?.avg30?.[3],
+              competitorCount: (p.offers || []).filter(o => o.condition === 1).length,
+              amazonOnListing: p.offers?.some(o => o.isAmazon) || false,
+              buyBoxSeller: p.offers?.find(o => o.isBuyBox)?.sellerName || null,
+              buyBoxPrice: p.stats?.current?.[18] ? p.stats.current[18] / 100 : null,
+              rating: p.stats?.current?.[16] ? p.stats.current[16] / 10 : null,
+              reviewCount: p.stats?.current?.[17]
+            };
+
+            await KeepaRepository.upsert(keepaRecord);
+            syncedCount++;
+          }
+        }
+
+        // Rate limit: wait between batches
+        if (i + batchSize < asins.length) await new Promise(r => setTimeout(r, 2000));
+      } catch (e) {
+        console.error('Keepa batch error:', e);
       }
-      
-      // Rate limit: wait between batches
-      if (i + batchSize < asins.length) await new Promise(r => setTimeout(r, 2000));
-    } catch (e) {
-      console.error('Keepa batch error:', e);
     }
+
+    // Update last sync time in settings
+    await SettingsRepository.set('keepa_last_sync', new Date().toISOString(), 'Last Keepa sync timestamp');
+
+    return { success: true, data: { synced: syncedCount } };
+  } catch (error) {
+    console.error('Keepa sync error:', error);
+    return { success: false, error: error.message };
   }
-  
-  // Save Keepa data
-  fs.writeFileSync(`${DATA_DIR}/keepa.json`, JSON.stringify({ data: keepaData, lastSync: new Date().toISOString() }, null, 2));
-  
-  return { success: true, data: { synced: Object.keys(keepaData).length } };
 });
 
-// Get Keepa data
+// Get Keepa data (PostgreSQL)
 fastify.get('/api/v1/keepa', async () => {
   try {
-    const keepaFile = `${DATA_DIR}/keepa.json`;
-    if (fs.existsSync(keepaFile)) {
-      return { success: true, data: JSON.parse(fs.readFileSync(keepaFile, 'utf8')) };
+    const keepaRecords = await KeepaRepository.getAll();
+    const lastSync = await SettingsRepository.get('keepa_last_sync');
+
+    // Convert array to object keyed by ASIN for backward compatibility
+    const data = {};
+    for (const record of keepaRecords) {
+      data[record.asin] = record;
     }
-  } catch (e) { console.error(e); }
-  return { success: true, data: { data: {}, lastSync: null } };
+
+    return { success: true, data: { data, lastSync: lastSync?.value || null } };
+  } catch (error) {
+    console.error('Get Keepa data error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // ============ PHASE 4: PRICING & COSTS ============
@@ -911,64 +1038,60 @@ fastify.post("/api/v1/automation/run", async () => {
   return { success: true, data: result };
 });
 
-// GET /api/v1/alerts - Get alerts
+// GET /api/v1/alerts - Get alerts (PostgreSQL)
 fastify.get("/api/v1/alerts", async (req) => {
-  const { severity, unread } = req.query;
-  let alerts = [];
   try {
-    const f = DATA_DIR + "/alerts.json";
-    if (fs.existsSync(f)) alerts = JSON.parse(fs.readFileSync(f, "utf8"));
-  } catch (e) {}
-  
-  if (severity) alerts = alerts.filter(function(a) { return a.severity === severity; });
-  if (unread === "true") alerts = alerts.filter(function(a) { return !a.read; });
-  
-  const summary = {
-    total: alerts.length,
-    unread: alerts.filter(function(a) { return !a.read; }).length,
-    critical: alerts.filter(function(a) { return a.severity === "critical"; }).length,
-    high: alerts.filter(function(a) { return a.severity === "high"; }).length,
-    medium: alerts.filter(function(a) { return a.severity === "medium"; }).length,
-    low: alerts.filter(function(a) { return a.severity === "low"; }).length
-  };
-  
-  return { success: true, data: { alerts: alerts, summary: summary } };
+    const { severity, unread } = req.query;
+    const filters = { dismissed: false };
+
+    if (severity) filters.severity = severity;
+    if (unread === "true") filters.read = false;
+
+    const alerts = await AlertRepository.getAll(filters);
+    const unreadCount = await AlertRepository.getUnreadCount();
+    const grouped = await AlertRepository.getGroupedByType();
+
+    // Build summary from grouped data
+    const summary = {
+      total: alerts.length,
+      unread: unreadCount,
+      critical: grouped.filter(g => g.severity === 'critical').reduce((sum, g) => sum + parseInt(g.count), 0),
+      high: grouped.filter(g => g.severity === 'high').reduce((sum, g) => sum + parseInt(g.count), 0),
+      medium: grouped.filter(g => g.severity === 'medium').reduce((sum, g) => sum + parseInt(g.count), 0),
+      low: grouped.filter(g => g.severity === 'low').reduce((sum, g) => sum + parseInt(g.count), 0)
+    };
+
+    return { success: true, data: { alerts, summary } };
+  } catch (error) {
+    console.error('Get alerts error:', error);
+    return { success: false, error: error.message };
+  }
 });
 
-// POST /api/v1/alerts/:id/read - Mark alert as read
+// POST /api/v1/alerts/:id/read - Mark alert as read (PostgreSQL)
 fastify.post("/api/v1/alerts/:id/read", async (req) => {
-  const { id } = req.params;
-  let alerts = [];
   try {
-    const f = DATA_DIR + "/alerts.json";
-    if (fs.existsSync(f)) alerts = JSON.parse(fs.readFileSync(f, "utf8"));
-  } catch (e) {}
-  
-  for (let i = 0; i < alerts.length; i++) {
-    if (alerts[i].id === id) {
-      alerts[i].read = true;
-      break;
+    const { id } = req.params;
+    const alert = await AlertRepository.markAsRead(id);
+    if (!alert) {
+      return { success: false, error: 'Alert not found' };
     }
+    return { success: true, data: alert };
+  } catch (error) {
+    console.error('Mark alert read error:', error);
+    return { success: false, error: error.message };
   }
-  
-  fs.writeFileSync(DATA_DIR + "/alerts.json", JSON.stringify(alerts, null, 2));
-  return { success: true };
 });
 
-// POST /api/v1/alerts/read-all - Mark all as read
+// POST /api/v1/alerts/read-all - Mark all as read (PostgreSQL)
 fastify.post("/api/v1/alerts/read-all", async () => {
-  let alerts = [];
   try {
-    const f = DATA_DIR + "/alerts.json";
-    if (fs.existsSync(f)) alerts = JSON.parse(fs.readFileSync(f, "utf8"));
-  } catch (e) {}
-  
-  for (let i = 0; i < alerts.length; i++) {
-    alerts[i].read = true;
+    const count = await AlertRepository.markAllAsRead();
+    return { success: true, data: { updated: count } };
+  } catch (error) {
+    console.error('Mark all alerts read error:', error);
+    return { success: false, error: error.message };
   }
-  
-  fs.writeFileSync(DATA_DIR + "/alerts.json", JSON.stringify(alerts, null, 2));
-  return { success: true };
 });
 
 console.log("Automation engine loaded");
@@ -1010,13 +1133,25 @@ fastify.get('/api/v1/ai/bulk-recommendations', async (request, reply) => {
 
 console.log("AI Recommendations loaded");
 
-// Phase 5: Kanban Task Board endpoints
+// Phase 5: Kanban Task Board endpoints (PostgreSQL)
 fastify.get('/api/v1/tasks', async (request, reply) => {
-  return getTasksByStage();
+  try {
+    const tasks = await TaskRepository.getByStage();
+    return tasks;
+  } catch (error) {
+    console.error('Get tasks error:', error);
+    reply.code(500).send({ error: error.message });
+  }
 });
 
 fastify.get('/api/v1/tasks/stats', async (request, reply) => {
-  return getTaskStats();
+  try {
+    const stats = await TaskRepository.getStats();
+    return stats;
+  } catch (error) {
+    console.error('Get task stats error:', error);
+    reply.code(500).send({ error: error.message });
+  }
 });
 
 fastify.get('/api/v1/tasks/types', async (request, reply) => {
@@ -1024,45 +1159,97 @@ fastify.get('/api/v1/tasks/types', async (request, reply) => {
 });
 
 fastify.post('/api/v1/tasks', async (request, reply) => {
-  const task = createTask(request.body);
-  return task;
+  try {
+    const task = await TaskRepository.create(request.body);
+    return task;
+  } catch (error) {
+    console.error('Create task error:', error);
+    reply.code(500).send({ error: error.message });
+  }
 });
 
 fastify.patch('/api/v1/tasks/:id', async (request, reply) => {
-  const taskId = parseInt(request.params.id);
-  const updated = updateTask(taskId, request.body);
-  if (!updated) {
-    reply.code(404).send({ error: 'Task not found' });
-    return;
+  try {
+    const taskId = request.params.id;
+    const updated = await TaskRepository.update(taskId, request.body);
+    if (!updated) {
+      reply.code(404).send({ error: 'Task not found' });
+      return;
+    }
+    return updated;
+  } catch (error) {
+    console.error('Update task error:', error);
+    reply.code(500).send({ error: error.message });
   }
-  return updated;
 });
 
 fastify.post('/api/v1/tasks/:id/move', async (request, reply) => {
-  const taskId = parseInt(request.params.id);
-  const { stage, order } = request.body;
-  const moved = moveTask(taskId, stage, order || 0);
-  if (!moved) {
-    reply.code(404).send({ error: 'Task not found' });
-    return;
+  try {
+    const taskId = request.params.id;
+    const { stage, order } = request.body;
+    const moved = await TaskRepository.moveToStage(taskId, stage);
+    if (!moved) {
+      reply.code(404).send({ error: 'Task not found' });
+      return;
+    }
+    // Update order if provided
+    if (order !== undefined) {
+      await TaskRepository.update(taskId, { order });
+    }
+    return moved;
+  } catch (error) {
+    console.error('Move task error:', error);
+    reply.code(500).send({ error: error.message });
   }
-  return moved;
 });
 
 fastify.delete('/api/v1/tasks/:id', async (request, reply) => {
-  const taskId = parseInt(request.params.id);
-  const deleted = deleteTask(taskId);
-  if (!deleted) {
-    reply.code(404).send({ error: 'Task not found' });
-    return;
+  try {
+    const taskId = request.params.id;
+    const deleted = await TaskRepository.remove(taskId);
+    if (!deleted) {
+      reply.code(404).send({ error: 'Task not found' });
+      return;
+    }
+    return { success: true };
+  } catch (error) {
+    console.error('Delete task error:', error);
+    reply.code(500).send({ error: error.message });
   }
-  return { success: true };
 });
 
 fastify.post('/api/v1/tasks/generate', async (request, reply) => {
-  const threshold = request.body?.threshold || 50;
-  const newTasks = generateTasksFromScores(threshold);
-  return { created: newTasks.length, tasks: newTasks };
+  try {
+    const threshold = request.body?.threshold || 50;
+    // Get listings with low scores from PostgreSQL
+    const listings = await ListingRepository.getAll({ maxScore: threshold, status: 'active' });
+
+    let created = 0;
+    const tasks = [];
+    for (const listing of listings) {
+      // Check if task already exists for this listing
+      const existingTasks = await TaskRepository.getAll({ listingId: listing.id, stage: 'backlog' });
+      if (existingTasks.length === 0) {
+        const task = await TaskRepository.create({
+          listingId: listing.id,
+          sku: listing.sku,
+          asin: listing.asin,
+          title: `Optimize: ${listing.title?.substring(0, 50) || listing.sku}`,
+          description: `Listing score is ${listing.currentScore || 0}. Improve content, images, or keywords.`,
+          taskType: 'optimization',
+          priority: listing.currentScore < 30 ? 'high' : 'medium',
+          stage: 'backlog',
+          createdBy: 'system'
+        });
+        tasks.push(task);
+        created++;
+      }
+    }
+    return { created, tasks };
+  } catch (error) {
+    console.error('Generate tasks error:', error);
+    reply.code(500).send({ error: error.message });
+  }
 });
 
 console.log("Kanban tasks loaded");
