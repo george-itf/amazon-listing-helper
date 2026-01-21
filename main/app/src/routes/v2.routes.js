@@ -232,9 +232,10 @@ export async function registerV2Routes(fastify) {
       const listings = await listingRepo.getAll(filters);
 
       // Map to frontend expected format (DATA_CONTRACTS.md)
+      // Note: Database column is seller_sku (renamed from sku in migration 001)
       const mapped = listings.map(l => ({
         id: l.id,
-        seller_sku: l.sku,
+        seller_sku: l.seller_sku,
         asin: l.asin || null,
         title: l.title || '',
         marketplace_id: 1, // Default UK marketplace
@@ -268,9 +269,10 @@ export async function registerV2Routes(fastify) {
       }
 
       // Map to frontend expected format
+      // Note: Database column is seller_sku (renamed from sku in migration 001)
       return wrapResponse({
         id: listing.id,
-        seller_sku: listing.sku,
+        seller_sku: listing.seller_sku,
         asin: listing.asin || null,
         title: listing.title || '',
         marketplace_id: 1, // Default UK marketplace
@@ -2208,7 +2210,7 @@ export async function registerV2Routes(fastify) {
 
     // Check if listing already exists for this ASIN in this marketplace
     const existingListingResult = await dbQuery(`
-      SELECT id, sku FROM listings
+      SELECT id, seller_sku FROM listings
       WHERE asin = $1 AND marketplace_id = $2
     `, [entity.asin, entity.marketplace_id]);
 
@@ -2217,13 +2219,13 @@ export async function registerV2Routes(fastify) {
         success: false,
         error: 'A listing already exists for this ASIN',
         existing_listing_id: existingListingResult.rows[0].id,
-        existing_sku: existingListingResult.rows[0].sku,
+        existing_sku: existingListingResult.rows[0].seller_sku,
       });
     }
 
     // Check if SKU already exists
     const existingSkuResult = await dbQuery(
-      'SELECT id FROM listings WHERE sku = $1 AND marketplace_id = $2',
+      'SELECT id FROM listings WHERE seller_sku = $1 AND marketplace_id = $2',
       [finalSku, entity.marketplace_id]
     );
 
@@ -2257,7 +2259,7 @@ export async function registerV2Routes(fastify) {
         // Create listing
         const listingResult = await client.query(`
           INSERT INTO listings (
-            marketplace_id, sku, asin, title, price_inc_vat,
+            marketplace_id, seller_sku, asin, title, price_inc_vat,
             available_quantity, status, created_by
           )
           VALUES ($1, $2, $3, $4, $5, $6, 'ACTIVE', 'user')
@@ -2324,7 +2326,7 @@ export async function registerV2Routes(fastify) {
       // Return response matching frontend ConvertToListingResponse
       return reply.status(201).send(wrapResponse({
         listing_id: result.listing.id,
-        seller_sku: result.listing.sku,
+        seller_sku: result.listing.seller_sku,
         asin: result.listing.asin,
         asin_entity_id: asinEntityId,
         bom_copied: result.copiedBomId !== null,

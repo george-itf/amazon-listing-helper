@@ -207,7 +207,7 @@ async function processStockChange(job) {
 async function updateListingPrice(listingId, newPrice) {
   await query(`
     UPDATE listings
-    SET price_inc_vat = $2, updated_at = CURRENT_TIMESTAMP
+    SET price_inc_vat = $2, "updatedAt" = CURRENT_TIMESTAMP
     WHERE id = $1
   `, [listingId, newPrice]);
 
@@ -230,7 +230,7 @@ async function updateListingPrice(listingId, newPrice) {
 async function updateListingStock(listingId, newQuantity) {
   await query(`
     UPDATE listings
-    SET available_quantity = $2, updated_at = CURRENT_TIMESTAMP
+    SET available_quantity = $2, "updatedAt" = CURRENT_TIMESTAMP
     WHERE id = $1
   `, [listingId, newQuantity]);
 
