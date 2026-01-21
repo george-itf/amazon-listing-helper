@@ -3,12 +3,15 @@ import { PageHeader } from '../layouts/PageHeader';
 import { ListingsTable } from '../components/tables/ListingsTable';
 import { PriceEditModal } from '../components/modals/PriceEditModal';
 import { getListingsWithFeatures } from '../api/listings';
+import { syncListingsFromAmazon } from '../api/sync';
 import type { ListingWithFeatures } from '../types';
 
 export function ListingsPage() {
   const [listings, setListings] = useState<ListingWithFeatures[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [selectedListing, setSelectedListing] = useState<ListingWithFeatures | null>(null);
   const [isPriceModalOpen, setIsPriceModalOpen] = useState(false);
 
@@ -23,6 +26,28 @@ export function ListingsPage() {
       setError(err instanceof Error ? err.message : 'Failed to load listings');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleSyncFromAmazon = async () => {
+    setIsSyncing(true);
+    setError(null);
+    setSyncMessage('Syncing listings from Amazon... This may take a few minutes.');
+
+    try {
+      const result = await syncListingsFromAmazon();
+      setSyncMessage(
+        `Sync complete: ${result.listingsCreated} created, ${result.listingsUpdated} updated`
+      );
+      // Reload listings after sync
+      await loadListings();
+      // Clear success message after 5 seconds
+      setTimeout(() => setSyncMessage(null), 5000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to sync from Amazon');
+      setSyncMessage(null);
+    } finally {
+      setIsSyncing(false);
     }
   };
 
@@ -59,11 +84,31 @@ export function ListingsPage() {
         title="Listings Command Centre"
         subtitle={`${stats.total} total listings`}
         actions={
-          <button onClick={loadListings} className="btn btn-secondary btn-sm">
-            Refresh
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handleSyncFromAmazon}
+              disabled={isSyncing}
+              className="btn btn-primary btn-sm"
+            >
+              {isSyncing ? 'Syncing...' : 'Sync from Amazon'}
+            </button>
+            <button
+              onClick={loadListings}
+              disabled={isLoading || isSyncing}
+              className="btn btn-secondary btn-sm"
+            >
+              Refresh
+            </button>
+          </div>
         }
       />
+
+      {/* Sync status message */}
+      {syncMessage && (
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-700">
+          {syncMessage}
+        </div>
+      )}
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -87,9 +132,9 @@ export function ListingsPage() {
 
       {/* Main content */}
       <div className="card">
-        {isLoading && (
+        {(isLoading || isSyncing) && (
           <div className="text-center py-12 text-gray-500">
-            <p>Loading listings...</p>
+            <p>{isSyncing ? 'Syncing listings from Amazon...' : 'Loading listings...'}</p>
           </div>
         )}
 
@@ -102,7 +147,20 @@ export function ListingsPage() {
           </div>
         )}
 
-        {!isLoading && !error && (
+        {!isLoading && !isSyncing && !error && listings.length === 0 && (
+          <div className="text-center py-12">
+            <p className="text-gray-500 mb-4">No listings found. Sync your listings from Amazon to get started.</p>
+            <button
+              onClick={handleSyncFromAmazon}
+              disabled={isSyncing}
+              className="btn btn-primary"
+            >
+              Sync from Amazon
+            </button>
+          </div>
+        )}
+
+        {!isLoading && !isSyncing && !error && listings.length > 0 && (
           <ListingsTable
             listings={listings}
             onEditPrice={handleEditPrice}
