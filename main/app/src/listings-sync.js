@@ -43,17 +43,22 @@ export async function testConnection() {
   }
 
   try {
-    // Try to get marketplace participations - simple API that should work
-    // Note: amazon-sp-api requires specifying the endpoint for the operation
+    // Test connection by getting recent reports - Reports API is commonly available
+    // The Sellers API (getMarketplaceParticipations) often requires additional authorization
     const response = await sp.callAPI({
-      operation: 'getMarketplaceParticipations',
-      endpoint: 'sellers',
+      operation: 'getReports',
+      endpoint: 'reports',
+      query: {
+        reportTypes: 'GET_MERCHANT_LISTINGS_ALL_DATA',
+        pageSize: 1,
+      },
     });
 
     return {
       success: true,
       configured: true,
-      marketplaces: response?.payload?.length || 0,
+      message: 'SP-API connection successful',
+      reports_found: response?.reports?.length || 0,
     };
   } catch (error) {
     console.error('[ListingsSync] Connection test failed:', error);
