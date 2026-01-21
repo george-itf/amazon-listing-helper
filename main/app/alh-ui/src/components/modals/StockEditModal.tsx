@@ -6,11 +6,11 @@ interface StockPreviewResponse {
   listing_id: number;
   current_quantity: number;
   new_quantity: number;
-  change: number;
-  fulfillment_channel: string;
+  days_of_cover: number | null;
+  stockout_risk: string;
   guardrails: {
     passed: boolean;
-    violations: Array<{ code: string; message: string }>;
+    violations: Array<{ rule: string; threshold: number; actual: number; message: string }>;
   };
 }
 
@@ -106,11 +106,6 @@ export function StockEditModal({ listing, isOpen, onClose, onSuccess }: StockEdi
             <p className="text-sm text-gray-500">
               Current quantity: {currentQuantity} units
             </p>
-            {listing.fulfillmentChannel === 'FBA' && (
-              <p className="text-sm text-amber-600 mt-1">
-                Note: FBA inventory is managed by Amazon
-              </p>
-            )}
           </div>
 
           {/* Quantity input */}
@@ -154,8 +149,19 @@ export function StockEditModal({ listing, isOpen, onClose, onSuccess }: StockEdi
                   {quantityChange > 0 ? '+' : ''}{quantityChange} units
                 </span>
 
-                <span className="text-gray-600">Fulfillment:</span>
-                <span>{preview.fulfillment_channel}</span>
+                {preview.days_of_cover !== null && (
+                  <>
+                    <span className="text-gray-600">Days of Cover:</span>
+                    <span>{preview.days_of_cover} days</span>
+                  </>
+                )}
+
+                <span className="text-gray-600">Stockout Risk:</span>
+                <span className={
+                  preview.stockout_risk === 'HIGH' ? 'text-red-600 font-medium' :
+                  preview.stockout_risk === 'MEDIUM' ? 'text-amber-600' :
+                  'text-green-600'
+                }>{preview.stockout_risk}</span>
               </div>
 
               {/* Guardrails */}
