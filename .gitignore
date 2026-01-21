@@ -1,0 +1,58 @@
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+out/
+.alh-ui-dist/            # (optional placeholder if used)
+main/app/dist/           # ensure backend dist created by build is not committed
+main/app/alh-ui/dist/    # ensure frontend build not committed
+
+# Environment files
+.env
+.env.*.local
+.env.local
+.env.development
+.env.production
+.env.test
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs & coverage
+logs/
+*.log
+pids/
+*.pid
+coverage/
+.nyc_output/
+
+# Prisma / DB artifacts
+.prisma/
+*.sqlite
+*.sqlite3
+*.db
+
+# Mac / misc
+*.swp
+*.swo
+
+# Lockfiles (keep if you want to version lockfiles; remove if not)
+# package-lock.json
+# pnpm-lock.yaml
+# yarn.lock
+
+# Optional: ignore local-only scripts, generated files
+/dist-serve/

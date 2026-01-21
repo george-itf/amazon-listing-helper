@@ -1,0 +1,26 @@
+{
+  "name": "amazon-listing-helper-api",
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/workers/job-worker.js",
+    "test:db": "node test-repositories.js",
+    "db:schema": "psql $DATABASE_URL -f schema.sql",
+    "db:migrate": "node migrate-data.js",
+    "db:migrate:railway": "node scripts/migrate.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^8.4.0",
+    "@fastify/static": "^7.0.0",
+    "@prisma/client": "^6.0.0",
+    "amazon-sp-api": "^1.2.0",
+    "dotenv": "^16.3.0",
+    "fastify": "^4.24.0",
+    "pg": "^8.11.3",
+    "prisma": "^6.0.0"
+  }
+}

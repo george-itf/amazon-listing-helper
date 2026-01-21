@@ -1,0 +1,15 @@
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = [
+  "npm install",
+  "cd alh-ui && npm install"
+]
+
+[phases.build]
+cmds = [
+  "cd alh-ui && npm run build",
+  "mkdir -p dist",
+  "cp -r alh-ui/dist/* dist/"
+]
