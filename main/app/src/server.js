@@ -46,7 +46,7 @@ await registerV2Routes(fastify);
 console.log('API v2 routes registered');
 
 // Serve static frontend files (React build)
-const distPath = path.join(__dirname, '../../dist');
+const distPath = path.join(__dirname, '../dist');
 if (fs.existsSync(distPath)) {
   await fastify.register(fastifyStatic, {
     root: distPath,

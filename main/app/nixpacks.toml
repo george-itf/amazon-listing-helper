@@ -3,8 +3,8 @@ nixPkgs = ["nodejs_20"]
 
 [phases.install]
 cmds = [
-  "npm install",
-  "cd alh-ui && npm install"
+  "npm ci",
+  "cd alh-ui && npm ci"
 ]
 
 [phases.build]
