@@ -1352,7 +1352,7 @@ export async function registerV2Routes(fastify) {
     const result = await dbQuery(`
       SELECT ae.*, m.name as marketplace_name
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       ${whereClause}
       ORDER BY ae.updated_at DESC
       LIMIT $1 OFFSET $2
@@ -1372,7 +1372,7 @@ export async function registerV2Routes(fastify) {
     const result = await dbQuery(`
       SELECT ae.*, m.name as marketplace_name, m.vat_rate
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       WHERE ae.id = $1
     `, [asinEntityId]);
 
@@ -1508,7 +1508,7 @@ export async function registerV2Routes(fastify) {
       const result = await dbQuery(`
         SELECT ae.*, m.name as marketplace_name
         FROM asin_entities ae
-        JOIN marketplaces m ON m.id = ae.marketplace_id
+        LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
         WHERE ae.id = $1
       `, [asinEntity.id]);
 
@@ -2210,7 +2210,7 @@ export async function registerV2Routes(fastify) {
     const entityResult = await dbQuery(`
       SELECT ae.*, m.vat_rate
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       WHERE ae.id = $1
     `, [asinEntityId]);
 
@@ -2365,7 +2365,7 @@ export async function registerV2Routes(fastify) {
     const entityResult = await dbQuery(`
       SELECT ae.*, m.name as marketplace_name, m.vat_rate
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       WHERE ae.id = $1
     `, [asinEntityId]);
 
@@ -2458,7 +2458,7 @@ export async function registerV2Routes(fastify) {
         COALESCE(ks.parsed_json->'metrics'->>'price_current', '0')::numeric as current_price,
         COALESCE(ks.parsed_json->'metrics'->>'offers_count_current', '0')::int as competition_count
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       LEFT JOIN LATERAL (
         SELECT features_json, computed_at
         FROM feature_store

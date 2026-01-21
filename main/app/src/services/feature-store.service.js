@@ -45,11 +45,11 @@ const FEATURE_VERSION = 1;
 export async function computeListingFeatures(listingId) {
   console.log(`[FeatureStore] Computing features for listing ${listingId}`);
 
-  // Get base listing data
+  // Get base listing data (LEFT JOIN to handle listings without marketplace)
   const listingResult = await query(`
-    SELECT l.*, m.vat_rate, m.currency_code
+    SELECT l.*, COALESCE(m.vat_rate, 0.20) as vat_rate, COALESCE(m.currency_code, 'GBP') as currency_code
     FROM listings l
-    JOIN marketplaces m ON m.id = l.marketplace_id
+    LEFT JOIN marketplaces m ON m.id = l.marketplace_id
     WHERE l.id = $1
   `, [listingId]);
 
@@ -232,11 +232,11 @@ export async function computeListingFeatures(listingId) {
 export async function computeAsinFeatures(asinEntityId) {
   console.log(`[FeatureStore] Computing features for ASIN entity ${asinEntityId}`);
 
-  // Get ASIN entity data
+  // Get ASIN entity data (LEFT JOIN to handle entities without marketplace)
   const entityResult = await query(`
-    SELECT ae.*, m.vat_rate, m.currency_code
+    SELECT ae.*, COALESCE(m.vat_rate, 0.20) as vat_rate, COALESCE(m.currency_code, 'GBP') as currency_code
     FROM asin_entities ae
-    JOIN marketplaces m ON m.id = ae.marketplace_id
+    LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
     WHERE ae.id = $1
   `, [asinEntityId]);
 
@@ -366,14 +366,23 @@ export async function saveFeatures(entityType, entityId, features) {
  * @returns {Promise<Object|null>}
  */
 export async function getLatestFeatures(entityType, entityId) {
-  const result = await query(`
-    SELECT * FROM feature_store
-    WHERE entity_type = $1 AND entity_id = $2
-    ORDER BY computed_at DESC
-    LIMIT 1
-  `, [entityType, entityId]);
+  try {
+    const result = await query(`
+      SELECT * FROM feature_store
+      WHERE entity_type = $1 AND entity_id = $2
+      ORDER BY computed_at DESC
+      LIMIT 1
+    `, [entityType, entityId]);
 
-  return result.rows[0] || null;
+    return result.rows[0] || null;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[FeatureStore] feature_store table does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -384,15 +393,24 @@ export async function getLatestFeatures(entityType, entityId) {
  * @returns {Promise<Object[]>}
  */
 export async function getFeatureHistory(entityType, entityId, limit = 30) {
-  const result = await query(`
-    SELECT id, feature_version, features_json, computed_at
-    FROM feature_store
-    WHERE entity_type = $1 AND entity_id = $2
-    ORDER BY computed_at DESC
-    LIMIT $3
-  `, [entityType, entityId, limit]);
+  try {
+    const result = await query(`
+      SELECT id, feature_version, features_json, computed_at
+      FROM feature_store
+      WHERE entity_type = $1 AND entity_id = $2
+      ORDER BY computed_at DESC
+      LIMIT $3
+    `, [entityType, entityId, limit]);
 
-  return result.rows;
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[FeatureStore] feature_store table does not exist');
+      return [];
+    }
+    throw error;
+  }
 }
 
 /**

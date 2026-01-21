@@ -61,19 +61,27 @@ function calculateBreakEvenPriceIncVat(totalCostExVat, vatRate) {
  * @returns {Promise<number>} Total BOM cost ex VAT
  */
 async function getBomCostExVat(listingId) {
-  const result = await query(`
-    SELECT COALESCE(SUM(
-      bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat
-    ), 0) as bom_cost
-    FROM boms b
-    JOIN bom_lines bl ON bl.bom_id = b.id
-    JOIN components c ON c.id = bl.component_id
-    WHERE b.listing_id = $1
-      AND b.is_active = true
-      AND b.scope_type = 'LISTING'
-  `, [listingId]);
+  try {
+    const result = await query(`
+      SELECT COALESCE(SUM(
+        bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat
+      ), 0) as bom_cost
+      FROM boms b
+      JOIN bom_lines bl ON bl.bom_id = b.id
+      JOIN components c ON c.id = bl.component_id
+      WHERE b.listing_id = $1
+        AND b.is_active = true
+        AND b.scope_type = 'LISTING'
+    `, [listingId]);
 
-  return roundMoney(safeParseFloat(result.rows[0]?.bom_cost));
+    return roundMoney(safeParseFloat(result.rows[0]?.bom_cost));
+  } catch (error) {
+    // Handle missing tables gracefully
+    if (error.message?.includes('does not exist')) {
+      return 0;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -82,31 +90,41 @@ async function getBomCostExVat(listingId) {
  * @returns {Promise<Object>}
  */
 async function getCostOverrides(listingId) {
-  const result = await query(`
-    SELECT
-      COALESCE(shipping_cost_ex_vat, 0) as shipping_cost_ex_vat,
-      COALESCE(packaging_cost_ex_vat, 0) as packaging_cost_ex_vat,
-      COALESCE(handling_cost_ex_vat, 0) as handling_cost_ex_vat,
-      COALESCE(other_cost_ex_vat, 0) as other_cost_ex_vat
-    FROM listing_cost_overrides
-    WHERE listing_id = $1
-  `, [listingId]);
-
-  if (result.rows.length === 0) {
-    return {
-      shipping_cost_ex_vat: 0,
-      packaging_cost_ex_vat: 0,
-      handling_cost_ex_vat: 0,
-      other_cost_ex_vat: 0,
-    };
-  }
-
-  return {
-    shipping_cost_ex_vat: roundMoney(parseFloat(result.rows[0].shipping_cost_ex_vat)),
-    packaging_cost_ex_vat: roundMoney(parseFloat(result.rows[0].packaging_cost_ex_vat)),
-    handling_cost_ex_vat: roundMoney(parseFloat(result.rows[0].handling_cost_ex_vat)),
-    other_cost_ex_vat: roundMoney(parseFloat(result.rows[0].other_cost_ex_vat)),
+  const defaultCosts = {
+    shipping_cost_ex_vat: 0,
+    packaging_cost_ex_vat: 0,
+    handling_cost_ex_vat: 0,
+    other_cost_ex_vat: 0,
   };
+
+  try {
+    const result = await query(`
+      SELECT
+        COALESCE(shipping_cost_ex_vat, 0) as shipping_cost_ex_vat,
+        COALESCE(packaging_cost_ex_vat, 0) as packaging_cost_ex_vat,
+        COALESCE(handling_cost_ex_vat, 0) as handling_cost_ex_vat,
+        COALESCE(other_cost_ex_vat, 0) as other_cost_ex_vat
+      FROM listing_cost_overrides
+      WHERE listing_id = $1
+    `, [listingId]);
+
+    if (result.rows.length === 0) {
+      return defaultCosts;
+    }
+
+    return {
+      shipping_cost_ex_vat: roundMoney(parseFloat(result.rows[0].shipping_cost_ex_vat)),
+      packaging_cost_ex_vat: roundMoney(parseFloat(result.rows[0].packaging_cost_ex_vat)),
+      handling_cost_ex_vat: roundMoney(parseFloat(result.rows[0].handling_cost_ex_vat)),
+      other_cost_ex_vat: roundMoney(parseFloat(result.rows[0].other_cost_ex_vat)),
+    };
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      return defaultCosts;
+    }
+    throw error;
+  }
 }
 
 /**
