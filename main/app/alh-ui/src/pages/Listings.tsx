@@ -73,7 +73,15 @@ export function ListingsPage() {
       // Clear success message after 10 seconds
       setTimeout(() => setSyncMessage(null), 10000);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to sync from Amazon';
+      // Handle both Error instances and ApiError objects from the axios interceptor
+      let message: string;
+      if (err instanceof Error) {
+        message = err.message;
+      } else if (err && typeof err === 'object' && 'message' in err) {
+        message = (err as { message: string }).message;
+      } else {
+        message = 'Failed to sync from Amazon';
+      }
       setError(message);
       setSyncMessage(null);
     } finally {
