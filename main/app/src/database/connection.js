@@ -173,16 +173,17 @@ export async function initMlDataPool() {
 
     console.log('[Database] Creating ML data pool...');
 
-    // Create the materialized view
-    // Note: Column names updated per migration 001_slice_a_schema.sql
+    // Create the materialized view using UNION approach
+    // (PostgreSQL doesn't support FULL OUTER JOIN with OR conditions)
     await query(`
       CREATE MATERIALIZED VIEW ml_data_pool AS
+      -- Listings with their ASIN entities (joined by asin or listing_id)
       SELECT
-        COALESCE(l.id, ae.listing_id) as listing_id,
+        l.id as listing_id,
         ae.id as asin_entity_id,
-        COALESCE(l.seller_sku, 'ASIN_' || ae.asin) as sku,
+        l.seller_sku as sku,
         COALESCE(l.asin, ae.asin) as asin,
-        CASE WHEN l.id IS NOT NULL THEN 'LISTING' ELSE 'ASIN' END as entity_type,
+        'LISTING' as entity_type,
         COALESCE(l.title, ae.title) as title,
         ae.brand,
         ae.category,
@@ -194,15 +195,43 @@ export async function initMlDataPool() {
         fs.features_json as all_features,
         fs.computed_at as features_computed_at,
         CURRENT_TIMESTAMP as snapshot_at
-      FROM asin_entities ae
-      FULL OUTER JOIN listings l ON l.asin = ae.asin OR l.id = ae.listing_id
+      FROM listings l
+      LEFT JOIN asin_entities ae ON ae.asin = l.asin OR ae.listing_id = l.id
       LEFT JOIN LATERAL (
         SELECT features_json, computed_at FROM feature_store
         WHERE (entity_type = 'LISTING' AND entity_id = l.id)
-           OR (entity_type = 'ASIN' AND entity_id = ae.id)
         ORDER BY computed_at DESC LIMIT 1
       ) fs ON true
-      WHERE ae.id IS NOT NULL OR l.id IS NOT NULL
+
+      UNION ALL
+
+      -- ASIN entities without a listing
+      SELECT
+        NULL as listing_id,
+        ae.id as asin_entity_id,
+        'ASIN_' || ae.asin as sku,
+        ae.asin,
+        'ASIN' as entity_type,
+        ae.title,
+        ae.brand,
+        ae.category,
+        NULL as listing_status,
+        NULL as current_price,
+        NULL as current_quantity,
+        (fs.features_json->>'margin')::numeric as computed_margin,
+        (fs.features_json->>'opportunity_score')::numeric as opportunity_score,
+        fs.features_json as all_features,
+        fs.computed_at as features_computed_at,
+        CURRENT_TIMESTAMP as snapshot_at
+      FROM asin_entities ae
+      LEFT JOIN LATERAL (
+        SELECT features_json, computed_at FROM feature_store
+        WHERE entity_type = 'ASIN' AND entity_id = ae.id
+        ORDER BY computed_at DESC LIMIT 1
+      ) fs ON true
+      WHERE NOT EXISTS (
+        SELECT 1 FROM listings l WHERE l.asin = ae.asin OR l.id = ae.listing_id
+      )
     `);
 
     // Create indexes
