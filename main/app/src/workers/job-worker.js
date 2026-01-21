@@ -430,6 +430,7 @@ async function callSpApiUpdatePrice(listingId, newPrice) {
   try {
     const response = await sp.callAPI({
       operation: 'patchListingsItem',
+      endpoint: 'listingsItems',
       path: {
         sellerId: sellerId,
         sku: sellerSku,
@@ -542,6 +543,7 @@ async function callSpApiUpdateInventory(listingId, newQuantity) {
   try {
     const response = await sp.callAPI({
       operation: 'patchListingsItem',
+      endpoint: 'listingsItems',
       path: {
         sellerId: sellerId,
         sku: sellerSku,
