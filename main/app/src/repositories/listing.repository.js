@@ -16,57 +16,66 @@ import { query, transaction } from '../database/connection.js';
  * @returns {Promise<Array>} Array of listings
  */
 export async function getAll(filters = {}) {
-  let sql = `
-    SELECT
-      l.*,
-      COALESCE(
-        json_agg(
-          DISTINCT jsonb_build_object(
-            'id', li.id,
-            'url', li.url,
-            'position', li.position,
-            'variant', li.variant
-          )
-        ) FILTER (WHERE li.id IS NOT NULL),
-        '[]'
-      ) as images
-    FROM listings l
-    LEFT JOIN listing_images li ON l.id = li."listingId"
-    WHERE 1=1
-  `;
+  try {
+    let sql = `
+      SELECT
+        l.*,
+        COALESCE(
+          json_agg(
+            DISTINCT jsonb_build_object(
+              'id', li.id,
+              'url', li.url,
+              'position', li.position,
+              'variant', li.variant
+            )
+          ) FILTER (WHERE li.id IS NOT NULL),
+          '[]'
+        ) as images
+      FROM listings l
+      LEFT JOIN listing_images li ON l.id = li."listingId"
+      WHERE 1=1
+    `;
 
-  const params = [];
-  let paramCount = 1;
+    const params = [];
+    let paramCount = 1;
 
-  if (filters.status) {
-    sql += ` AND l.status = $${paramCount++}`;
-    params.push(filters.status);
+    if (filters.status) {
+      sql += ` AND l.status = $${paramCount++}`;
+      params.push(filters.status);
+    }
+
+    if (filters.category) {
+      sql += ` AND l.category = $${paramCount++}`;
+      params.push(filters.category);
+    }
+
+    if (filters.search) {
+      sql += ` AND (l.title ILIKE $${paramCount} OR l.seller_sku ILIKE $${paramCount} OR l.asin ILIKE $${paramCount++})`;
+      params.push(`%${filters.search}%`);
+    }
+
+    sql += ` GROUP BY l.id ORDER BY l."updatedAt" DESC`;
+
+    if (filters.limit) {
+      sql += ` LIMIT $${paramCount++}`;
+      params.push(filters.limit);
+    }
+
+    if (filters.offset) {
+      sql += ` OFFSET $${paramCount++}`;
+      params.push(filters.offset);
+    }
+
+    const result = await query(sql, params);
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Listings] listings or listing_images table does not exist');
+      return [];
+    }
+    throw error;
   }
-
-  if (filters.category) {
-    sql += ` AND l.category = $${paramCount++}`;
-    params.push(filters.category);
-  }
-
-  if (filters.search) {
-    sql += ` AND (l.title ILIKE $${paramCount} OR l.seller_sku ILIKE $${paramCount} OR l.asin ILIKE $${paramCount++})`;
-    params.push(`%${filters.search}%`);
-  }
-
-  sql += ` GROUP BY l.id ORDER BY l."updatedAt" DESC`;
-
-  if (filters.limit) {
-    sql += ` LIMIT $${paramCount++}`;
-    params.push(filters.limit);
-  }
-
-  if (filters.offset) {
-    sql += ` OFFSET $${paramCount++}`;
-    params.push(filters.offset);
-  }
-
-  const result = await query(sql, params);
-  return result.rows;
 }
 
 /**

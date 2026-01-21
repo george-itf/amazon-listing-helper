@@ -21,31 +21,40 @@ import { query, transaction } from '../database/connection.js';
  * @returns {Promise<Object|null>}
  */
 export async function getActiveBom(listingId) {
-  const result = await query(`
-    SELECT b.*,
-      COALESCE(json_agg(
-        json_build_object(
-          'id', bl.id,
-          'component_id', bl.component_id,
-          'component_sku', c.component_sku,
-          'component_name', c.name,
-          'quantity', bl.quantity,
-          'wastage_rate', bl.wastage_rate,
-          'unit_cost_ex_vat', c.unit_cost_ex_vat,
-          'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat,
-          'notes', bl.notes
-        ) ORDER BY c.name
-      ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines
-    FROM boms b
-    LEFT JOIN bom_lines bl ON bl.bom_id = b.id
-    LEFT JOIN components c ON c.id = bl.component_id
-    WHERE b.listing_id = $1
-      AND b.is_active = true
-      AND b.scope_type = 'LISTING'
-    GROUP BY b.id
-  `, [listingId]);
+  try {
+    const result = await query(`
+      SELECT b.*,
+        COALESCE(json_agg(
+          json_build_object(
+            'id', bl.id,
+            'component_id', bl.component_id,
+            'component_sku', c.component_sku,
+            'component_name', c.name,
+            'quantity', bl.quantity,
+            'wastage_rate', bl.wastage_rate,
+            'unit_cost_ex_vat', c.unit_cost_ex_vat,
+            'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat,
+            'notes', bl.notes
+          ) ORDER BY c.name
+        ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines
+      FROM boms b
+      LEFT JOIN bom_lines bl ON bl.bom_id = b.id
+      LEFT JOIN components c ON c.id = bl.component_id
+      WHERE b.listing_id = $1
+        AND b.is_active = true
+        AND b.scope_type = 'LISTING'
+      GROUP BY b.id
+    `, [listingId]);
 
-  return result.rows[0] || null;
+    return result.rows[0] || null;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[BOM] boms/bom_lines/components table does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -85,20 +94,29 @@ export async function findById(bomId) {
  * @returns {Promise<Object[]>}
  */
 export async function getVersionHistory(listingId) {
-  const result = await query(`
-    SELECT b.id, b.version, b.is_active, b.effective_from, b.effective_to,
-           b.notes, b.created_at,
-           COUNT(bl.id) as line_count,
-           COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost
-    FROM boms b
-    LEFT JOIN bom_lines bl ON bl.bom_id = b.id
-    LEFT JOIN components c ON c.id = bl.component_id
-    WHERE b.listing_id = $1 AND b.scope_type = 'LISTING'
-    GROUP BY b.id
-    ORDER BY b.version DESC
-  `, [listingId]);
+  try {
+    const result = await query(`
+      SELECT b.id, b.version, b.is_active, b.effective_from, b.effective_to,
+             b.notes, b.created_at,
+             COUNT(bl.id) as line_count,
+             COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost
+      FROM boms b
+      LEFT JOIN bom_lines bl ON bl.bom_id = b.id
+      LEFT JOIN components c ON c.id = bl.component_id
+      WHERE b.listing_id = $1 AND b.scope_type = 'LISTING'
+      GROUP BY b.id
+      ORDER BY b.version DESC
+    `, [listingId]);
 
-  return result.rows;
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[BOM] boms/bom_lines/components table does not exist');
+      return [];
+    }
+    throw error;
+  }
 }
 
 /**

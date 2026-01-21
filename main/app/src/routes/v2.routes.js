@@ -1797,16 +1797,25 @@ export async function registerV2Routes(fastify) {
    * Get all pending recommendations
    */
   fastify.get('/api/v2/recommendations', async (request, reply) => {
-    const recommendationService = await import('../services/recommendation.service.js');
-    const { entity_type, type, limit = '50' } = request.query;
+    try {
+      const recommendationService = await import('../services/recommendation.service.js');
+      const { entity_type, type, limit = '50' } = request.query;
 
-    const recommendations = await recommendationService.getPendingRecommendations({
-      entityType: entity_type,
-      type,
-      limit: parseInt(limit, 10),
-    });
+      const recommendations = await recommendationService.getPendingRecommendations({
+        entityType: entity_type,
+        type,
+        limit: parseInt(limit, 10),
+      });
 
-    return wrapResponse(recommendations);
+      return wrapResponse(recommendations);
+    } catch (error) {
+      // Handle missing table gracefully
+      if (error.message?.includes('does not exist')) {
+        return wrapResponse([]);
+      }
+      httpLogger.error('[API] GET /recommendations error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
@@ -1814,53 +1823,67 @@ export async function registerV2Routes(fastify) {
    * Get recommendation summary statistics
    */
   fastify.get('/api/v2/recommendations/stats', async (request, reply) => {
-    const { query: dbQuery } = await import('../database/connection.js');
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
 
-    // Get counts by status
-    const statusResult = await dbQuery(`
-      SELECT status, COUNT(*)::int as count
-      FROM recommendations
-      GROUP BY status
-    `);
+      // Get counts by status
+      const statusResult = await dbQuery(`
+        SELECT status, COUNT(*)::int as count
+        FROM recommendations
+        GROUP BY status
+      `);
 
-    // Get counts by type
-    const typeResult = await dbQuery(`
-      SELECT type, COUNT(*)::int as count
-      FROM recommendations
-      WHERE status = 'PENDING'
-      GROUP BY type
-    `);
+      // Get counts by type (column is recommendation_type, not type)
+      const typeResult = await dbQuery(`
+        SELECT recommendation_type, COUNT(*)::int as count
+        FROM recommendations
+        WHERE status = 'PENDING'
+        GROUP BY recommendation_type
+      `);
 
-    // Get counts by severity
-    const severityResult = await dbQuery(`
-      SELECT severity, COUNT(*)::int as count
-      FROM recommendations
-      WHERE status = 'PENDING'
-      GROUP BY severity
-    `);
+      // Get counts by confidence (not severity - column doesn't exist)
+      const confidenceResult = await dbQuery(`
+        SELECT confidence, COUNT(*)::int as count
+        FROM recommendations
+        WHERE status = 'PENDING'
+        GROUP BY confidence
+      `);
 
-    // Get total pending
-    const totalResult = await dbQuery(`
-      SELECT COUNT(*)::int as total
-      FROM recommendations
-      WHERE status = 'PENDING'
-    `);
+      // Get total pending
+      const totalResult = await dbQuery(`
+        SELECT COUNT(*)::int as total
+        FROM recommendations
+        WHERE status = 'PENDING'
+      `);
 
-    const by_status = {};
-    statusResult.rows.forEach(row => { by_status[row.status] = row.count; });
+      const by_status = {};
+      statusResult.rows.forEach(row => { by_status[row.status] = row.count; });
 
-    const by_type = {};
-    typeResult.rows.forEach(row => { by_type[row.type] = row.count; });
+      const by_type = {};
+      typeResult.rows.forEach(row => { by_type[row.recommendation_type] = row.count; });
 
-    const by_severity = {};
-    severityResult.rows.forEach(row => { by_severity[row.severity] = row.count; });
+      const by_confidence = {};
+      confidenceResult.rows.forEach(row => { by_confidence[row.confidence] = row.count; });
 
-    return wrapResponse({
-      total: totalResult.rows[0]?.total || 0,
-      by_status,
-      by_type,
-      by_severity,
-    });
+      return wrapResponse({
+        total: totalResult.rows[0]?.total || 0,
+        by_status,
+        by_type,
+        by_confidence,
+      });
+    } catch (error) {
+      // Handle missing table gracefully
+      if (error.message?.includes('does not exist')) {
+        return wrapResponse({
+          total: 0,
+          by_status: {},
+          by_type: {},
+          by_confidence: {},
+        });
+      }
+      httpLogger.error('[API] GET /recommendations/stats error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
@@ -1868,15 +1891,24 @@ export async function registerV2Routes(fastify) {
    * Get a specific recommendation
    */
   fastify.get('/api/v2/recommendations/:id', async (request, reply) => {
-    const recommendationService = await import('../services/recommendation.service.js');
-    const recommendationId = parseInt(request.params.id, 10);
+    try {
+      const recommendationService = await import('../services/recommendation.service.js');
+      const recommendationId = parseInt(request.params.id, 10);
 
-    const recommendation = await recommendationService.getRecommendation(recommendationId);
-    if (!recommendation) {
-      return reply.status(404).send({ success: false, error: 'Recommendation not found' });
+      const recommendation = await recommendationService.getRecommendation(recommendationId);
+      if (!recommendation) {
+        return reply.status(404).send({ success: false, error: 'Recommendation not found' });
+      }
+
+      return wrapResponse(recommendation);
+    } catch (error) {
+      // Handle missing table gracefully
+      if (error.message?.includes('does not exist')) {
+        return reply.status(404).send({ success: false, error: 'Recommendation not found' });
+      }
+      httpLogger.error('[API] GET /recommendations/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    return wrapResponse(recommendation);
   });
 
   /**
