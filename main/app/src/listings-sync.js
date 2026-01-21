@@ -43,29 +43,48 @@ export async function testConnection() {
   }
 
   try {
-    // Test connection by getting recent reports - Reports API is commonly available
-    // The Sellers API (getMarketplaceParticipations) often requires additional authorization
+    // Test connection by requesting a listings report - same operation used by sync
+    // This validates the refresh token and Reports API access in one call
+    const marketplaceId = getDefaultMarketplaceId();
+
     const response = await sp.callAPI({
-      operation: 'getReports',
+      operation: 'createReport',
       endpoint: 'reports',
-      query: {
-        reportTypes: ['GET_MERCHANT_LISTINGS_ALL_DATA'],  // Must be array per SP-API spec
-        pageSize: 1,
+      body: {
+        reportType: 'GET_MERCHANT_LISTINGS_ALL_DATA',
+        marketplaceIds: [marketplaceId],
       },
     });
+
+    // If we get here, connection works - we created a report
+    // Note: This will create an actual report request, but that's fine
+    console.log('[ListingsSync] Connection test successful, report requested:', response.reportId);
 
     return {
       success: true,
       configured: true,
       message: 'SP-API connection successful',
-      reports_found: response?.reports?.length || 0,
+      report_id: response.reportId,
     };
   } catch (error) {
     console.error('[ListingsSync] Connection test failed:', error);
+
+    // Check for specific error types
+    const errorMessage = error.message || 'Failed to connect to Amazon SP-API';
+
+    // If it's a token/auth error, provide specific guidance
+    if (errorMessage.includes('invalid_grant') || errorMessage.includes('refresh_token')) {
+      return {
+        success: false,
+        configured: true,
+        error: 'Refresh token is invalid or expired. Please re-authorize the app in Seller Central.',
+      };
+    }
+
     return {
       success: false,
       configured: true,
-      error: error.message || 'Failed to connect to Amazon SP-API',
+      error: errorMessage,
     };
   }
 }
