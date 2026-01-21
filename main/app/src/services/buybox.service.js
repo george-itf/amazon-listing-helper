@@ -15,6 +15,7 @@
  */
 
 import { query } from '../database/connection.js';
+import { getSellerId } from '../credentials-provider.js';
 
 /**
  * Buy Box status values
@@ -79,19 +80,24 @@ export async function getBuyBoxStatusByListing(listingId) {
  * @returns {Promise<Object>} Buy Box status data
  */
 export async function getBuyBoxStatusByAsin(asinEntityId) {
-  // Try to get from keepa_snapshots for ASIN
+  // Get ASIN entity info and latest Keepa snapshot
+  // Buy box data is stored in parsed_json JSONB column
   const result = await query(`
     SELECT
       ae.id as asin_entity_id,
       ae.asin,
-      ks.buy_box_price_inc_vat,
-      ks.buy_box_seller_id,
-      ks.fetched_at
+      ae.listing_id,
+      ks.parsed_json,
+      ks.captured_at
     FROM asin_entities ae
-    LEFT JOIN keepa_snapshots ks ON ks.asin_entity_id = ae.id
+    LEFT JOIN LATERAL (
+      SELECT parsed_json, captured_at
+      FROM keepa_snapshots
+      WHERE asin_entity_id = ae.id
+      ORDER BY captured_at DESC
+      LIMIT 1
+    ) ks ON true
     WHERE ae.id = $1
-    ORDER BY ks.fetched_at DESC NULLS LAST
-    LIMIT 1
   `, [asinEntityId]);
 
   if (result.rows.length === 0) {
@@ -100,22 +106,53 @@ export async function getBuyBoxStatusByAsin(asinEntityId) {
       status: BUY_BOX_STATUS.UNKNOWN,
       owner: null,
       price_inc_vat: null,
+      is_amazon: null,
       captured_at: null,
       source: 'none',
     };
   }
 
   const row = result.rows[0];
-  const hasBuyBoxData = row.buy_box_price_inc_vat !== null;
+  const keepaMetrics = row.parsed_json?.metrics || {};
+
+  // Extract buy box data from Keepa parsed_json
+  const buyBoxPrice = keepaMetrics.buy_box_price ?? null;
+  const buyBoxSeller = keepaMetrics.buy_box_seller ?? null;
+  const buyBoxIsAmazon = keepaMetrics.buy_box_is_amazon ?? false;
+
+  // Get our seller ID for comparison
+  const ourSellerId = getSellerId();
+
+  // If we have a linked listing, check if we have an offer
+  let ourPrice = null;
+  if (row.listing_id) {
+    const listingResult = await query(
+      'SELECT price_inc_vat FROM listings WHERE id = $1',
+      [row.listing_id]
+    );
+    ourPrice = listingResult.rows[0]?.price_inc_vat
+      ? parseFloat(listingResult.rows[0].price_inc_vat)
+      : null;
+  }
+
+  // Determine status using the determineBuyBoxStatus function
+  const status = determineBuyBoxStatus({
+    buyBoxPrice,
+    buyBoxSeller,
+    ourSellerId,
+    ourPrice,
+  });
 
   return {
     asin_entity_id: asinEntityId,
     asin: row.asin,
-    status: hasBuyBoxData ? BUY_BOX_STATUS.UNKNOWN : BUY_BOX_STATUS.UNKNOWN, // Would need seller comparison
-    owner: row.buy_box_seller_id,
-    price_inc_vat: row.buy_box_price_inc_vat ? parseFloat(row.buy_box_price_inc_vat) : null,
-    captured_at: row.fetched_at,
-    source: 'keepa_snapshots',
+    status,
+    owner: buyBoxSeller,
+    price_inc_vat: buyBoxPrice,
+    is_amazon: buyBoxIsAmazon,
+    our_price_inc_vat: ourPrice,
+    captured_at: row.captured_at,
+    source: row.parsed_json ? 'keepa_snapshots' : 'none',
   };
 }
 

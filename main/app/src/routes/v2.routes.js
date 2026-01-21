@@ -1902,14 +1902,23 @@ export async function registerV2Routes(fastify) {
   /**
    * POST /api/v2/recommendations/:id/snooze
    * Snooze a recommendation
+   * Accepts either { days: number } or { snooze_until: ISO string }
    */
   fastify.post('/api/v2/recommendations/:id/snooze', async (request, reply) => {
     const recommendationService = await import('../services/recommendation.service.js');
     const recommendationId = parseInt(request.params.id, 10);
-    const { days = 7, reason } = request.body || {};
+    const { days, snooze_until, reason, notes } = request.body || {};
+
+    // Calculate days from snooze_until if provided
+    let snoozeDays = days || 7;
+    if (snooze_until) {
+      const snoozeDate = new Date(snooze_until);
+      const now = new Date();
+      snoozeDays = Math.max(1, Math.ceil((snoozeDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+    }
 
     try {
-      const result = await recommendationService.snoozeRecommendation(recommendationId, days, reason);
+      const result = await recommendationService.snoozeRecommendation(recommendationId, snoozeDays, reason || notes);
       return wrapResponse(result);
     } catch (error) {
       return reply.status(400).send({ success: false, error: error.message });
