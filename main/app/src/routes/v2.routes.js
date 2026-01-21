@@ -16,6 +16,14 @@ import * as listingService from '../services/listing.service.js';
 import { query } from '../database/connection.js';
 
 /**
+ * Wrap response data in standard API response format
+ * Frontend expects: { success: boolean, data?: T, error?: string }
+ */
+function wrapResponse(data) {
+  return { success: true, data };
+}
+
+/**
  * Register all v2 routes
  * @param {FastifyInstance} fastify
  */
@@ -172,7 +180,7 @@ export async function registerV2Routes(fastify) {
       updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
     }));
 
-    return mapped;
+    return wrapResponse(mapped);
   });
 
   /**
@@ -188,7 +196,7 @@ export async function registerV2Routes(fastify) {
     }
 
     // Map to frontend expected format
-    return {
+    return wrapResponse({
       id: listing.id,
       seller_sku: listing.sku,
       asin: listing.asin || null,
@@ -197,7 +205,7 @@ export async function registerV2Routes(fastify) {
       status: (listing.status || 'active').toUpperCase(),
       created_at: listing.createdAt || listing.created_at || new Date().toISOString(),
       updated_at: listing.updatedAt || listing.updated_at || new Date().toISOString(),
-    };
+    });
   });
 
   // ============================================================================
@@ -247,7 +255,7 @@ export async function registerV2Routes(fastify) {
     params.push(parseInt(offset, 10));
 
     const result = await query(sql, params);
-    return result.rows;
+    return wrapResponse(result.rows);
   });
 
   /**
@@ -1088,7 +1096,7 @@ export async function registerV2Routes(fastify) {
       LIMIT $1 OFFSET $2
     `, [parseInt(limit, 10), parseInt(offset, 10)]);
 
-    return { items: result.rows };
+    return wrapResponse(result.rows);
   });
 
   /**
@@ -1124,12 +1132,12 @@ export async function registerV2Routes(fastify) {
       LIMIT 1
     `, [asinEntityId]);
 
-    return {
+    return wrapResponse({
       ...result.rows[0],
       features: features?.features_json || null,
       features_computed_at: features?.computed_at || null,
       latest_keepa: keepaResult.rows[0] || null,
-    };
+    });
   });
 
   /**
@@ -1160,14 +1168,56 @@ export async function registerV2Routes(fastify) {
         RETURNING *
       `, [asinEntity.id, JSON.stringify({ asin: sanitizedAsin, marketplace_id, asin_entity_id: asinEntity.id })]);
 
-      return reply.status(201).send({
+      return reply.status(201).send(wrapResponse({
         asin_entity_id: asinEntity.id,
         asin: sanitizedAsin,
         sync_job_id: jobResult.rows[0].id,
         message: 'ASIN analysis started',
-      });
+      }));
     } catch (error) {
-      return reply.status(500).send({ error: error.message });
+      return reply.status(500).send({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/asins/track
+   * Track a new ASIN by ASIN string (frontend compatibility)
+   * Body: { asin, marketplace_id? }
+   */
+  fastify.post('/api/v2/asins/track', async (request, reply) => {
+    const { asin, marketplace_id = 1 } = request.body;
+
+    if (!asin) {
+      return reply.status(400).send({ success: false, error: 'asin is required' });
+    }
+
+    const sanitizedAsin = asin.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+
+    try {
+      const keepaService = await import('../services/keepa.service.js');
+      const { query: dbQuery } = await import('../database/connection.js');
+
+      // Get or create ASIN entity
+      const asinEntity = await keepaService.getOrCreateAsinEntity(sanitizedAsin, marketplace_id);
+
+      // Mark as tracked
+      await dbQuery(`
+        UPDATE asin_entities
+        SET is_tracked = true, tracked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+      `, [asinEntity.id]);
+
+      // Return the entity
+      const result = await dbQuery(`
+        SELECT ae.*, m.name as marketplace_name
+        FROM asin_entities ae
+        JOIN marketplaces m ON m.id = ae.marketplace_id
+        WHERE ae.id = $1
+      `, [asinEntity.id]);
+
+      return reply.status(201).send(wrapResponse(result.rows[0]));
+    } catch (error) {
+      return reply.status(500).send({ success: false, error: error.message });
     }
   });
 
@@ -1190,7 +1240,7 @@ export async function registerV2Routes(fastify) {
       return reply.status(404).send({ error: 'ASIN entity not found' });
     }
 
-    return result.rows[0];
+    return wrapResponse(result.rows[0]);
   });
 
   /**
@@ -1444,7 +1494,61 @@ export async function registerV2Routes(fastify) {
       limit: parseInt(limit, 10),
     });
 
-    return { recommendations };
+    return wrapResponse(recommendations);
+  });
+
+  /**
+   * GET /api/v2/recommendations/stats
+   * Get recommendation summary statistics
+   */
+  fastify.get('/api/v2/recommendations/stats', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+
+    // Get counts by status
+    const statusResult = await dbQuery(`
+      SELECT status, COUNT(*)::int as count
+      FROM recommendations
+      GROUP BY status
+    `);
+
+    // Get counts by type
+    const typeResult = await dbQuery(`
+      SELECT type, COUNT(*)::int as count
+      FROM recommendations
+      WHERE status = 'PENDING'
+      GROUP BY type
+    `);
+
+    // Get counts by severity
+    const severityResult = await dbQuery(`
+      SELECT severity, COUNT(*)::int as count
+      FROM recommendations
+      WHERE status = 'PENDING'
+      GROUP BY severity
+    `);
+
+    // Get total pending
+    const totalResult = await dbQuery(`
+      SELECT COUNT(*)::int as total
+      FROM recommendations
+      WHERE status = 'PENDING'
+    `);
+
+    const by_status = {};
+    statusResult.rows.forEach(row => { by_status[row.status] = row.count; });
+
+    const by_type = {};
+    typeResult.rows.forEach(row => { by_type[row.type] = row.count; });
+
+    const by_severity = {};
+    severityResult.rows.forEach(row => { by_severity[row.severity] = row.count; });
+
+    return wrapResponse({
+      total: totalResult.rows[0]?.total || 0,
+      by_status,
+      by_type,
+      by_severity,
+    });
   });
 
   /**
@@ -1457,10 +1561,10 @@ export async function registerV2Routes(fastify) {
 
     const recommendation = await recommendationService.getRecommendation(recommendationId);
     if (!recommendation) {
-      return reply.status(404).send({ error: 'Recommendation not found' });
+      return reply.status(404).send({ success: false, error: 'Recommendation not found' });
     }
 
-    return recommendation;
+    return wrapResponse(recommendation);
   });
 
   /**
@@ -1474,9 +1578,9 @@ export async function registerV2Routes(fastify) {
 
     try {
       const result = await recommendationService.acceptRecommendation(recommendationId, reason);
-      return result;
+      return wrapResponse(result);
     } catch (error) {
-      return reply.status(400).send({ error: error.message });
+      return reply.status(400).send({ success: false, error: error.message });
     }
   });
 
@@ -1491,9 +1595,9 @@ export async function registerV2Routes(fastify) {
 
     try {
       const result = await recommendationService.rejectRecommendation(recommendationId, reason);
-      return result;
+      return wrapResponse(result);
     } catch (error) {
-      return reply.status(400).send({ error: error.message });
+      return reply.status(400).send({ success: false, error: error.message });
     }
   });
 
@@ -1508,9 +1612,9 @@ export async function registerV2Routes(fastify) {
 
     try {
       const result = await recommendationService.snoozeRecommendation(recommendationId, days, reason);
-      return result;
+      return wrapResponse(result);
     } catch (error) {
-      return reply.status(400).send({ error: error.message });
+      return reply.status(400).send({ success: false, error: error.message });
     }
   });
 
@@ -1529,7 +1633,7 @@ export async function registerV2Routes(fastify) {
       { status, limit: parseInt(limit, 10) }
     );
 
-    return { listing_id: listingId, recommendations };
+    return wrapResponse(recommendations);
   });
 
   /**
@@ -1752,23 +1856,33 @@ export async function registerV2Routes(fastify) {
   });
 
   /**
-   * POST /api/v2/asins/:id/convert-to-listing
-   * Convert an ASIN entity to a listing
-   * Body: { sku, title?, price_inc_vat?, available_quantity?, copy_scenario_bom? }
+   * Convert ASIN to listing handler (shared between /convert and /convert-to-listing)
    */
-  fastify.post('/api/v2/asins/:id/convert-to-listing', async (request, reply) => {
+  async function handleConvertAsinToListing(request, reply) {
     const { query: dbQuery, transaction } = await import('../database/connection.js');
     const asinEntityId = parseInt(request.params.id, 10);
+
+    // Accept both backend field names and frontend field names
     const {
       sku,
+      seller_sku,  // Frontend field name alias
       title,
       price_inc_vat,
-      available_quantity = 0,
-      copy_scenario_bom = true,
+      initial_price_inc_vat,  // Frontend field name alias
+      available_quantity,
+      initial_quantity,  // Frontend field name alias
+      copy_scenario_bom,
+      bom_id,  // Frontend sends bom_id, treat as truthy for copy_scenario_bom
     } = request.body;
 
-    if (!sku) {
-      return reply.status(400).send({ error: 'SKU is required' });
+    // Resolve field aliases (frontend names take precedence if both provided)
+    const finalSku = seller_sku || sku;
+    const finalPrice = initial_price_inc_vat ?? price_inc_vat;
+    const finalQuantity = initial_quantity ?? available_quantity ?? 0;
+    const shouldCopyBom = bom_id !== undefined ? !!bom_id : (copy_scenario_bom ?? true);
+
+    if (!finalSku) {
+      return reply.status(400).send({ success: false, error: 'SKU is required (use sku or seller_sku)' });
     }
 
     // Verify ASIN entity exists and get its data
@@ -1802,7 +1916,7 @@ export async function registerV2Routes(fastify) {
     // Check if SKU already exists
     const existingSkuResult = await dbQuery(
       'SELECT id FROM listings WHERE sku = $1 AND marketplace_id = $2',
-      [sku, entity.marketplace_id]
+      [finalSku, entity.marketplace_id]
     );
 
     if (existingSkuResult.rows.length > 0) {
@@ -1815,8 +1929,8 @@ export async function registerV2Routes(fastify) {
     try {
       const result = await transaction(async (client) => {
         // Get price from Keepa data if not provided
-        let finalPrice = price_inc_vat;
-        if (!finalPrice) {
+        let resolvedPrice = finalPrice;
+        if (!resolvedPrice) {
           const keepaResult = await client.query(`
             SELECT parsed_json FROM keepa_snapshots
             WHERE asin_entity_id = $1
@@ -1825,9 +1939,9 @@ export async function registerV2Routes(fastify) {
           `, [asinEntityId]);
 
           if (keepaResult.rows.length > 0 && keepaResult.rows[0].parsed_json?.metrics?.price_current) {
-            finalPrice = keepaResult.rows[0].parsed_json.metrics.price_current;
+            resolvedPrice = keepaResult.rows[0].parsed_json.metrics.price_current;
           } else {
-            finalPrice = 0; // Placeholder, user must edit
+            resolvedPrice = 0; // Placeholder, user must edit
           }
         }
 
@@ -1841,11 +1955,11 @@ export async function registerV2Routes(fastify) {
           RETURNING *
         `, [
           entity.marketplace_id,
-          sku,
+          finalSku,
           entity.asin,
           title || entity.title || `Listing for ${entity.asin}`,
-          finalPrice,
-          available_quantity,
+          resolvedPrice,
+          finalQuantity,
         ]);
 
         const listing = listingResult.rows[0];
@@ -1859,7 +1973,7 @@ export async function registerV2Routes(fastify) {
 
         // Copy scenario BOM to listing BOM if requested
         let copiedBomId = null;
-        if (copy_scenario_bom) {
+        if (shouldCopyBom) {
           const scenarioBomResult = await client.query(`
             SELECT id FROM boms
             WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO' AND is_active = true
@@ -1875,7 +1989,7 @@ export async function registerV2Routes(fastify) {
               INSERT INTO boms (listing_id, scope_type, name, version, is_active, created_by)
               VALUES ($1, 'LISTING', $2, 1, true, 'user')
               RETURNING *
-            `, [listing.id, `BOM for ${sku}`]);
+            `, [listing.id, `BOM for ${finalSku}`]);
 
             copiedBomId = newBomResult.rows[0].id;
 
@@ -1898,19 +2012,88 @@ export async function registerV2Routes(fastify) {
         VALUES ('COMPUTE_FEATURES_LISTING', 'LISTING', $1, 'system')
       `, [result.listing.id]);
 
-      return reply.status(201).send({
-        success: true,
+      // Return response matching frontend ConvertToListingResponse
+      return reply.status(201).send(wrapResponse({
         listing_id: result.listing.id,
-        sku: result.listing.sku,
+        seller_sku: result.listing.sku,
         asin: result.listing.asin,
         asin_entity_id: asinEntityId,
         bom_copied: result.copiedBomId !== null,
         bom_id: result.copiedBomId,
-        message: 'ASIN converted to listing successfully',
-      });
+      }));
     } catch (error) {
-      return reply.status(500).send({ error: error.message });
+      return reply.status(500).send({ success: false, error: error.message });
     }
+  }
+
+  // Register both /convert and /convert-to-listing routes (frontend uses /convert)
+  fastify.post('/api/v2/asins/:id/convert', handleConvertAsinToListing);
+  fastify.post('/api/v2/asins/:id/convert-to-listing', handleConvertAsinToListing);
+
+  /**
+   * GET /api/v2/asins/:id/analysis
+   * Get cached analysis for an ASIN entity (frontend compatibility)
+   */
+  fastify.get('/api/v2/asins/:id/analysis', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+
+    // Get ASIN entity
+    const entityResult = await dbQuery(`
+      SELECT ae.*, m.name as marketplace_name, m.vat_rate
+      FROM asin_entities ae
+      JOIN marketplaces m ON m.id = ae.marketplace_id
+      WHERE ae.id = $1
+    `, [asinEntityId]);
+
+    if (entityResult.rows.length === 0) {
+      return reply.status(404).send({ success: false, error: 'ASIN entity not found' });
+    }
+
+    const entity = entityResult.rows[0];
+
+    // Get latest features
+    const featureStoreService = await import('../services/feature-store.service.js');
+    const features = await featureStoreService.getLatestFeatures('ASIN', asinEntityId);
+
+    // Get latest Keepa snapshot
+    const keepaResult = await dbQuery(`
+      SELECT parsed_json, captured_at
+      FROM keepa_snapshots
+      WHERE asin_entity_id = $1
+      ORDER BY captured_at DESC
+      LIMIT 1
+    `, [asinEntityId]);
+
+    const keepaData = keepaResult.rows[0]?.parsed_json || {};
+    const keepaMetrics = keepaData.metrics || {};
+    const featuresJson = features?.features_json || {};
+
+    // Build analysis response matching frontend AsinAnalysis interface
+    const analysis = {
+      asin_entity_id: asinEntityId,
+      asin: entity.asin,
+      market_data: {
+        keepa_price_median_90d: keepaMetrics.price_median_90d || null,
+        keepa_price_p25_90d: keepaMetrics.price_p25_90d || null,
+        keepa_price_p75_90d: keepaMetrics.price_p75_90d || null,
+        keepa_volatility_90d: keepaMetrics.volatility_90d || null,
+        keepa_offers_count_current: keepaMetrics.offers_count_current || null,
+        keepa_rank_trend_90d: keepaMetrics.rank_trend_90d || null,
+      },
+      economics_scenario: featuresJson.has_scenario_bom ? {
+        suggested_price_inc_vat: keepaMetrics.price_current || 0,
+        bom_cost_ex_vat: featuresJson.scenario_bom_cost_ex_vat || 0,
+        estimated_fees_ex_vat: (keepaMetrics.price_current || 0) * 0.15, // ~15% Amazon fee estimate
+        estimated_profit_ex_vat: featuresJson.opportunity_profit || 0,
+        estimated_margin: featuresJson.opportunity_margin || 0,
+      } : null,
+      opportunity_score: featuresJson.opportunity_score || null,
+      recommendation: featuresJson.recommendation || null,
+      analyzed_at: features?.computed_at || keepaResult.rows[0]?.captured_at || new Date().toISOString(),
+    };
+
+    return wrapResponse(analysis);
   });
 
   /**
