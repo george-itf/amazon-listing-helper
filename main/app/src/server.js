@@ -12,6 +12,7 @@ const __dirname = path.dirname(__filename);
 
 // PostgreSQL connection pool (for graceful shutdown)
 import { closePool, initMlDataPool, testConnection } from './database/connection.js';
+import { runMigrations } from './database/migrate.js';
 
 // V2 API routes
 import { registerV2Routes } from './routes/v2.routes.js';
@@ -268,6 +269,16 @@ const start = async () => {
     if (!dbOk) {
       logger.fatal('Database connection failed - exiting');
       process.exit(1);
+    }
+
+    // Run database migrations
+    const migrationResult = await runMigrations();
+    if (!migrationResult.success) {
+      logger.fatal({ error: migrationResult.error }, 'Database migration failed - exiting');
+      process.exit(1);
+    }
+    if (migrationResult.migrationsRun > 0) {
+      logger.info({ count: migrationResult.migrationsRun }, 'Database migrations applied');
     }
 
     // Initialize ML data pool (non-blocking)
