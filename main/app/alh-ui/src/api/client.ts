@@ -47,40 +47,39 @@ apiClient.interceptors.response.use(
   }
 );
 
+// Helper to unwrap API response safely
+function unwrapResponse<T>(response: { data: ApiResponse<T> }, context: string): T {
+  if (response.data.success === false) {
+    throw new Error(response.data.error || `${context} failed`);
+  }
+  if (response.data.data === undefined) {
+    throw new Error(response.data.message || `${context} returned no data`);
+  }
+  return response.data.data;
+}
+
 // Generic GET request
 export async function get<T>(url: string, params?: Record<string, unknown>): Promise<T> {
   const response = await apiClient.get<ApiResponse<T>>(url, { params });
-  if (response.data.success === false) {
-    throw new Error(response.data.error || 'Request failed');
-  }
-  return response.data.data as T;
+  return unwrapResponse(response, `GET ${url}`);
 }
 
 // Generic POST request
 export async function post<T>(url: string, data?: unknown): Promise<T> {
   const response = await apiClient.post<ApiResponse<T>>(url, data);
-  if (response.data.success === false) {
-    throw new Error(response.data.error || 'Request failed');
-  }
-  return response.data.data as T;
+  return unwrapResponse(response, `POST ${url}`);
 }
 
 // Generic PUT request
 export async function put<T>(url: string, data?: unknown): Promise<T> {
   const response = await apiClient.put<ApiResponse<T>>(url, data);
-  if (response.data.success === false) {
-    throw new Error(response.data.error || 'Request failed');
-  }
-  return response.data.data as T;
+  return unwrapResponse(response, `PUT ${url}`);
 }
 
 // Generic DELETE request
 export async function del<T>(url: string): Promise<T> {
   const response = await apiClient.delete<ApiResponse<T>>(url);
-  if (response.data.success === false) {
-    throw new Error(response.data.error || 'Request failed');
-  }
-  return response.data.data as T;
+  return unwrapResponse(response, `DELETE ${url}`);
 }
 
 export default apiClient;
