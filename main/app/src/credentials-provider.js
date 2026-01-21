@@ -2,55 +2,73 @@
  * CredentialsProvider Module
  *
  * Single source of truth for all credential access.
- * Per ARCHITECTURE_AUDIT.md §A.5: No other code should read credentials.json directly.
+ * SECURITY: Only loads credentials from environment variables.
+ * Never reads from disk files to prevent accidental secret exposure.
+ *
+ * Required environment variables for SP-API:
+ *   - SP_API_REFRESH_TOKEN
+ *   - SP_API_CLIENT_ID
+ *   - SP_API_CLIENT_SECRET
+ *   - SP_API_SELLER_ID (optional)
+ *   - SP_API_MARKETPLACE_ID (optional, defaults to UK)
+ *
+ * Required for Keepa:
+ *   - KEEPA_API_KEY
  *
  * @module CredentialsProvider
  */
-
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
-
-const DATA_DIR = process.env.DATA_DIR || '/opt/alh/data';
-const CREDENTIALS_FILE = join(DATA_DIR, 'credentials.json');
 
 // Cached credentials (loaded once)
 let cachedCredentials = null;
 
 /**
- * Load credentials from environment variables (for Railway/cloud) or file (for local)
- * @returns {Object} Raw credentials object
- * @throws {Error} If no credentials found
+ * Helper to require an environment variable
+ * @param {string} name - Environment variable name
+ * @param {string} [fallback] - Optional fallback value
+ * @returns {string} The environment variable value
+ * @throws {Error} If required and not found
+ */
+function requireEnv(name, fallback = undefined) {
+  const value = process.env[name];
+  if (!value && fallback === undefined) {
+    throw new Error(
+      `Missing required environment variable: ${name}. ` +
+      `Set this in your environment or Railway variables.`
+    );
+  }
+  return value || fallback;
+}
+
+/**
+ * Get environment variable with optional default
+ * @param {string} name - Environment variable name
+ * @param {string} defaultValue - Default value if not set
+ * @returns {string} The environment variable value or default
+ */
+function getEnv(name, defaultValue = '') {
+  return process.env[name] || defaultValue;
+}
+
+/**
+ * Load credentials from environment variables
+ * @returns {Object} Credentials object
  */
 function loadCredentials() {
   if (cachedCredentials) {
     return cachedCredentials;
   }
 
-  // First, try environment variables (Railway deployment)
-  if (process.env.SP_API_REFRESH_TOKEN || process.env.SP_API_CLIENT_ID) {
-    cachedCredentials = {
-      refreshToken: process.env.SP_API_REFRESH_TOKEN,
-      clientId: process.env.SP_API_CLIENT_ID,
-      clientSecret: process.env.SP_API_CLIENT_SECRET,
-      sellerId: process.env.SP_API_SELLER_ID,
-      marketplaceId: process.env.SP_API_MARKETPLACE_ID || 'A1F83G8C2ARO7P',
-      keepaKey: process.env.KEEPA_API_KEY,
-    };
-    return cachedCredentials;
-  }
+  // Load from environment variables only
+  cachedCredentials = {
+    refreshToken: getEnv('SP_API_REFRESH_TOKEN'),
+    clientId: getEnv('SP_API_CLIENT_ID'),
+    clientSecret: getEnv('SP_API_CLIENT_SECRET'),
+    sellerId: getEnv('SP_API_SELLER_ID'),
+    marketplaceId: getEnv('SP_API_MARKETPLACE_ID', 'A1F83G8C2ARO7P'), // Default to UK
+    keepaKey: getEnv('KEEPA_API_KEY'),
+  };
 
-  // Fall back to credentials file (local development)
-  if (!existsSync(CREDENTIALS_FILE)) {
-    throw new Error(`Credentials file not found: ${CREDENTIALS_FILE}`);
-  }
-
-  try {
-    const content = readFileSync(CREDENTIALS_FILE, 'utf8');
-    cachedCredentials = JSON.parse(content);
-    return cachedCredentials;
-  } catch (error) {
-    throw new Error(`Failed to parse credentials file: ${error.message}`);
-  }
+  return cachedCredentials;
 }
 
 /**
@@ -73,21 +91,50 @@ export function getSpApiCredentials() {
   const creds = loadCredentials();
 
   return {
-    refreshToken: creds.refreshToken || creds.spApi?.refreshToken,
-    clientId: creds.clientId || creds.spApi?.clientId,
-    clientSecret: creds.clientSecret || creds.spApi?.clientSecret,
-    sellerId: creds.sellerId || creds.spApi?.sellerId,
-    marketplaceId: creds.marketplaceId || creds.spApi?.marketplaceId || 'A1F83G8C2ARO7P', // Default to UK
+    refreshToken: creds.refreshToken,
+    clientId: creds.clientId,
+    clientSecret: creds.clientSecret,
+    sellerId: creds.sellerId,
+    marketplaceId: creds.marketplaceId,
+  };
+}
+
+/**
+ * Get SP-API credentials with validation
+ * Throws if required credentials are missing
+ * @returns {Object} Validated SP-API credentials
+ * @throws {Error} If required credentials are missing
+ */
+export function getSpApiCredentialsRequired() {
+  const refreshToken = requireEnv('SP_API_REFRESH_TOKEN');
+  const clientId = requireEnv('SP_API_CLIENT_ID');
+  const clientSecret = requireEnv('SP_API_CLIENT_SECRET');
+
+  return {
+    refreshToken,
+    clientId,
+    clientSecret,
+    sellerId: getEnv('SP_API_SELLER_ID'),
+    marketplaceId: getEnv('SP_API_MARKETPLACE_ID', 'A1F83G8C2ARO7P'),
   };
 }
 
 /**
  * Get Keepa API key
- * @returns {string} Keepa API key
+ * @returns {string} Keepa API key (empty string if not set)
  */
 export function getKeepaApiKey() {
   const creds = loadCredentials();
-  return creds.keepaKey || creds.keepa?.apiKey || '';
+  return creds.keepaKey;
+}
+
+/**
+ * Get Keepa API key with validation
+ * @returns {string} Keepa API key
+ * @throws {Error} If KEEPA_API_KEY is not set
+ */
+export function getKeepaApiKeyRequired() {
+  return requireEnv('KEEPA_API_KEY');
 }
 
 /**
@@ -124,7 +171,7 @@ export function getCredentialsStatus() {
   return {
     spApi: hasSpApiCredentials(),
     keepa: hasKeepaCredentials(),
-    credentialsFileExists: existsSync(CREDENTIALS_FILE),
+    source: 'environment_variables',
   };
 }
 
@@ -186,14 +233,46 @@ export function getSellerId() {
   }
 }
 
+/**
+ * Validate all required credentials are present
+ * Call this at application startup to fail fast
+ * @param {Object} options - Validation options
+ * @param {boolean} options.requireSpApi - Require SP-API credentials
+ * @param {boolean} options.requireKeepa - Require Keepa credentials
+ * @throws {Error} If required credentials are missing
+ */
+export function validateCredentials({ requireSpApi = false, requireKeepa = false } = {}) {
+  const missing = [];
+
+  if (requireSpApi) {
+    if (!process.env.SP_API_REFRESH_TOKEN) missing.push('SP_API_REFRESH_TOKEN');
+    if (!process.env.SP_API_CLIENT_ID) missing.push('SP_API_CLIENT_ID');
+    if (!process.env.SP_API_CLIENT_SECRET) missing.push('SP_API_CLIENT_SECRET');
+  }
+
+  if (requireKeepa) {
+    if (!process.env.KEEPA_API_KEY) missing.push('KEEPA_API_KEY');
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required environment variables: ${missing.join(', ')}. ` +
+      `Please configure these in Railway or your .env file.`
+    );
+  }
+}
+
 export default {
   getSpApiCredentials,
+  getSpApiCredentialsRequired,
   getSpApiClientConfig,
   getKeepaApiKey,
+  getKeepaApiKeyRequired,
   hasSpApiCredentials,
   hasKeepaCredentials,
   getCredentialsStatus,
   getDefaultMarketplaceId,
   getSellerId,
   clearCredentialsCache,
+  validateCredentials,
 };

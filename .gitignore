@@ -56,3 +56,19 @@ coverage/
 
 # Optional: ignore local-only scripts, generated files
 /dist-serve/
+
+# Security: ignore data directory with credentials and sensitive data
+main/data/
+main/data/credentials.json
+main/data/*.json
+
+# Secret files - never commit
+*.pem
+*.key
+credentials.json
+secrets.json
+.secrets
+*.secret
+
+# Pre-commit hooks
+.git-secrets
