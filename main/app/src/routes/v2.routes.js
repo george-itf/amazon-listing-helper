@@ -1134,11 +1134,46 @@ export async function registerV2Routes(fastify) {
         RETURNING *
       `, [asinEntity.id, JSON.stringify({ asin: sanitizedAsin, marketplace_id, asin_entity_id: asinEntity.id })]);
 
+      // Check if we have existing Keepa data for this ASIN
+      const keepaResult = await dbQuery(`
+        SELECT parsed_json, captured_at
+        FROM keepa_snapshots
+        WHERE asin_entity_id = $1
+        ORDER BY captured_at DESC
+        LIMIT 1
+      `, [asinEntity.id]);
+
+      const keepaData = keepaResult.rows[0]?.parsed_json || {};
+      const keepaMetrics = keepaData.metrics || {};
+
+      // Get existing features if any
+      const featureStoreService = await import('../services/feature-store.service.js');
+      const features = await featureStoreService.getLatestFeatures('ASIN', asinEntity.id);
+      const featuresJson = features?.features_json || {};
+
+      // Return AsinAnalysis-compatible response
       return reply.status(201).send(wrapResponse({
         asin_entity_id: asinEntity.id,
         asin: sanitizedAsin,
         sync_job_id: jobResult.rows[0].id,
-        message: 'ASIN analysis started',
+        market_data: {
+          keepa_price_median_90d: keepaMetrics.price_median_90d || null,
+          keepa_price_p25_90d: keepaMetrics.price_p25_90d || null,
+          keepa_price_p75_90d: keepaMetrics.price_p75_90d || null,
+          keepa_volatility_90d: keepaMetrics.volatility_90d || null,
+          keepa_offers_count_current: keepaMetrics.offers_count_current || null,
+          keepa_rank_trend_90d: keepaMetrics.rank_trend_90d || null,
+        },
+        economics_scenario: featuresJson.has_scenario_bom ? {
+          suggested_price_inc_vat: keepaMetrics.price_current || 0,
+          bom_cost_ex_vat: featuresJson.scenario_bom_cost_ex_vat || 0,
+          estimated_fees_ex_vat: (keepaMetrics.price_current || 0) * 0.15,
+          estimated_profit_ex_vat: featuresJson.opportunity_profit || 0,
+          estimated_margin: featuresJson.opportunity_margin || 0,
+        } : null,
+        opportunity_score: featuresJson.opportunity_score || null,
+        recommendation: featuresJson.recommendation || null,
+        analyzed_at: features?.computed_at || keepaResult.rows[0]?.captured_at || new Date().toISOString(),
       }));
     } catch (error) {
       return reply.status(500).send({ success: false, error: error.message });
