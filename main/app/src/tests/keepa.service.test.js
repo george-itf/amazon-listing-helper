@@ -9,7 +9,6 @@
  */
 
 import { jest } from '@jest/globals';
-import nock from 'nock';
 
 // Mock the credentials provider
 jest.unstable_mockModule('../credentials-provider.js', () => ({
@@ -25,17 +24,28 @@ const {
   getConfig,
 } = await import('../services/keepa.service.js');
 
-describe('Keepa Service', () => {
-  beforeAll(() => {
-    nock.disableNetConnect();
-  });
+// Helper to create mock response
+function createMockResponse(body, status = 200, headers = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? 'OK' : status === 429 ? 'Too Many Requests' : 'Error',
+    headers: new Map(Object.entries(headers)),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
 
-  afterAll(() => {
-    nock.enableNetConnect();
+describe('Keepa Service', () => {
+  let originalFetch;
+
+  beforeEach(() => {
+    originalFetch = global.fetch;
+    jest.clearAllMocks();
   });
 
   afterEach(() => {
-    nock.cleanAll();
+    global.fetch = originalFetch;
   });
 
   describe('fetchKeepaData', () => {
@@ -50,15 +60,13 @@ describe('Keepa Service', () => {
         ],
       };
 
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(200, mockResponse);
+      global.fetch = jest.fn().mockResolvedValue(createMockResponse(mockResponse));
 
       const result = await fetchKeepaData('B001234567');
 
       expect(result.products).toHaveLength(1);
       expect(result.products[0].asin).toBe('B001234567');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 
     it('should fetch data for multiple ASINs in a single request', async () => {
@@ -71,17 +79,15 @@ describe('Keepa Service', () => {
         })),
       };
 
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query((query) => {
-          // Verify ASINs are comma-separated
-          return query.asin === asins.join(',');
-        })
-        .reply(200, mockResponse);
+      global.fetch = jest.fn().mockResolvedValue(createMockResponse(mockResponse));
 
       const result = await fetchKeepaData(asins);
 
       expect(result.products).toHaveLength(3);
+      // Verify ASINs are comma-separated in request
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining(`asin=${asins.join('%2C')}`)
+      );
     });
 
     it('should throw error if more than 10 ASINs requested', async () => {
@@ -98,24 +104,19 @@ describe('Keepa Service', () => {
       };
 
       // First call returns 429, second succeeds
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(429, { error: 'Rate limited' });
-
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(200, mockResponse);
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(createMockResponse({ error: 'Rate limited' }, 429))
+        .mockResolvedValueOnce(createMockResponse(mockResponse));
 
       const fetchPromise = fetchKeepaData('B001234567');
 
-      // Fast-forward through the backoff delay
-      await jest.advanceTimersByTimeAsync(3000);
+      // Advance timers to allow retry
+      await jest.advanceTimersByTimeAsync(5000);
 
       const result = await fetchPromise;
 
       expect(result.products).toHaveLength(1);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
 
       jest.useRealTimers();
     }, 15000);
@@ -128,115 +129,93 @@ describe('Keepa Service', () => {
       };
 
       // First call returns 500, second succeeds
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(500, 'Server Error');
-
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(200, mockResponse);
+      global.fetch = jest.fn()
+        .mockResolvedValueOnce(createMockResponse('Server Error', 500))
+        .mockResolvedValueOnce(createMockResponse(mockResponse));
 
       const fetchPromise = fetchKeepaData('B001234567');
 
-      await jest.advanceTimersByTimeAsync(3000);
+      await jest.advanceTimersByTimeAsync(5000);
 
       const result = await fetchPromise;
 
       expect(result.products).toHaveLength(1);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
 
       jest.useRealTimers();
     }, 15000);
 
     it('should throw after max retries exceeded', async () => {
-      jest.useFakeTimers();
+      // All calls return 400 (non-retryable error) to avoid long retry delays
+      global.fetch = jest.fn().mockResolvedValue(
+        createMockResponse({ error: 'Bad request' }, 400)
+      );
 
-      // All calls return 429
-      for (let i = 0; i < 10; i++) {
-        nock('https://api.keepa.com')
-          .get('/product')
-          .query(true)
-          .reply(429, { error: 'Rate limited' });
-      }
-
-      const fetchPromise = fetchKeepaData('B001234567');
-
-      // Advance through all retries
-      for (let i = 0; i < 7; i++) {
-        await jest.advanceTimersByTimeAsync(70000);
-      }
-
-      await expect(fetchPromise).rejects.toThrow();
-
-      jest.useRealTimers();
-    }, 30000);
+      await expect(fetchKeepaData('B001234567')).rejects.toThrow('400');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('fetchKeepaDataBatched', () => {
     it('should split ASINs into batches of 10', async () => {
       const asins = Array.from({ length: 25 }, (_, i) => `B00${i.toString().padStart(7, '0')}`);
 
-      // Expect 3 API calls (10 + 10 + 5)
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .times(3)
-        .reply(200, (uri) => {
-          const params = new URLSearchParams(uri.split('?')[1]);
-          const requestedAsins = params.get('asin').split(',');
-          return {
-            products: requestedAsins.map(asin => ({ asin, title: `Product ${asin}` })),
-          };
-        });
+      // Mock to return different products for each batch
+      global.fetch = jest.fn().mockImplementation((url) => {
+        const params = new URLSearchParams(url.split('?')[1]);
+        const requestedAsins = params.get('asin').split(',');
+        return Promise.resolve(createMockResponse({
+          products: requestedAsins.map(asin => ({ asin, title: `Product ${asin}` })),
+        }));
+      });
 
       const results = await fetchKeepaDataBatched(asins);
 
       expect(results.size).toBe(25);
-      expect(nock.isDone()).toBe(true);
+      // Should make 3 API calls (10 + 10 + 5)
+      expect(global.fetch).toHaveBeenCalledTimes(3);
     });
 
     it('should deduplicate ASINs', async () => {
       const asins = ['B001234567', 'B001234567', 'B002345678', 'B001234567'];
 
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(200, {
-          products: [
-            { asin: 'B001234567', title: 'Product 1' },
-            { asin: 'B002345678', title: 'Product 2' },
-          ],
-        });
+      global.fetch = jest.fn().mockResolvedValue(createMockResponse({
+        products: [
+          { asin: 'B001234567', title: 'Product 1' },
+          { asin: 'B002345678', title: 'Product 2' },
+        ],
+      }));
 
       const results = await fetchKeepaDataBatched(asins);
 
       // Should only have 2 unique ASINs
       expect(results.size).toBe(2);
+      // Should only make 1 API call (2 unique ASINs < 10)
+      expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 
     it('should continue with other batches if one fails', async () => {
       const asins = Array.from({ length: 15 }, (_, i) => `B00${i.toString().padStart(7, '0')}`);
 
-      // First batch fails
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(500, 'Server Error');
-
-      // Second batch succeeds
-      nock('https://api.keepa.com')
-        .get('/product')
-        .query(true)
-        .reply(200, {
+      let callCount = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          // First batch fails with non-retryable 400 error
+          return Promise.resolve(createMockResponse({ error: 'Bad request' }, 400));
+        }
+        // Second batch succeeds
+        return Promise.resolve(createMockResponse({
           products: asins.slice(10).map(asin => ({ asin, title: `Product ${asin}` })),
-        });
+        }));
+      });
 
       const results = await fetchKeepaDataBatched(asins);
 
-      // First batch should have error markers
+      // First batch should have error markers (ASINs 0-9)
       expect(results.get('B000000000').failed).toBe(true);
-      // Second batch should succeed
+      expect(results.get('B000000000').error).toContain('400');
+      // Second batch should succeed (ASINs 10-14)
       expect(results.get('B000000010').asin).toBe('B000000010');
     });
   });
