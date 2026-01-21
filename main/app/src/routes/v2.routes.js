@@ -2275,14 +2275,36 @@ export async function registerV2Routes(fastify) {
   // ============================================================================
 
   /**
+   * GET /api/v2/sync/test
+   * Test SP-API connection
+   */
+  fastify.get('/api/v2/sync/test', async (request, reply) => {
+    try {
+      const { testConnection } = await import('../listings-sync.js');
+      const result = await testConnection();
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Sync test error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
    * POST /api/v2/sync/listings
    * Trigger a sync of listings from Amazon SP-API
+   * Note: This can take several minutes as it waits for Amazon to generate a report
    */
-  fastify.post('/api/v2/sync/listings', async (request, reply) => {
+  fastify.post('/api/v2/sync/listings', {
+    config: {
+      // Increase timeout to 10 minutes for this endpoint
+      timeout: 600000,
+    },
+  }, async (request, reply) => {
     try {
       const { syncListings } = await import('../listings-sync.js');
       const { dryRun } = request.body || {};
 
+      console.log('[API] Starting listings sync...');
       const result = await syncListings({ dryRun });
 
       return wrapResponse({
@@ -2290,8 +2312,13 @@ export async function registerV2Routes(fastify) {
         ...result,
       });
     } catch (error) {
-      console.error('[API] Sync listings error:', error);
-      return reply.status(500).send(wrapResponse(null, error.message));
+      console.error('[API] Sync listings error:', error.message);
+      console.error('[API] Sync listings stack:', error.stack);
+      return reply.status(500).send({
+        success: false,
+        error: error.message || 'Sync failed',
+        data: null,
+      });
     }
   });
 
@@ -2306,6 +2333,153 @@ export async function registerV2Routes(fastify) {
       return wrapResponse(status);
     } catch (error) {
       console.error('[API] Sync status error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  // ============================================================================
+  // ML DATA POOL
+  // ============================================================================
+
+  /**
+   * GET /api/v2/ml/data-pool
+   * Get unified ML data pool for training
+   */
+  fastify.get('/api/v2/ml/data-pool', async (request, reply) => {
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
+      const { limit = '1000', offset = '0', entity_type, min_margin } = request.query;
+
+      let sql = 'SELECT * FROM ml_data_pool WHERE 1=1';
+      const params = [];
+      let paramCount = 1;
+
+      if (entity_type) {
+        sql += ` AND entity_type = $${paramCount++}`;
+        params.push(entity_type);
+      }
+
+      if (min_margin) {
+        sql += ` AND computed_margin >= $${paramCount++}`;
+        params.push(parseFloat(min_margin));
+      }
+
+      sql += ` ORDER BY opportunity_score DESC NULLS LAST LIMIT $${paramCount++} OFFSET $${paramCount++}`;
+      params.push(parseInt(limit, 10), parseInt(offset, 10));
+
+      const result = await dbQuery(sql, params);
+      const countResult = await dbQuery('SELECT COUNT(*) as total FROM ml_data_pool');
+
+      return wrapResponse({
+        items: result.rows,
+        total: parseInt(countResult.rows[0].total, 10),
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+      });
+    } catch (error) {
+      // If view doesn't exist, return helpful message
+      if (error.message.includes('does not exist')) {
+        return reply.status(400).send(wrapResponse(null, 'ML data pool not initialized. Run migration 005_ml_data_pool.sql'));
+      }
+      console.error('[API] ML data pool error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/ml/training-export
+   * Export ML-ready training data (flat format)
+   */
+  fastify.get('/api/v2/ml/training-export', async (request, reply) => {
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
+      const { format = 'json', limit = '10000' } = request.query;
+
+      const result = await dbQuery(
+        'SELECT * FROM ml_training_export ORDER BY listing_id, asin_entity_id LIMIT $1',
+        [parseInt(limit, 10)]
+      );
+
+      if (format === 'csv') {
+        // Convert to CSV
+        if (result.rows.length === 0) {
+          return reply.type('text/csv').send('No data');
+        }
+
+        const headers = Object.keys(result.rows[0]);
+        const csv = [
+          headers.join(','),
+          ...result.rows.map(row => headers.map(h => {
+            const val = row[h];
+            if (val === null) return '';
+            if (typeof val === 'string' && val.includes(',')) return `"${val}"`;
+            return val;
+          }).join(','))
+        ].join('\n');
+
+        return reply.type('text/csv').send(csv);
+      }
+
+      return wrapResponse({
+        data: result.rows,
+        count: result.rows.length,
+        columns: result.rows.length > 0 ? Object.keys(result.rows[0]) : [],
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return reply.status(400).send(wrapResponse(null, 'ML training export not initialized. Run migration 005_ml_data_pool.sql'));
+      }
+      console.error('[API] ML training export error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/ml/refresh
+   * Refresh the ML data pool
+   */
+  fastify.post('/api/v2/ml/refresh', async (request, reply) => {
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
+      await dbQuery('SELECT refresh_ml_data_pool()');
+      return wrapResponse({ message: 'ML data pool refreshed successfully' });
+    } catch (error) {
+      console.error('[API] ML refresh error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/ml/stats
+   * Get ML data pool statistics
+   */
+  fastify.get('/api/v2/ml/stats', async (request, reply) => {
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
+
+      const stats = await dbQuery(`
+        SELECT
+          COUNT(*) as total_records,
+          COUNT(CASE WHEN entity_type = 'LISTING' THEN 1 END) as listings_count,
+          COUNT(CASE WHEN entity_type = 'ASIN' THEN 1 END) as asins_count,
+          COUNT(CASE WHEN bom_id IS NOT NULL THEN 1 END) as with_bom,
+          COUNT(CASE WHEN keepa_captured_at IS NOT NULL THEN 1 END) as with_keepa,
+          COUNT(CASE WHEN computed_margin IS NOT NULL THEN 1 END) as with_margin,
+          AVG(computed_margin) as avg_margin,
+          AVG(opportunity_score) as avg_opportunity_score,
+          MAX(snapshot_at) as last_refresh
+        FROM ml_data_pool
+      `);
+
+      return wrapResponse(stats.rows[0]);
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({
+          total_records: 0,
+          message: 'ML data pool not initialized. Run migration 005_ml_data_pool.sql'
+        });
+      }
+      console.error('[API] ML stats error:', error);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
