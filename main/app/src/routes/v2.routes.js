@@ -10,8 +10,10 @@
 import * as supplierRepo from '../repositories/supplier.repository.js';
 import * as componentRepo from '../repositories/component.repository.js';
 import * as bomRepo from '../repositories/bom.repository.js';
+import * as listingRepo from '../repositories/listing.repository.js';
 import * as economicsService from '../services/economics.service.js';
 import * as listingService from '../services/listing.service.js';
+import { query } from '../database/connection.js';
 
 /**
  * Register all v2 routes
@@ -141,8 +143,175 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
+  // LISTINGS
+  // ============================================================================
+
+  /**
+   * GET /api/v2/listings
+   * Get all listings with optional filters
+   */
+  fastify.get('/api/v2/listings', async (request, reply) => {
+    const { status, limit = '100', offset = '0' } = request.query;
+    const filters = {
+      limit: parseInt(limit, 10),
+      offset: parseInt(offset, 10),
+    };
+    if (status) filters.status = status;
+
+    const listings = await listingRepo.getAll(filters);
+
+    // Map to frontend expected format (DATA_CONTRACTS.md)
+    const mapped = listings.map(l => ({
+      id: l.id,
+      seller_sku: l.sku,
+      asin: l.asin || null,
+      title: l.title || '',
+      marketplace_id: 1, // Default UK marketplace
+      status: (l.status || 'active').toUpperCase(),
+      created_at: l.createdAt || l.created_at || new Date().toISOString(),
+      updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
+    }));
+
+    return mapped;
+  });
+
+  /**
+   * GET /api/v2/listings/:id
+   * Get a single listing by ID
+   */
+  fastify.get('/api/v2/listings/:id', async (request, reply) => {
+    const id = parseInt(request.params.id, 10);
+    const listing = await listingRepo.getById(id);
+
+    if (!listing) {
+      return reply.status(404).send({ error: 'Listing not found' });
+    }
+
+    // Map to frontend expected format
+    return {
+      id: listing.id,
+      seller_sku: listing.sku,
+      asin: listing.asin || null,
+      title: listing.title || '',
+      marketplace_id: 1, // Default UK marketplace
+      status: (listing.status || 'active').toUpperCase(),
+      created_at: listing.createdAt || listing.created_at || new Date().toISOString(),
+      updated_at: listing.updatedAt || listing.updated_at || new Date().toISOString(),
+    };
+  });
+
+  // ============================================================================
   // BOM (Bill of Materials)
   // ============================================================================
+
+  /**
+   * GET /api/v2/boms
+   * Get all BOMs with optional filtering
+   */
+  fastify.get('/api/v2/boms', async (request, reply) => {
+    const { listing_id, limit = '100', offset = '0' } = request.query;
+
+    let sql = `
+      SELECT b.*,
+        COALESCE(json_agg(
+          json_build_object(
+            'id', bl.id,
+            'component_id', bl.component_id,
+            'component_sku', c.component_sku,
+            'component_name', c.name,
+            'quantity', bl.quantity,
+            'wastage_rate', bl.wastage_rate,
+            'unit_cost_ex_vat', c.unit_cost_ex_vat,
+            'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat
+          ) ORDER BY c.name
+        ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines,
+        COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost_ex_vat
+      FROM boms b
+      LEFT JOIN bom_lines bl ON bl.bom_id = b.id
+      LEFT JOIN components c ON c.id = bl.component_id
+      WHERE 1=1
+    `;
+
+    const params = [];
+    let paramCount = 1;
+
+    if (listing_id) {
+      sql += ` AND b.listing_id = $${paramCount++}`;
+      params.push(parseInt(listing_id, 10));
+    }
+
+    sql += ` GROUP BY b.id ORDER BY b.created_at DESC`;
+    sql += ` LIMIT $${paramCount++}`;
+    params.push(parseInt(limit, 10));
+    sql += ` OFFSET $${paramCount++}`;
+    params.push(parseInt(offset, 10));
+
+    const result = await query(sql, params);
+    return result.rows;
+  });
+
+  /**
+   * POST /api/v2/boms
+   * Create a new BOM
+   * Body: { listing_id?, asin_entity_id?, scope_type, notes?, lines: [...] }
+   */
+  fastify.post('/api/v2/boms', async (request, reply) => {
+    const { listing_id, asin_entity_id, scope_type, notes, lines } = request.body;
+
+    if (!listing_id && !asin_entity_id) {
+      return reply.status(400).send({ error: 'Either listing_id or asin_entity_id is required' });
+    }
+
+    if (!scope_type) {
+      return reply.status(400).send({ error: 'scope_type is required' });
+    }
+
+    try {
+      if (listing_id) {
+        const bom = await bomRepo.createVersion(listing_id, { lines: lines || [], notes });
+        return reply.status(201).send(bom);
+      } else {
+        // For ASIN_SCENARIO BOMs, we need a different creation path
+        return reply.status(400).send({ error: 'ASIN_SCENARIO BOMs must be created via cloning' });
+      }
+    } catch (error) {
+      return reply.status(400).send({ error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/boms/:bomId/activate
+   * Activate a specific BOM version (deactivates others for same listing)
+   */
+  fastify.post('/api/v2/boms/:bomId/activate', async (request, reply) => {
+    const bomId = parseInt(request.params.bomId, 10);
+
+    try {
+      const bom = await bomRepo.findById(bomId);
+      if (!bom) {
+        return reply.status(404).send({ error: 'BOM not found' });
+      }
+
+      if (bom.is_active) {
+        return bom; // Already active
+      }
+
+      // Deactivate current active and activate this one
+      await query(`
+        UPDATE boms SET is_active = false, effective_to = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE listing_id = $1 AND is_active = true AND scope_type = 'LISTING'
+      `, [bom.listing_id]);
+
+      await query(`
+        UPDATE boms SET is_active = true, effective_from = CURRENT_TIMESTAMP, effective_to = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+      `, [bomId]);
+
+      return await bomRepo.findById(bomId);
+    } catch (error) {
+      return reply.status(400).send({ error: error.message });
+    }
+  });
 
   /**
    * GET /api/v2/listings/:listingId/bom
