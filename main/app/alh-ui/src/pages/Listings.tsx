@@ -3,7 +3,7 @@ import { PageHeader } from '../layouts/PageHeader';
 import { ListingsTable } from '../components/tables/ListingsTable';
 import { PriceEditModal } from '../components/modals/PriceEditModal';
 import { getListingsWithFeatures } from '../api/listings';
-import { syncListingsFromAmazon } from '../api/sync';
+import { syncListingsFromAmazon, testSpApiConnection, getSyncStatus } from '../api/sync';
 import type { ListingWithFeatures } from '../types';
 
 export function ListingsPage() {
@@ -14,6 +14,7 @@ export function ListingsPage() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [selectedListing, setSelectedListing] = useState<ListingWithFeatures | null>(null);
   const [isPriceModalOpen, setIsPriceModalOpen] = useState(false);
+  const [spApiConfigured, setSpApiConfigured] = useState<boolean | null>(null);
 
   const loadListings = async () => {
     setIsLoading(true);
@@ -29,22 +30,51 @@ export function ListingsPage() {
     }
   };
 
+  const checkSyncStatus = async () => {
+    try {
+      const status = await getSyncStatus();
+      setSpApiConfigured(status.spApiConfigured);
+    } catch {
+      // Ignore errors checking status
+    }
+  };
+
   const handleSyncFromAmazon = async () => {
     setIsSyncing(true);
     setError(null);
-    setSyncMessage('Syncing listings from Amazon... This may take a few minutes.');
+    setSyncMessage('Testing Amazon SP-API connection...');
 
     try {
+      // First test the connection
+      const testResult = await testSpApiConnection();
+
+      if (!testResult.configured) {
+        throw new Error('SP-API credentials not configured. Please set SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, and SP_API_REFRESH_TOKEN in Railway environment variables.');
+      }
+
+      if (!testResult.success) {
+        throw new Error(`SP-API connection failed: ${testResult.error}`);
+      }
+
+      setSyncMessage('Connection OK. Requesting listings report from Amazon... This may take 2-5 minutes.');
+
       const result = await syncListingsFromAmazon();
-      setSyncMessage(
-        `Sync complete: ${result.listingsCreated} created, ${result.listingsUpdated} updated`
-      );
+
+      if (result.listingsProcessed === 0) {
+        setSyncMessage('Sync complete but no listings found. Make sure you have active listings in Seller Central.');
+      } else {
+        setSyncMessage(
+          `Sync complete: ${result.listingsCreated} created, ${result.listingsUpdated} updated (${result.listingsProcessed} total)`
+        );
+      }
+
       // Reload listings after sync
       await loadListings();
-      // Clear success message after 5 seconds
-      setTimeout(() => setSyncMessage(null), 5000);
+      // Clear success message after 10 seconds
+      setTimeout(() => setSyncMessage(null), 10000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to sync from Amazon');
+      const message = err instanceof Error ? err.message : 'Failed to sync from Amazon';
+      setError(message);
       setSyncMessage(null);
     } finally {
       setIsSyncing(false);
@@ -53,6 +83,7 @@ export function ListingsPage() {
 
   useEffect(() => {
     loadListings();
+    checkSyncStatus();
   }, []);
 
   const handleEditPrice = (listing: ListingWithFeatures) => {
@@ -103,10 +134,32 @@ export function ListingsPage() {
         }
       />
 
+      {/* SP-API not configured warning */}
+      {spApiConfigured === false && !syncMessage && !error && (
+        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800">
+          <strong>SP-API not configured.</strong> Set these environment variables in Railway to enable Amazon sync:
+          <ul className="mt-2 ml-4 list-disc text-sm">
+            <li>SP_API_CLIENT_ID</li>
+            <li>SP_API_CLIENT_SECRET</li>
+            <li>SP_API_REFRESH_TOKEN</li>
+          </ul>
+        </div>
+      )}
+
       {/* Sync status message */}
       {syncMessage && (
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-700">
+          {isSyncing && (
+            <span className="inline-block animate-spin mr-2">&#8635;</span>
+          )}
           {syncMessage}
+        </div>
+      )}
+
+      {/* Error message */}
+      {error && !syncMessage && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700">
+          {error}
         </div>
       )}
 
@@ -132,18 +185,17 @@ export function ListingsPage() {
 
       {/* Main content */}
       <div className="card">
-        {(isLoading || isSyncing) && (
+        {isLoading && !isSyncing && (
           <div className="text-center py-12 text-gray-500">
-            <p>{isSyncing ? 'Syncing listings from Amazon...' : 'Loading listings...'}</p>
+            <p>Loading listings...</p>
           </div>
         )}
 
-        {error && (
-          <div className="text-center py-12">
-            <p className="text-red-600 mb-4">{error}</p>
-            <button onClick={loadListings} className="btn btn-primary btn-sm">
-              Retry
-            </button>
+        {isSyncing && (
+          <div className="text-center py-12 text-gray-500">
+            <div className="inline-block animate-spin text-3xl mb-4">&#8635;</div>
+            <p>Syncing listings from Amazon...</p>
+            <p className="text-sm mt-2">This may take a few minutes while Amazon generates the report.</p>
           </div>
         )}
 
@@ -160,7 +212,7 @@ export function ListingsPage() {
           </div>
         )}
 
-        {!isLoading && !isSyncing && !error && listings.length > 0 && (
+        {!isLoading && !isSyncing && listings.length > 0 && (
           <ListingsTable
             listings={listings}
             onEditPrice={handleEditPrice}

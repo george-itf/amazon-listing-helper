@@ -4,7 +4,7 @@
  */
 
 import SellingPartner from 'amazon-sp-api';
-import { getSpApiClientConfig, hasSpApiCredentials, getDefaultMarketplaceId } from './credentials-provider.js';
+import { getSpApiClientConfig, hasSpApiCredentials, getDefaultMarketplaceId, getSellerId } from './credentials-provider.js';
 import * as listingRepo from './repositories/listing.repository.js';
 
 /**
@@ -21,8 +21,46 @@ function getSpClient() {
     region: config.region,
     refresh_token: config.refresh_token,
     credentials: config.credentials,
-    options: config.options,
+    options: {
+      ...config.options,
+      debug_log: true,
+    },
   });
+}
+
+/**
+ * Test SP-API connection by making a simple API call
+ * @returns {Promise<Object>} Connection test result
+ */
+export async function testConnection() {
+  const sp = getSpClient();
+  if (!sp) {
+    return {
+      success: false,
+      error: 'SP-API credentials not configured',
+      configured: false,
+    };
+  }
+
+  try {
+    // Try to get marketplace participations - simple API that should work
+    const response = await sp.callAPI({
+      operation: 'getMarketplaceParticipations',
+    });
+
+    return {
+      success: true,
+      configured: true,
+      marketplaces: response?.payload?.length || 0,
+    };
+  } catch (error) {
+    console.error('[ListingsSync] Connection test failed:', error);
+    return {
+      success: false,
+      configured: true,
+      error: error.message || 'Failed to connect to Amazon SP-API',
+    };
+  }
 }
 
 /**
@@ -32,6 +70,7 @@ function getSpClient() {
  */
 async function requestListingsReport(sp) {
   const marketplaceId = getDefaultMarketplaceId();
+  console.log(`[ListingsSync] Requesting report for marketplace: ${marketplaceId}`);
 
   const response = await sp.callAPI({
     operation: 'createReport',
@@ -41,6 +80,7 @@ async function requestListingsReport(sp) {
     },
   });
 
+  console.log('[ListingsSync] createReport response:', JSON.stringify(response));
   return response.reportId;
 }
 
@@ -49,41 +89,58 @@ async function requestListingsReport(sp) {
  * @param {SellingPartner} sp - SP-API client
  * @param {string} reportId - Report ID
  * @param {number} maxWaitMs - Maximum wait time in milliseconds
+ * @param {function} onProgress - Progress callback
  * @returns {Promise<string>} Report document content
  */
-async function waitForReport(sp, reportId, maxWaitMs = 300000) {
+async function waitForReport(sp, reportId, maxWaitMs = 300000, onProgress = null) {
   const startTime = Date.now();
+  let attempts = 0;
 
   while (Date.now() - startTime < maxWaitMs) {
+    attempts++;
     const report = await sp.callAPI({
       operation: 'getReport',
       path: { reportId },
     });
 
-    console.log(`[ListingsSync] Report ${reportId} status: ${report.processingStatus}`);
+    const status = report.processingStatus;
+    console.log(`[ListingsSync] Report ${reportId} status: ${status} (attempt ${attempts})`);
 
-    if (report.processingStatus === 'DONE') {
+    if (onProgress) {
+      onProgress({ status, attempts, elapsed: Date.now() - startTime });
+    }
+
+    if (status === 'DONE') {
       // Get the report document
       const documentId = report.reportDocumentId;
+      console.log(`[ListingsSync] Report done, fetching document: ${documentId}`);
+
       const document = await sp.callAPI({
         operation: 'getReportDocument',
         path: { reportDocumentId: documentId },
       });
 
+      console.log(`[ListingsSync] Document URL obtained, downloading...`);
+
       // Download the document
       const response = await fetch(document.url);
+      if (!response.ok) {
+        throw new Error(`Failed to download report document: ${response.status}`);
+      }
+
       const content = await response.text();
+      console.log(`[ListingsSync] Downloaded ${content.length} bytes`);
 
       return content;
-    } else if (report.processingStatus === 'CANCELLED' || report.processingStatus === 'FATAL') {
-      throw new Error(`Report failed with status: ${report.processingStatus}`);
+    } else if (status === 'CANCELLED' || status === 'FATAL') {
+      throw new Error(`Report failed with status: ${status}`);
     }
 
-    // Wait 10 seconds before checking again
-    await new Promise(resolve => setTimeout(resolve, 10000));
+    // Wait 5 seconds before checking again
+    await new Promise(resolve => setTimeout(resolve, 5000));
   }
 
-  throw new Error(`Report timed out after ${maxWaitMs}ms`);
+  throw new Error(`Report timed out after ${Math.round((Date.now() - startTime) / 1000)}s`);
 }
 
 /**
@@ -94,11 +151,17 @@ async function waitForReport(sp, reportId, maxWaitMs = 300000) {
 function parseListingsReport(content) {
   const lines = content.split('\n');
   if (lines.length < 2) {
+    console.log('[ListingsSync] Report has no data rows');
     return [];
   }
 
-  // Parse header row
-  const headers = lines[0].split('\t').map(h => h.trim().toLowerCase().replace(/[- ]/g, '_'));
+  // Parse header row - handle various formats
+  const rawHeaders = lines[0].split('\t');
+  const headers = rawHeaders.map(h =>
+    h.trim().toLowerCase().replace(/[- ]/g, '_').replace(/[()]/g, '')
+  );
+
+  console.log(`[ListingsSync] Report headers: ${headers.join(', ')}`);
 
   const listings = [];
   for (let i = 1; i < lines.length; i++) {
@@ -112,17 +175,17 @@ function parseListingsReport(content) {
       listing[header] = values[index] || '';
     });
 
-    // Map Amazon fields to our schema
+    // Map Amazon fields to our schema - handle various header names
     const mapped = {
-      sku: listing.seller_sku || listing.sku || '',
-      asin: listing.asin1 || listing.asin || '',
-      title: listing.item_name || listing.title || '',
-      price: parseFloat(listing.price) || 0,
-      quantity: parseInt(listing.quantity, 10) || 0,
-      status: mapStatus(listing.status),
-      fulfillmentChannel: listing.fulfillment_channel === 'AMAZON_NA' || listing.fulfillment_channel === 'AMAZON_EU' ? 'FBA' : 'FBM',
-      category: listing.item_type || listing.product_type || null,
-      description: listing.item_description || listing.description || '',
+      sku: listing.seller_sku || listing.sku || listing['seller-sku'] || '',
+      asin: listing.asin1 || listing.asin || listing['asin1'] || '',
+      title: listing.item_name || listing.title || listing['item-name'] || listing['product_name'] || '',
+      price: parseFloat(listing.price || listing['your_price'] || listing['price'] || 0) || 0,
+      quantity: parseInt(listing.quantity || listing['quantity'] || listing['available'] || 0, 10) || 0,
+      status: mapStatus(listing.status || listing['item_status'] || listing['status']),
+      fulfillmentChannel: mapFulfillment(listing.fulfillment_channel || listing['fulfillment-channel'] || listing['afn_listing_exists']),
+      category: listing.item_type || listing.product_type || listing['product-type'] || listing['item_type'] || null,
+      description: listing.item_description || listing.description || listing['item-description'] || '',
     };
 
     // Only include if we have a SKU
@@ -136,15 +199,21 @@ function parseListingsReport(content) {
 
 /**
  * Map Amazon status to our status
- * @param {string} amazonStatus
- * @returns {string}
  */
 function mapStatus(amazonStatus) {
   const status = (amazonStatus || '').toLowerCase();
   if (status === 'active' || status === '') return 'active';
-  if (status === 'inactive' || status === 'blocked') return 'inactive';
-  if (status === 'incomplete') return 'incomplete';
+  if (status === 'inactive' || status === 'blocked' || status === 'incomplete') return 'inactive';
   return 'active';
+}
+
+/**
+ * Map fulfillment channel
+ */
+function mapFulfillment(channel) {
+  const ch = (channel || '').toUpperCase();
+  if (ch.includes('AMAZON') || ch.includes('AFN') || ch === 'Y' || ch === 'YES') return 'FBA';
+  return 'FBM';
 }
 
 /**
@@ -162,31 +231,45 @@ export async function syncListings(options = {}) {
     listingsUpdated: 0,
     errors: [],
     duration: 0,
+    stage: 'starting',
   };
 
   try {
-    const sp = getSpClient();
-    if (!sp) {
-      throw new Error('SP-API credentials not configured. Please set SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, and SP_API_REFRESH_TOKEN environment variables.');
+    // Check credentials first
+    if (!hasSpApiCredentials()) {
+      throw new Error('SP-API credentials not configured. Set SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, and SP_API_REFRESH_TOKEN environment variables in Railway.');
     }
 
+    const sp = getSpClient();
+    results.stage = 'connecting';
     console.log('[ListingsSync] Starting listing sync from Amazon SP-API...');
 
     // Request the report
+    results.stage = 'requesting_report';
     const reportId = await requestListingsReport(sp);
     console.log(`[ListingsSync] Report requested: ${reportId}`);
 
     // Wait for report to complete and download
-    const reportContent = await waitForReport(sp, reportId);
+    results.stage = 'waiting_for_report';
+    const reportContent = await waitForReport(sp, reportId, 300000);
     console.log(`[ListingsSync] Report downloaded, size: ${reportContent.length} bytes`);
 
     // Parse the report
+    results.stage = 'parsing';
     const listings = parseListingsReport(reportContent);
     console.log(`[ListingsSync] Parsed ${listings.length} listings`);
 
     results.listingsProcessed = listings.length;
 
+    if (listings.length === 0) {
+      results.success = true;
+      results.duration = Date.now() - startTime;
+      results.stage = 'complete';
+      return results;
+    }
+
     if (!options.dryRun) {
+      results.stage = 'saving';
       // Upsert each listing
       for (const listing of listings) {
         try {
@@ -199,6 +282,7 @@ export async function syncListings(options = {}) {
             results.listingsCreated++;
           }
         } catch (error) {
+          console.error(`[ListingsSync] Error saving ${listing.sku}:`, error.message);
           results.errors.push({
             sku: listing.sku,
             error: error.message,
@@ -209,15 +293,17 @@ export async function syncListings(options = {}) {
 
     results.success = true;
     results.duration = Date.now() - startTime;
+    results.stage = 'complete';
 
     console.log(`[ListingsSync] Sync complete: ${results.listingsCreated} created, ${results.listingsUpdated} updated, ${results.errors.length} errors in ${results.duration}ms`);
 
     return results;
 
   } catch (error) {
-    results.errors.push({ error: error.message });
+    console.error('[ListingsSync] Sync failed:', error);
+    results.errors.push({ error: error.message, stack: error.stack });
     results.duration = Date.now() - startTime;
-    console.error('[ListingsSync] Sync failed:', error.message);
+    results.stage = 'failed';
     throw error;
   }
 }
@@ -242,4 +328,5 @@ export async function getSyncStatus() {
 export default {
   syncListings,
   getSyncStatus,
+  testConnection,
 };

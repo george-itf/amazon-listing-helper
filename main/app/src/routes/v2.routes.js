@@ -2275,14 +2275,36 @@ export async function registerV2Routes(fastify) {
   // ============================================================================
 
   /**
+   * GET /api/v2/sync/test
+   * Test SP-API connection
+   */
+  fastify.get('/api/v2/sync/test', async (request, reply) => {
+    try {
+      const { testConnection } = await import('../listings-sync.js');
+      const result = await testConnection();
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Sync test error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
    * POST /api/v2/sync/listings
    * Trigger a sync of listings from Amazon SP-API
+   * Note: This can take several minutes as it waits for Amazon to generate a report
    */
-  fastify.post('/api/v2/sync/listings', async (request, reply) => {
+  fastify.post('/api/v2/sync/listings', {
+    config: {
+      // Increase timeout to 10 minutes for this endpoint
+      timeout: 600000,
+    },
+  }, async (request, reply) => {
     try {
       const { syncListings } = await import('../listings-sync.js');
       const { dryRun } = request.body || {};
 
+      console.log('[API] Starting listings sync...');
       const result = await syncListings({ dryRun });
 
       return wrapResponse({
@@ -2290,8 +2312,13 @@ export async function registerV2Routes(fastify) {
         ...result,
       });
     } catch (error) {
-      console.error('[API] Sync listings error:', error);
-      return reply.status(500).send(wrapResponse(null, error.message));
+      console.error('[API] Sync listings error:', error.message);
+      console.error('[API] Sync listings stack:', error.stack);
+      return reply.status(500).send({
+        success: false,
+        error: error.message || 'Sync failed',
+        data: null,
+      });
     }
   });
 
