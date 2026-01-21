@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // PostgreSQL connection pool (for graceful shutdown)
-import { closePool } from './database/connection.js';
+import { closePool, initMlDataPool, testConnection } from './database/connection.js';
 
 // V2 API routes
 import { registerV2Routes } from './routes/v2.routes.js';
@@ -50,6 +50,16 @@ if (fs.existsSync(distPath)) {
 // ============================================
 const start = async () => {
   try {
+    // Test database connection
+    const dbOk = await testConnection();
+    if (!dbOk) {
+      console.error('Database connection failed - exiting');
+      process.exit(1);
+    }
+
+    // Initialize ML data pool (non-blocking)
+    initMlDataPool().catch(err => console.warn('ML pool init warning:', err.message));
+
     const port = process.env.PORT || 4000;
     await fastify.listen({ port, host: '0.0.0.0' });
     console.log(`Server running on http://0.0.0.0:${port}`);
