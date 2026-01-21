@@ -18,6 +18,8 @@
   },
   "dependencies": {
     "@fastify/cors": "^8.4.0",
+    "@fastify/helmet": "^11.1.1",
+    "@fastify/rate-limit": "^9.1.0",
     "@fastify/static": "^7.0.0",
     "@prisma/client": "^6.0.0",
     "@sentry/node": "^7.100.0",

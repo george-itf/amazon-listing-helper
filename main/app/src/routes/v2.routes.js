@@ -14,18 +14,46 @@ import * as listingRepo from '../repositories/listing.repository.js';
 import * as economicsService from '../services/economics.service.js';
 import * as listingService from '../services/listing.service.js';
 import { query } from '../database/connection.js';
+import { getSafeErrorMessage, logError } from '../lib/error-handler.js';
+import * as schemas from '../lib/validation-schemas.js';
 
 /**
  * Wrap response data in standard API response format
  * Frontend expects: { success: boolean, data?: T, error?: string }
  * @param {any} data - Response data (or null for errors)
- * @param {string} [errorMessage] - Error message if this is an error response
+ * @param {string|Error} [errorMessage] - Error message if this is an error response
  */
 function wrapResponse(data, errorMessage = null) {
   if (errorMessage) {
-    return { success: false, error: errorMessage, data: null };
+    // Sanitize error message to prevent internal details leaking
+    const safeMessage = typeof errorMessage === 'string'
+      ? getSafeErrorMessage({ message: errorMessage })
+      : getSafeErrorMessage(errorMessage);
+    return { success: false, error: safeMessage, data: null };
   }
   return { success: true, data };
+}
+
+/**
+ * Handle and log errors safely
+ * @param {string} context - Error context for logging
+ * @param {Error} error - The error
+ * @param {Object} reply - Fastify reply
+ * @param {number} [statusCode=500] - HTTP status code
+ */
+function handleError(context, error, reply, statusCode = 500) {
+  logError(context, error);
+  const safeMessage = getSafeErrorMessage(error);
+
+  // Determine status code from error if not specified
+  if (statusCode === 500) {
+    const msg = error?.message?.toLowerCase() || '';
+    if (msg.includes('not found')) statusCode = 404;
+    else if (msg.includes('already exists') || msg.includes('duplicate')) statusCode = 409;
+    else if (msg.includes('invalid') || msg.includes('required')) statusCode = 400;
+  }
+
+  return reply.status(statusCode).send({ success: false, error: safeMessage });
 }
 
 /**
@@ -878,18 +906,12 @@ export async function registerV2Routes(fastify) {
    * Body: { price_inc_vat }
    * Response: economics at new price + guardrails result
    */
-  fastify.post('/api/v2/listings/:listingId/price/preview', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/price/preview', {
+    schema: schemas.pricePreviewSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { price_inc_vat } = request.body;
-
-    if (price_inc_vat === undefined || price_inc_vat === null) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat is required' });
-    }
-
     const newPriceIncVat = parseFloat(price_inc_vat);
-    if (isNaN(newPriceIncVat) || newPriceIncVat < 0) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat must be a positive number' });
-    }
 
     try {
       const { validatePriceChange, calculateDaysOfCover } = await import('../services/guardrails.service.js');
@@ -961,22 +983,12 @@ export async function registerV2Routes(fastify) {
    * Body: { price_inc_vat, reason, correlation_id? }
    * Response: { job_id, status, listing_event_id }
    */
-  fastify.post('/api/v2/listings/:listingId/price/publish', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/price/publish', {
+    schema: schemas.pricePublishSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { price_inc_vat, reason, correlation_id } = request.body;
-
-    // Validate required fields per DATA_CONTRACTS §5.1
-    if (price_inc_vat === undefined || price_inc_vat === null) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat is required' });
-    }
-    if (!reason) {
-      return reply.status(400).send({ success: false, error: 'reason is required' });
-    }
-
     const newPriceIncVat = parseFloat(price_inc_vat);
-    if (isNaN(newPriceIncVat) || newPriceIncVat < 0) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat must be a positive number' });
-    }
 
     try {
       const { validatePriceChange, calculateDaysOfCover } = await import('../services/guardrails.service.js');
@@ -1058,18 +1070,12 @@ export async function registerV2Routes(fastify) {
    * Preview stock change with guardrails check
    * Body: { available_quantity }
    */
-  fastify.post('/api/v2/listings/:listingId/stock/preview', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/stock/preview', {
+    schema: schemas.stockPreviewSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { available_quantity } = request.body;
-
-    if (available_quantity === undefined || available_quantity === null) {
-      return reply.status(400).send({ success: false, error: 'available_quantity is required' });
-    }
-
     const newQuantity = parseInt(available_quantity, 10);
-    if (isNaN(newQuantity) || newQuantity < 0) {
-      return reply.status(400).send({ success: false, error: 'available_quantity must be a non-negative integer' });
-    }
 
     try {
       const { query: dbQuery } = await import('../database/connection.js');
@@ -1131,22 +1137,12 @@ export async function registerV2Routes(fastify) {
    * Publish stock change - creates job and listing_event
    * Body: { available_quantity, reason }
    */
-  fastify.post('/api/v2/listings/:listingId/stock/publish', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/stock/publish', {
+    schema: schemas.stockPublishSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { available_quantity, reason } = request.body;
-
-    // Validate required fields per DATA_CONTRACTS §5.2
-    if (available_quantity === undefined || available_quantity === null) {
-      return reply.status(400).send({ success: false, error: 'available_quantity is required' });
-    }
-    if (!reason) {
-      return reply.status(400).send({ success: false, error: 'reason is required' });
-    }
-
     const newQuantity = parseInt(available_quantity, 10);
-    if (isNaN(newQuantity) || newQuantity < 0) {
-      return reply.status(400).send({ success: false, error: 'available_quantity must be a non-negative integer' });
-    }
 
     try {
       // Get current listing via service

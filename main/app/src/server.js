@@ -1,5 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import fs from 'fs';
 import path from 'path';
@@ -16,6 +18,65 @@ import { registerV2Routes } from './routes/v2.routes.js';
 
 // Job worker
 import { startWorker, stopWorker } from './workers/job-worker.js';
+
+// ============================================================================
+// SECURITY: API Key Authentication
+// ============================================================================
+
+/**
+ * Validate API key from request headers
+ * Set API_KEY environment variable to enable authentication
+ * If API_KEY is not set, authentication is disabled (for development)
+ */
+function validateApiKey(request) {
+  const configuredApiKey = process.env.API_KEY;
+
+  // If no API key is configured, skip authentication (dev mode)
+  if (!configuredApiKey) {
+    return true;
+  }
+
+  // Check Authorization header (Bearer token) or X-API-Key header
+  const authHeader = request.headers.authorization;
+  const apiKeyHeader = request.headers['x-api-key'];
+
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7);
+    return token === configuredApiKey;
+  }
+
+  if (apiKeyHeader) {
+    return apiKeyHeader === configuredApiKey;
+  }
+
+  return false;
+}
+
+/**
+ * API key authentication hook
+ * Skips auth for health/metrics endpoints
+ */
+async function authenticationHook(request, reply) {
+  // Skip auth for health check endpoints
+  const publicPaths = ['/api/v2/health', '/api/v2/ready', '/api/v2/live', '/api/v2/metrics'];
+  if (publicPaths.some(p => request.url.startsWith(p))) {
+    return;
+  }
+
+  // Skip auth if API_KEY is not configured (dev mode)
+  if (!process.env.API_KEY) {
+    return;
+  }
+
+  if (!validateApiKey(request)) {
+    reply.code(401).send({
+      success: false,
+      error: 'Unauthorized',
+      message: 'Valid API key required. Use Authorization: Bearer <key> or X-API-Key header.',
+    });
+    return reply;
+  }
+}
 
 // CORS Configuration
 // In production: only allow configured origins
@@ -53,17 +114,102 @@ function getCorsOrigin() {
   };
 }
 
-const fastify = Fastify({ logger: true });
+const fastify = Fastify({
+  logger: true,
+  bodyLimit: parseInt(process.env.BODY_LIMIT || '1048576', 10), // 1MB default, configurable
+  trustProxy: process.env.TRUST_PROXY === 'true', // Required for rate limiting behind proxy
+});
+
+// ============================================================================
+// SECURITY MIDDLEWARE
+// ============================================================================
+
+// 1. Security Headers (Helmet)
+await fastify.register(helmet, {
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"], // Required for inline styles in React
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'https://api.keepa.com'],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Disable for compatibility with external resources
+});
+
+// 2. CORS
 await fastify.register(cors, {
   origin: getCorsOrigin(),
-  credentials: true, // Allow cookies/auth headers if needed
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key'],
+});
+
+// 3. Rate Limiting
+await fastify.register(rateLimit, {
+  max: parseInt(process.env.RATE_LIMIT_MAX || '100', 10), // Max requests per window
+  timeWindow: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10), // 1 minute default
+  skipOnError: false, // Don't skip rate limiting on errors
+  keyGenerator: (request) => {
+    // Use X-Forwarded-For if behind proxy, otherwise use IP
+    return request.headers['x-forwarded-for']?.split(',')[0]?.trim() || request.ip;
+  },
+  errorResponseBuilder: (request, context) => ({
+    success: false,
+    error: 'Too Many Requests',
+    message: `Rate limit exceeded. Try again in ${Math.ceil(context.ttl / 1000)} seconds.`,
+    retryAfter: Math.ceil(context.ttl / 1000),
+  }),
+  // Higher limits for certain endpoints
+  allowList: [], // No IPs exempt by default
+});
+
+// 4. API Key Authentication Hook (for /api/v2/* routes)
+fastify.addHook('onRequest', async (request, reply) => {
+  if (request.url.startsWith('/api/v2/')) {
+    return authenticationHook(request, reply);
+  }
 });
 
 // Register v2 API routes
 await registerV2Routes(fastify);
 console.log('API v2 routes registered');
+console.log(`Security: Helmet enabled, Rate limit: ${process.env.RATE_LIMIT_MAX || 100}/min, Auth: ${process.env.API_KEY ? 'enabled' : 'disabled (set API_KEY to enable)'}`);
+
+// 5. Global Error Handler - sanitizes all unhandled errors
+fastify.setErrorHandler((error, request, reply) => {
+  // Log full error internally
+  console.error('[GlobalError]', {
+    method: request.method,
+    url: request.url,
+    message: error.message,
+    stack: error.stack,
+    timestamp: new Date().toISOString(),
+  });
+
+  // Send sanitized error to client
+  const statusCode = error.statusCode || 500;
+
+  // For validation errors, provide helpful message
+  if (error.validation) {
+    return reply.status(400).send({
+      success: false,
+      error: 'Validation error',
+      message: 'Invalid request parameters',
+    });
+  }
+
+  // For all other errors, send generic message in production
+  const safeMessage = process.env.NODE_ENV === 'production'
+    ? 'An unexpected error occurred'
+    : error.message;
+
+  return reply.status(statusCode).send({
+    success: false,
+    error: safeMessage,
+  });
+});
 
 // Serve static frontend files (React build)
 const distPath = path.join(__dirname, '../dist');
