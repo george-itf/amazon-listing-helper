@@ -15,6 +15,7 @@
 import SellingPartner from 'amazon-sp-api';
 import { getSpApiClientConfig, hasSpApiCredentials, getDefaultMarketplaceId, getSellerId } from './credentials-provider.js';
 import { query, transaction } from './database/connection.js';
+import { syncListings } from './listings-sync.js';
 
 /**
  * Create SP-API client
@@ -667,9 +668,24 @@ export async function syncAll() {
 
   console.log('[AmazonSync] === STARTING FULL AMAZON DATA SYNC ===');
 
+  // 0. Listings Report (core data - sync first)
+  try {
+    console.log('[AmazonSync] 0/9 - Syncing Listings from Report...');
+    const listingsResult = await syncListings();
+    results.syncs.listings = {
+      success: true,
+      listings_processed: listingsResult.listingsProcessed,
+      listings_created: listingsResult.listingsCreated,
+      listings_updated: listingsResult.listingsUpdated,
+    };
+  } catch (error) {
+    console.error('[AmazonSync] Listings sync failed:', error.message);
+    results.errors.push({ sync: 'listings', error: error.message });
+  }
+
   // 1. FBA Inventory (API)
   try {
-    console.log('[AmazonSync] 1/8 - Syncing FBA Inventory...');
+    console.log('[AmazonSync] 1/9 - Syncing FBA Inventory...');
     results.syncs.fba_inventory = await syncFbaInventory();
   } catch (error) {
     console.error('[AmazonSync] FBA Inventory sync failed:', error.message);
@@ -678,7 +694,7 @@ export async function syncAll() {
 
   // 2. Orders (API)
   try {
-    console.log('[AmazonSync] 2/8 - Syncing Orders...');
+    console.log('[AmazonSync] 2/9 - Syncing Orders...');
     results.syncs.orders = await syncOrders(30);
   } catch (error) {
     console.error('[AmazonSync] Orders sync failed:', error.message);
@@ -687,7 +703,7 @@ export async function syncAll() {
 
   // 3. Competitive Pricing
   try {
-    console.log('[AmazonSync] 3/8 - Syncing Competitive Pricing...');
+    console.log('[AmazonSync] 3/9 - Syncing Competitive Pricing...');
     results.syncs.competitive_pricing = await syncCompetitivePricing();
   } catch (error) {
     console.error('[AmazonSync] Competitive pricing sync failed:', error.message);
@@ -696,7 +712,7 @@ export async function syncAll() {
 
   // 4. Listing Offers
   try {
-    console.log('[AmazonSync] 4/8 - Syncing Listing Offers...');
+    console.log('[AmazonSync] 4/9 - Syncing Listing Offers...');
     results.syncs.listing_offers = await syncListingOffers();
   } catch (error) {
     console.error('[AmazonSync] Listing offers sync failed:', error.message);
@@ -705,7 +721,7 @@ export async function syncAll() {
 
   // 5. FBA Fees
   try {
-    console.log('[AmazonSync] 5/8 - Syncing FBA Fees...');
+    console.log('[AmazonSync] 5/9 - Syncing FBA Fees...');
     results.syncs.fba_fees = await syncFbaFees();
   } catch (error) {
     console.error('[AmazonSync] FBA fees sync failed:', error.message);
@@ -714,7 +730,7 @@ export async function syncAll() {
 
   // 6. Sales & Traffic Report
   try {
-    console.log('[AmazonSync] 6/8 - Syncing Sales & Traffic...');
+    console.log('[AmazonSync] 6/9 - Syncing Sales & Traffic...');
     results.syncs.sales_traffic = await syncSalesAndTraffic(30);
   } catch (error) {
     console.error('[AmazonSync] Sales & traffic sync failed:', error.message);
@@ -723,7 +739,7 @@ export async function syncAll() {
 
   // 7. Financial Events
   try {
-    console.log('[AmazonSync] 7/8 - Syncing Financial Events...');
+    console.log('[AmazonSync] 7/9 - Syncing Financial Events...');
     results.syncs.financial_events = await syncFinancialEvents(30);
   } catch (error) {
     console.error('[AmazonSync] Financial events sync failed:', error.message);
@@ -732,7 +748,7 @@ export async function syncAll() {
 
   // 8. Catalog Items
   try {
-    console.log('[AmazonSync] 8/8 - Syncing Catalog Items...');
+    console.log('[AmazonSync] 8/9 - Syncing Catalog Items...');
     results.syncs.catalog_items = await syncCatalogItems();
   } catch (error) {
     console.error('[AmazonSync] Catalog items sync failed:', error.message);
