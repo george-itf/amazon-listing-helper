@@ -6,6 +6,9 @@
 -- - seller_sku (was: sku)
 -- - price_inc_vat (was: price)
 -- - available_quantity (was: quantity)
+--
+-- NOTE: PostgreSQL doesn't support FULL OUTER JOIN with OR conditions,
+-- so we use UNION ALL to combine matched and unmatched rows.
 -- ============================================================================
 
 -- Drop existing view if it exists
@@ -13,7 +16,10 @@ DROP MATERIALIZED VIEW IF EXISTS ml_data_pool CASCADE;
 
 -- Create unified ML data pool materialized view
 -- This combines data from all relevant tables into a single denormalized dataset
+-- Uses UNION ALL approach to handle the full outer join semantics
 CREATE MATERIALIZED VIEW ml_data_pool AS
+
+-- Part 1: All ASIN entities with their matched listings (LEFT JOIN)
 SELECT
     -- Entity identification
     COALESCE(l.id, ae.listing_id) as listing_id,
@@ -44,42 +50,45 @@ SELECT
     l.available_quantity as current_quantity,
 
     -- Keepa market data (latest snapshot)
-    (ks.parsed_json->'metrics'->>'price_current')::numeric as keepa_price_current,
-    (ks.parsed_json->'metrics'->>'price_median_90d')::numeric as keepa_price_median_90d,
-    (ks.parsed_json->'metrics'->>'price_p25_90d')::numeric as keepa_price_p25_90d,
-    (ks.parsed_json->'metrics'->>'price_p75_90d')::numeric as keepa_price_p75_90d,
-    (ks.parsed_json->'metrics'->>'volatility_90d')::numeric as keepa_volatility_90d,
-    (ks.parsed_json->'metrics'->>'offers_count_current')::int as keepa_offers_count,
-    (ks.parsed_json->'metrics'->>'sales_rank_current')::int as keepa_sales_rank,
-    (ks.parsed_json->'metrics'->>'rank_trend_90d')::numeric as keepa_rank_trend_90d,
-    (ks.parsed_json->'metrics'->>'buy_box_is_amazon')::boolean as keepa_buybox_is_amazon,
-    ks.captured_at as keepa_captured_at,
+    (SELECT parsed_json->'metrics'->>'price_current' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_current,
+    (SELECT parsed_json->'metrics'->>'price_median_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_median_90d,
+    (SELECT parsed_json->'metrics'->>'price_p25_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p25_90d,
+    (SELECT parsed_json->'metrics'->>'price_p75_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p75_90d,
+    (SELECT parsed_json->'metrics'->>'volatility_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_volatility_90d,
+    (SELECT parsed_json->'metrics'->>'offers_count_current' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::int as keepa_offers_count,
+    (SELECT parsed_json->'metrics'->>'sales_rank_current' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::int as keepa_sales_rank,
+    (SELECT parsed_json->'metrics'->>'rank_trend_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_rank_trend_90d,
+    (SELECT parsed_json->'metrics'->>'buy_box_is_amazon' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::boolean as keepa_buybox_is_amazon,
+    (SELECT captured_at FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1) as keepa_captured_at,
 
-    -- BOM/Cost data (active BOM - calculated from bom_lines)
-    bom.id as bom_id,
-    bom.notes as bom_notes,
-    bom.total_cost_ex_vat as bom_cost_ex_vat,
-    bom.effective_from as bom_effective_from,
+    -- BOM/Cost data (active BOM)
+    (SELECT id FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_id,
+    (SELECT notes FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_notes,
+    (SELECT COALESCE(
+        (SELECT SUM(bl.quantity * (1 + COALESCE(bl.wastage_rate, 0)) * COALESCE(c.unit_cost_ex_vat, 0))
+         FROM bom_lines bl JOIN components c ON c.id = bl.component_id WHERE bl.bom_id = b.id), 0)
+     FROM boms b WHERE b.listing_id = l.id AND b.is_active = true AND b.scope_type = 'LISTING' ORDER BY b.effective_from DESC LIMIT 1) as bom_cost_ex_vat,
+    (SELECT effective_from FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_effective_from,
 
     -- Feature store data (latest features)
-    (fs.features_json->>'margin')::numeric as computed_margin,
-    (fs.features_json->>'profit_ex_vat')::numeric as computed_profit,
-    (fs.features_json->>'break_even_price_inc_vat')::numeric as break_even_price,
-    (fs.features_json->>'buy_box_status')::text as buy_box_status,
-    (fs.features_json->>'buy_box_risk')::text as buy_box_risk,
-    (fs.features_json->>'stockout_risk')::text as stockout_risk,
-    (fs.features_json->>'opportunity_score')::numeric as opportunity_score,
-    (fs.features_json->>'opportunity_margin')::numeric as opportunity_margin,
-    (fs.features_json->>'opportunity_profit')::numeric as opportunity_profit,
-    fs.features_json as all_features,
-    fs.computed_at as features_computed_at,
+    (SELECT features_json->>'margin' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as computed_margin,
+    (SELECT features_json->>'profit_ex_vat' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as computed_profit,
+    (SELECT features_json->>'break_even_price_inc_vat' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as break_even_price,
+    (SELECT features_json->>'buy_box_status' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::text as buy_box_status,
+    (SELECT features_json->>'buy_box_risk' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::text as buy_box_risk,
+    (SELECT features_json->>'stockout_risk' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::text as stockout_risk,
+    (SELECT features_json->>'opportunity_score' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as opportunity_score,
+    (SELECT features_json->>'opportunity_margin' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as opportunity_margin,
+    (SELECT features_json->>'opportunity_profit' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as opportunity_profit,
+    (SELECT features_json FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1) as all_features,
+    (SELECT computed_at FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1) as features_computed_at,
 
     -- Sales velocity (30 day)
-    COALESCE(sales.total_units, 0) as sales_30d_units,
-    COALESCE(sales.total_revenue, 0) as sales_30d_revenue,
+    COALESCE((SELECT SUM(units) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_units,
+    COALESCE((SELECT SUM(revenue_inc_vat) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_revenue,
 
     -- Recommendations pending
-    COALESCE(rec.pending_count, 0) as pending_recommendations,
+    COALESCE((SELECT COUNT(*) FROM recommendations WHERE (listing_id = l.id OR asin_entity_id = ae.id) AND status = 'PENDING'), 0) as pending_recommendations,
 
     -- Timestamps
     l."createdAt" as listing_created_at,
@@ -88,67 +97,74 @@ SELECT
     CURRENT_TIMESTAMP as snapshot_at
 
 FROM asin_entities ae
-FULL OUTER JOIN listings l ON l.asin = ae.asin OR l.id = ae.listing_id
+LEFT JOIN listings l ON l.asin = ae.asin OR l.id = ae.listing_id
 
--- Latest Keepa snapshot
-LEFT JOIN LATERAL (
-    SELECT parsed_json, captured_at
-    FROM keepa_snapshots
-    WHERE asin_entity_id = ae.id
-    ORDER BY captured_at DESC
-    LIMIT 1
-) ks ON true
+UNION ALL
 
--- Active BOM with calculated total cost
-LEFT JOIN LATERAL (
-    SELECT
-        b.id,
-        b.notes,
-        b.effective_from,
-        COALESCE(
-            (SELECT SUM(bl.quantity * (1 + COALESCE(bl.wastage_rate, 0)) * COALESCE(c.unit_cost_ex_vat, 0))
-             FROM bom_lines bl
-             JOIN components c ON c.id = bl.component_id
-             WHERE bl.bom_id = b.id),
-            0
-        ) as total_cost_ex_vat
-    FROM boms b
-    WHERE b.listing_id = l.id
-      AND b.is_active = true
-      AND b.scope_type = 'LISTING'
-    ORDER BY b.effective_from DESC
-    LIMIT 1
-) bom ON true
+-- Part 2: Listings that have no matching ASIN entity
+SELECT
+    l.id as listing_id,
+    NULL::integer as asin_entity_id,
+    l.seller_sku as sku,
+    l.asin,
+    'LISTING' as entity_type,
+    l.title,
+    NULL::varchar as brand,
+    NULL::varchar as category,
+    l.description,
+    l."bulletPoints" as bullet_points,
+    l.status as listing_status,
+    l."fulfillmentChannel" as fulfillment_channel,
+    NULL::boolean as is_tracked,
+    l.price_inc_vat as current_price,
+    l.available_quantity as current_quantity,
+    -- Keepa data (NULL for listings without ASIN entity)
+    NULL::numeric as keepa_price_current,
+    NULL::numeric as keepa_price_median_90d,
+    NULL::numeric as keepa_price_p25_90d,
+    NULL::numeric as keepa_price_p75_90d,
+    NULL::numeric as keepa_volatility_90d,
+    NULL::int as keepa_offers_count,
+    NULL::int as keepa_sales_rank,
+    NULL::numeric as keepa_rank_trend_90d,
+    NULL::boolean as keepa_buybox_is_amazon,
+    NULL::timestamp as keepa_captured_at,
+    -- BOM data
+    (SELECT id FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_id,
+    (SELECT notes FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_notes,
+    (SELECT COALESCE(
+        (SELECT SUM(bl.quantity * (1 + COALESCE(bl.wastage_rate, 0)) * COALESCE(c.unit_cost_ex_vat, 0))
+         FROM bom_lines bl JOIN components c ON c.id = bl.component_id WHERE bl.bom_id = b.id), 0)
+     FROM boms b WHERE b.listing_id = l.id AND b.is_active = true AND b.scope_type = 'LISTING' ORDER BY b.effective_from DESC LIMIT 1) as bom_cost_ex_vat,
+    (SELECT effective_from FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_effective_from,
+    -- Feature store (listing only)
+    (SELECT features_json->>'margin' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::numeric as computed_margin,
+    (SELECT features_json->>'profit_ex_vat' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::numeric as computed_profit,
+    (SELECT features_json->>'break_even_price_inc_vat' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::numeric as break_even_price,
+    (SELECT features_json->>'buy_box_status' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::text as buy_box_status,
+    (SELECT features_json->>'buy_box_risk' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::text as buy_box_risk,
+    (SELECT features_json->>'stockout_risk' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::text as stockout_risk,
+    (SELECT features_json->>'opportunity_score' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::numeric as opportunity_score,
+    (SELECT features_json->>'opportunity_margin' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::numeric as opportunity_margin,
+    (SELECT features_json->>'opportunity_profit' FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1)::numeric as opportunity_profit,
+    (SELECT features_json FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1) as all_features,
+    (SELECT computed_at FROM feature_store WHERE entity_type = 'LISTING' AND entity_id = l.id ORDER BY computed_at DESC LIMIT 1) as features_computed_at,
+    -- Sales
+    COALESCE((SELECT SUM(units) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_units,
+    COALESCE((SELECT SUM(revenue_inc_vat) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_revenue,
+    -- Recommendations
+    COALESCE((SELECT COUNT(*) FROM recommendations WHERE listing_id = l.id AND status = 'PENDING'), 0) as pending_recommendations,
+    -- Timestamps
+    l."createdAt" as listing_created_at,
+    l."updatedAt" as listing_updated_at,
+    NULL::timestamp as asin_tracked_at,
+    CURRENT_TIMESTAMP as snapshot_at
 
--- Latest feature store entry
-LEFT JOIN LATERAL (
-    SELECT features_json, computed_at
-    FROM feature_store
-    WHERE (entity_type = 'LISTING' AND entity_id = l.id)
-       OR (entity_type = 'ASIN' AND entity_id = ae.id)
-    ORDER BY computed_at DESC
-    LIMIT 1
-) fs ON true
-
--- 30-day sales
-LEFT JOIN LATERAL (
-    SELECT
-        SUM(units) as total_units,
-        SUM(revenue) as total_revenue
-    FROM listing_sales_daily
-    WHERE listing_id = l.id
-      AND date >= CURRENT_DATE - INTERVAL '30 days'
-) sales ON true
-
--- Pending recommendations
-LEFT JOIN LATERAL (
-    SELECT COUNT(*) as pending_count
-    FROM recommendations
-    WHERE (listing_id = l.id OR asin_entity_id = ae.id)
-      AND status = 'PENDING'
-) rec ON true
-
-WHERE ae.id IS NOT NULL OR l.id IS NOT NULL;
+FROM listings l
+WHERE NOT EXISTS (
+    SELECT 1 FROM asin_entities ae
+    WHERE ae.asin = l.asin OR ae.listing_id = l.id
+);
 
 -- Create indexes for efficient querying
 CREATE UNIQUE INDEX idx_ml_pool_unique ON ml_data_pool(COALESCE(listing_id, 0), COALESCE(asin_entity_id, 0));
