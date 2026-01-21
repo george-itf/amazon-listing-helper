@@ -77,33 +77,44 @@ export async function computeListingFeatures(listingId) {
     };
   }
 
-  // Get sales data (7-day and 30-day)
-  const salesResult = await query(`
-    SELECT
-      COALESCE(SUM(CASE WHEN date >= CURRENT_DATE - INTERVAL '7 days' THEN units ELSE 0 END), 0) as units_7d,
-      COALESCE(SUM(CASE WHEN date >= CURRENT_DATE - INTERVAL '7 days' THEN revenue_inc_vat ELSE 0 END), 0) as revenue_7d,
-      COALESCE(SUM(units), 0) as units_30d,
-      COALESCE(SUM(revenue_inc_vat), 0) as revenue_30d,
-      COALESCE(SUM(sessions), 0) as sessions_30d,
-      COALESCE(AVG(conversion_rate), 0) as avg_conversion_rate_30d
-    FROM listing_sales_daily
-    WHERE listing_id = $1
-      AND date >= CURRENT_DATE - INTERVAL '30 days'
-  `, [listingId]);
-
-  const sales = salesResult.rows[0];
+  // Get sales data (7-day and 30-day) - safe if table doesn't exist
+  let sales = {
+    units_7d: 0, units_30d: 0, revenue_7d: 0, revenue_30d: 0,
+    sessions_30d: 0, avg_conversion_rate_30d: 0
+  };
+  try {
+    const salesResult = await query(`
+      SELECT
+        COALESCE(SUM(CASE WHEN date >= CURRENT_DATE - INTERVAL '7 days' THEN units ELSE 0 END), 0) as units_7d,
+        COALESCE(SUM(CASE WHEN date >= CURRENT_DATE - INTERVAL '7 days' THEN revenue_inc_vat ELSE 0 END), 0) as revenue_7d,
+        COALESCE(SUM(units), 0) as units_30d,
+        COALESCE(SUM(revenue_inc_vat), 0) as revenue_30d,
+        COALESCE(SUM(sessions), 0) as sessions_30d,
+        COALESCE(AVG(conversion_rate), 0) as avg_conversion_rate_30d
+      FROM listing_sales_daily
+      WHERE listing_id = $1
+        AND date >= CURRENT_DATE - INTERVAL '30 days'
+    `, [listingId]);
+    sales = salesResult.rows[0];
+  } catch (error) {
+    if (!error.message?.includes('does not exist')) throw error;
+  }
   const salesVelocity = safeParseFloat(sales.units_30d, 0) / 30;
   const availableQuantity = listing.available_quantity || 0;
   const daysOfCover = calculateDaysOfCover(availableQuantity, salesVelocity);
 
-  // Get Buy Box status from listing_offer_current
-  const offerResult = await query(`
-    SELECT buy_box_status, buy_box_percentage_30d, buy_box_price, is_buy_box_winner
-    FROM listing_offer_current
-    WHERE listing_id = $1
-  `, [listingId]);
-
-  const offer = offerResult.rows[0] || {};
+  // Get Buy Box status from listing_offer_current - safe if table doesn't exist
+  let offer = {};
+  try {
+    const offerResult = await query(`
+      SELECT buy_box_status, buy_box_percentage_30d, buy_box_price, is_buy_box_winner
+      FROM listing_offer_current
+      WHERE listing_id = $1
+    `, [listingId]);
+    offer = offerResult.rows[0] || {};
+  } catch (error) {
+    if (!error.message?.includes('does not exist')) throw error;
+  }
   const buyBoxStatus = offer.buy_box_status || 'UNKNOWN';
 
   // Get latest Keepa data if ASIN is available
@@ -118,27 +129,31 @@ export async function computeListingFeatures(listingId) {
   };
 
   if (listing.asin) {
-    const keepaResult = await query(`
-      SELECT parsed_json
-      FROM keepa_snapshots
-      WHERE asin = $1 AND marketplace_id = $2
-      ORDER BY captured_at DESC
-      LIMIT 1
-    `, [listing.asin, listing.marketplace_id]);
+    try {
+      const keepaResult = await query(`
+        SELECT parsed_json
+        FROM keepa_snapshots
+        WHERE asin = $1 AND marketplace_id = $2
+        ORDER BY captured_at DESC
+        LIMIT 1
+      `, [listing.asin, listing.marketplace_id]);
 
-    if (keepaResult.rows.length > 0) {
-      const keepa = keepaResult.rows[0].parsed_json;
-      if (keepa && keepa.metrics) {
-        keepaFeatures = {
-          keepa_price_median_90d: keepa.metrics.price_median_90d,
-          keepa_price_p25_90d: keepa.metrics.price_p25_90d,
-          keepa_price_p75_90d: keepa.metrics.price_p75_90d,
-          keepa_volatility_90d: keepa.metrics.price_volatility_90d,
-          keepa_offers_count_current: keepa.metrics.offers_count_current,
-          keepa_offers_trend_30d: keepa.metrics.offers_trend_30d,
-          keepa_rank_trend_90d: keepa.metrics.sales_rank_trend_90d,
-        };
+      if (keepaResult.rows.length > 0) {
+        const keepa = keepaResult.rows[0].parsed_json;
+        if (keepa && keepa.metrics) {
+          keepaFeatures = {
+            keepa_price_median_90d: keepa.metrics.price_median_90d,
+            keepa_price_p25_90d: keepa.metrics.price_p25_90d,
+            keepa_price_p75_90d: keepa.metrics.price_p75_90d,
+            keepa_volatility_90d: keepa.metrics.price_volatility_90d,
+            keepa_offers_count_current: keepa.metrics.offers_count_current,
+            keepa_offers_trend_30d: keepa.metrics.offers_trend_30d,
+            keepa_rank_trend_90d: keepa.metrics.sales_rank_trend_90d,
+          };
+        }
       }
+    } catch (error) {
+      if (!error.message?.includes('does not exist')) throw error;
     }
   }
 
@@ -350,13 +365,29 @@ export async function saveFeatures(entityType, entityId, features) {
     }
   }
 
-  const result = await query(`
-    INSERT INTO feature_store (entity_type, entity_id, feature_version, features_json, computed_at)
-    VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-    RETURNING *
-  `, [entityType, entityId, FEATURE_VERSION, newFeaturesJson]);
+  try {
+    const result = await query(`
+      INSERT INTO feature_store (entity_type, entity_id, feature_version, features_json, computed_at)
+      VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+      RETURNING *
+    `, [entityType, entityId, FEATURE_VERSION, newFeaturesJson]);
 
-  return result.rows[0];
+    return result.rows[0];
+  } catch (error) {
+    // Handle missing table gracefully - return a mock result
+    if (error.message?.includes('does not exist')) {
+      console.warn('[FeatureStore] feature_store table does not exist, returning unsaved features');
+      return {
+        id: null,
+        entity_type: entityType,
+        entity_id: entityId,
+        feature_version: FEATURE_VERSION,
+        features_json: features,
+        computed_at: new Date().toISOString(),
+      };
+    }
+    throw error;
+  }
 }
 
 /**
