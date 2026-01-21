@@ -18,8 +18,13 @@ import { query } from '../database/connection.js';
 /**
  * Wrap response data in standard API response format
  * Frontend expects: { success: boolean, data?: T, error?: string }
+ * @param {any} data - Response data (or null for errors)
+ * @param {string} [errorMessage] - Error message if this is an error response
  */
-function wrapResponse(data) {
+function wrapResponse(data, errorMessage = null) {
+  if (errorMessage) {
+    return { success: false, error: errorMessage, data: null };
+  }
   return { success: true, data };
 }
 
@@ -34,45 +39,70 @@ export async function registerV2Routes(fastify) {
   // ============================================================================
 
   fastify.get('/api/v2/suppliers', async (request, reply) => {
-    const { activeOnly = 'true', limit = '100', offset = '0' } = request.query;
-    const suppliers = await supplierRepo.findAll({
-      activeOnly: activeOnly === 'true',
-      limit: parseInt(limit, 10),
-      offset: parseInt(offset, 10),
-    });
-    return wrapResponse(suppliers);
+    try {
+      const { activeOnly = 'true', limit = '100', offset = '0' } = request.query;
+      const suppliers = await supplierRepo.findAll({
+        activeOnly: activeOnly === 'true',
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+      });
+      return wrapResponse(suppliers);
+    } catch (error) {
+      console.error('[API] GET /suppliers error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   fastify.get('/api/v2/suppliers/:id', async (request, reply) => {
-    const supplier = await supplierRepo.findById(parseInt(request.params.id, 10));
-    if (!supplier) {
-      return reply.status(404).send({ success: false, error: 'Supplier not found' });
+    try {
+      const supplier = await supplierRepo.findById(parseInt(request.params.id, 10));
+      if (!supplier) {
+        return reply.status(404).send({ success: false, error: 'Supplier not found' });
+      }
+      return wrapResponse(supplier);
+    } catch (error) {
+      console.error('[API] GET /suppliers/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    return wrapResponse(supplier);
   });
 
   fastify.post('/api/v2/suppliers', async (request, reply) => {
-    const supplier = await supplierRepo.create(request.body);
-    return reply.status(201).send(wrapResponse(supplier));
+    try {
+      const supplier = await supplierRepo.create(request.body);
+      return reply.status(201).send(wrapResponse(supplier));
+    } catch (error) {
+      console.error('[API] POST /suppliers error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   fastify.put('/api/v2/suppliers/:id', async (request, reply) => {
-    const supplier = await supplierRepo.update(
-      parseInt(request.params.id, 10),
-      request.body
-    );
-    if (!supplier) {
-      return reply.status(404).send({ success: false, error: 'Supplier not found' });
+    try {
+      const supplier = await supplierRepo.update(
+        parseInt(request.params.id, 10),
+        request.body
+      );
+      if (!supplier) {
+        return reply.status(404).send({ success: false, error: 'Supplier not found' });
+      }
+      return wrapResponse(supplier);
+    } catch (error) {
+      console.error('[API] PUT /suppliers/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    return wrapResponse(supplier);
   });
 
   fastify.delete('/api/v2/suppliers/:id', async (request, reply) => {
-    const deleted = await supplierRepo.remove(parseInt(request.params.id, 10));
-    if (!deleted) {
-      return reply.status(404).send({ success: false, error: 'Supplier not found' });
+    try {
+      const deleted = await supplierRepo.remove(parseInt(request.params.id, 10));
+      if (!deleted) {
+        return reply.status(404).send({ success: false, error: 'Supplier not found' });
+      }
+      return wrapResponse({ deleted: true });
+    } catch (error) {
+      console.error('[API] DELETE /suppliers/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    return wrapResponse({ deleted: true });
   });
 
   // ============================================================================
@@ -80,57 +110,87 @@ export async function registerV2Routes(fastify) {
   // ============================================================================
 
   fastify.get('/api/v2/components', async (request, reply) => {
-    const { activeOnly = 'true', supplierId, category, limit = '100', offset = '0' } = request.query;
-    const components = await componentRepo.findAll({
-      activeOnly: activeOnly === 'true',
-      supplierId: supplierId ? parseInt(supplierId, 10) : undefined,
-      category,
-      limit: parseInt(limit, 10),
-      offset: parseInt(offset, 10),
-    });
-    return wrapResponse(components);
+    try {
+      const { activeOnly = 'true', supplierId, category, limit = '100', offset = '0' } = request.query;
+      const components = await componentRepo.findAll({
+        activeOnly: activeOnly === 'true',
+        supplierId: supplierId ? parseInt(supplierId, 10) : undefined,
+        category,
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+      });
+      return wrapResponse(components);
+    } catch (error) {
+      console.error('[API] GET /components error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   fastify.get('/api/v2/components/categories', async (request, reply) => {
-    const categories = await componentRepo.getCategories();
-    return wrapResponse(categories);
+    try {
+      const categories = await componentRepo.getCategories();
+      return wrapResponse(categories);
+    } catch (error) {
+      console.error('[API] GET /components/categories error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   fastify.get('/api/v2/components/:id', async (request, reply) => {
-    const component = await componentRepo.findById(parseInt(request.params.id, 10));
-    if (!component) {
-      return reply.status(404).send({ success: false, error: 'Component not found' });
+    try {
+      const component = await componentRepo.findById(parseInt(request.params.id, 10));
+      if (!component) {
+        return reply.status(404).send({ success: false, error: 'Component not found' });
+      }
+      return wrapResponse(component);
+    } catch (error) {
+      console.error('[API] GET /components/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    return wrapResponse(component);
   });
 
   fastify.post('/api/v2/components', async (request, reply) => {
-    // Check for duplicate SKU
-    const existing = await componentRepo.findBySku(request.body.component_sku);
-    if (existing) {
-      return reply.status(409).send({ success: false, error: 'Component SKU already exists' });
+    try {
+      // Check for duplicate SKU
+      const existing = await componentRepo.findBySku(request.body.component_sku);
+      if (existing) {
+        return reply.status(409).send({ success: false, error: 'Component SKU already exists' });
+      }
+      const component = await componentRepo.create(request.body);
+      return reply.status(201).send(wrapResponse(component));
+    } catch (error) {
+      console.error('[API] POST /components error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    const component = await componentRepo.create(request.body);
-    return reply.status(201).send(wrapResponse(component));
   });
 
   fastify.put('/api/v2/components/:id', async (request, reply) => {
-    const component = await componentRepo.update(
-      parseInt(request.params.id, 10),
-      request.body
-    );
-    if (!component) {
-      return reply.status(404).send({ success: false, error: 'Component not found' });
+    try {
+      const component = await componentRepo.update(
+        parseInt(request.params.id, 10),
+        request.body
+      );
+      if (!component) {
+        return reply.status(404).send({ success: false, error: 'Component not found' });
+      }
+      return wrapResponse(component);
+    } catch (error) {
+      console.error('[API] PUT /components/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    return wrapResponse(component);
   });
 
   fastify.delete('/api/v2/components/:id', async (request, reply) => {
-    const deleted = await componentRepo.remove(parseInt(request.params.id, 10));
-    if (!deleted) {
-      return reply.status(404).send({ success: false, error: 'Component not found' });
+    try {
+      const deleted = await componentRepo.remove(parseInt(request.params.id, 10));
+      if (!deleted) {
+        return reply.status(404).send({ success: false, error: 'Component not found' });
+      }
+      return wrapResponse({ deleted: true });
+    } catch (error) {
+      console.error('[API] DELETE /components/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    return wrapResponse({ deleted: true });
   });
 
   /**
@@ -139,12 +199,17 @@ export async function registerV2Routes(fastify) {
    * Expected body: { rows: [{ component_sku, name, description?, category?, unit_cost_ex_vat? }] }
    */
   fastify.post('/api/v2/components/import', async (request, reply) => {
-    const { rows } = request.body;
-    if (!Array.isArray(rows)) {
-      return reply.status(400).send({ success: false, error: 'Expected rows array in body' });
+    try {
+      const { rows } = request.body;
+      if (!Array.isArray(rows)) {
+        return reply.status(400).send({ success: false, error: 'Expected rows array in body' });
+      }
+      const result = await componentRepo.importFromCsv(rows);
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] POST /components/import error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    const result = await componentRepo.importFromCsv(rows);
-    return wrapResponse(result);
   });
 
   // ============================================================================
@@ -156,28 +221,33 @@ export async function registerV2Routes(fastify) {
    * Get all listings with optional filters
    */
   fastify.get('/api/v2/listings', async (request, reply) => {
-    const { status, limit = '100', offset = '0' } = request.query;
-    const filters = {
-      limit: parseInt(limit, 10),
-      offset: parseInt(offset, 10),
-    };
-    if (status) filters.status = status;
+    try {
+      const { status, limit = '100', offset = '0' } = request.query;
+      const filters = {
+        limit: Math.min(parseInt(limit, 10) || 100, 1000), // Cap at 1000
+        offset: Math.max(parseInt(offset, 10) || 0, 0),
+      };
+      if (status) filters.status = status;
 
-    const listings = await listingRepo.getAll(filters);
+      const listings = await listingRepo.getAll(filters);
 
-    // Map to frontend expected format (DATA_CONTRACTS.md)
-    const mapped = listings.map(l => ({
-      id: l.id,
-      seller_sku: l.sku,
-      asin: l.asin || null,
-      title: l.title || '',
-      marketplace_id: 1, // Default UK marketplace
-      status: (l.status || 'active').toUpperCase(),
-      created_at: l.createdAt || l.created_at || new Date().toISOString(),
-      updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
-    }));
+      // Map to frontend expected format (DATA_CONTRACTS.md)
+      const mapped = listings.map(l => ({
+        id: l.id,
+        seller_sku: l.sku,
+        asin: l.asin || null,
+        title: l.title || '',
+        marketplace_id: 1, // Default UK marketplace
+        status: (l.status || 'active').toUpperCase(),
+        created_at: l.createdAt || l.created_at || new Date().toISOString(),
+        updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
+      }));
 
-    return wrapResponse(mapped);
+      return wrapResponse(mapped);
+    } catch (error) {
+      console.error('[API] GET /listings error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
@@ -185,24 +255,33 @@ export async function registerV2Routes(fastify) {
    * Get a single listing by ID
    */
   fastify.get('/api/v2/listings/:id', async (request, reply) => {
-    const id = parseInt(request.params.id, 10);
-    const listing = await listingRepo.getById(id);
+    try {
+      const id = parseInt(request.params.id, 10);
+      if (isNaN(id)) {
+        return reply.status(400).send(wrapResponse(null, 'Invalid listing ID'));
+      }
 
-    if (!listing) {
-      return reply.status(404).send({ success: false, error: 'Listing not found' });
+      const listing = await listingRepo.getById(id);
+
+      if (!listing) {
+        return reply.status(404).send(wrapResponse(null, 'Listing not found'));
+      }
+
+      // Map to frontend expected format
+      return wrapResponse({
+        id: listing.id,
+        seller_sku: listing.sku,
+        asin: listing.asin || null,
+        title: listing.title || '',
+        marketplace_id: 1, // Default UK marketplace
+        status: (listing.status || 'active').toUpperCase(),
+        created_at: listing.createdAt || listing.created_at || new Date().toISOString(),
+        updated_at: listing.updatedAt || listing.updated_at || new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('[API] GET /listings/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    // Map to frontend expected format
-    return wrapResponse({
-      id: listing.id,
-      seller_sku: listing.sku,
-      asin: listing.asin || null,
-      title: listing.title || '',
-      marketplace_id: 1, // Default UK marketplace
-      status: (listing.status || 'active').toUpperCase(),
-      created_at: listing.createdAt || listing.created_at || new Date().toISOString(),
-      updated_at: listing.updatedAt || listing.updated_at || new Date().toISOString(),
-    });
   });
 
   // ============================================================================
@@ -214,45 +293,50 @@ export async function registerV2Routes(fastify) {
    * Get all BOMs with optional filtering
    */
   fastify.get('/api/v2/boms', async (request, reply) => {
-    const { listing_id, limit = '100', offset = '0' } = request.query;
+    try {
+      const { listing_id, limit = '100', offset = '0' } = request.query;
 
-    let sql = `
-      SELECT b.*,
-        COALESCE(json_agg(
-          json_build_object(
-            'id', bl.id,
-            'component_id', bl.component_id,
-            'component_sku', c.component_sku,
-            'component_name', c.name,
-            'quantity', bl.quantity,
-            'wastage_rate', bl.wastage_rate,
-            'unit_cost_ex_vat', c.unit_cost_ex_vat,
-            'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat
-          ) ORDER BY c.name
-        ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines,
-        COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost_ex_vat
-      FROM boms b
-      LEFT JOIN bom_lines bl ON bl.bom_id = b.id
-      LEFT JOIN components c ON c.id = bl.component_id
-      WHERE 1=1
-    `;
+      let sql = `
+        SELECT b.*,
+          COALESCE(json_agg(
+            json_build_object(
+              'id', bl.id,
+              'component_id', bl.component_id,
+              'component_sku', c.component_sku,
+              'component_name', c.name,
+              'quantity', bl.quantity,
+              'wastage_rate', bl.wastage_rate,
+              'unit_cost_ex_vat', c.unit_cost_ex_vat,
+              'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat
+            ) ORDER BY c.name
+          ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines,
+          COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost_ex_vat
+        FROM boms b
+        LEFT JOIN bom_lines bl ON bl.bom_id = b.id
+        LEFT JOIN components c ON c.id = bl.component_id
+        WHERE 1=1
+      `;
 
-    const params = [];
-    let paramCount = 1;
+      const params = [];
+      let paramCount = 1;
 
-    if (listing_id) {
-      sql += ` AND b.listing_id = $${paramCount++}`;
-      params.push(parseInt(listing_id, 10));
+      if (listing_id) {
+        sql += ` AND b.listing_id = $${paramCount++}`;
+        params.push(parseInt(listing_id, 10));
+      }
+
+      sql += ` GROUP BY b.id ORDER BY b.created_at DESC`;
+      sql += ` LIMIT $${paramCount++}`;
+      params.push(parseInt(limit, 10));
+      sql += ` OFFSET $${paramCount++}`;
+      params.push(parseInt(offset, 10));
+
+      const result = await query(sql, params);
+      return wrapResponse(result.rows);
+    } catch (error) {
+      console.error('[API] GET /boms error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    sql += ` GROUP BY b.id ORDER BY b.created_at DESC`;
-    sql += ` LIMIT $${paramCount++}`;
-    params.push(parseInt(limit, 10));
-    sql += ` OFFSET $${paramCount++}`;
-    params.push(parseInt(offset, 10));
-
-    const result = await query(sql, params);
-    return wrapResponse(result.rows);
   });
 
   /**
@@ -276,11 +360,179 @@ export async function registerV2Routes(fastify) {
         const bom = await bomRepo.createVersion(listing_id, { lines: lines || [], notes });
         return reply.status(201).send(wrapResponse(bom));
       } else {
-        // For ASIN_SCENARIO BOMs, we need a different creation path
-        return reply.status(400).send({ success: false, error: 'ASIN_SCENARIO BOMs must be created via cloning' });
+        // For ASIN_SCENARIO BOMs, use the clone endpoints
+        return reply.status(400).send({
+          success: false,
+          error: 'ASIN_SCENARIO BOMs must be created via cloning. Use POST /api/v2/boms/:bomId/clone or POST /api/v2/asins/:id/bom/clone-from-listing',
+        });
       }
     } catch (error) {
       return reply.status(400).send({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/boms/:bomId/clone
+   * Clone a BOM to create an ASIN scenario BOM
+   * Body: { asin_entity_id, name? }
+   */
+  fastify.post('/api/v2/boms/:bomId/clone', async (request, reply) => {
+    const sourceBomId = parseInt(request.params.bomId, 10);
+    const { asin_entity_id, name } = request.body;
+
+    if (!asin_entity_id) {
+      return reply.status(400).send({ success: false, error: 'asin_entity_id is required' });
+    }
+
+    try {
+      // Get source BOM with lines
+      const sourceBom = await bomRepo.findById(sourceBomId);
+      if (!sourceBom) {
+        return reply.status(404).send({ success: false, error: 'Source BOM not found' });
+      }
+
+      // Verify ASIN entity exists
+      const entityResult = await query('SELECT id, asin FROM asin_entities WHERE id = $1', [asin_entity_id]);
+      if (entityResult.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'ASIN entity not found' });
+      }
+
+      const entity = entityResult.rows[0];
+
+      // Get source BOM lines
+      const linesResult = await query(`
+        SELECT component_id, quantity, wastage_rate, notes
+        FROM bom_lines WHERE bom_id = $1
+      `, [sourceBomId]);
+
+      // Deactivate any existing scenario BOM for this ASIN
+      await query(`
+        UPDATE boms SET is_active = false, updated_at = CURRENT_TIMESTAMP
+        WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO' AND is_active = true
+      `, [asin_entity_id]);
+
+      // Get next version number
+      const versionResult = await query(`
+        SELECT COALESCE(MAX(version), 0) + 1 as next_version
+        FROM boms WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO'
+      `, [asin_entity_id]);
+      const nextVersion = versionResult.rows[0].next_version;
+
+      // Create new scenario BOM
+      const bomName = name || `Scenario BOM for ${entity.asin} (cloned from BOM #${sourceBomId})`;
+      const newBomResult = await query(`
+        INSERT INTO boms (asin_entity_id, scope_type, name, version, is_active, notes, created_by)
+        VALUES ($1, 'ASIN_SCENARIO', $2, $3, true, $4, 'user')
+        RETURNING *
+      `, [asin_entity_id, bomName, nextVersion, `Cloned from BOM #${sourceBomId}`]);
+
+      const newBom = newBomResult.rows[0];
+
+      // Copy lines to new BOM
+      for (const line of linesResult.rows) {
+        await query(`
+          INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [newBom.id, line.component_id, line.quantity, line.wastage_rate, line.notes]);
+      }
+
+      // Get the new BOM with lines and cost
+      const finalBom = await bomRepo.findById(newBom.id);
+
+      return reply.status(201).send(wrapResponse({
+        ...finalBom,
+        source_bom_id: sourceBomId,
+        lines_copied: linesResult.rows.length,
+      }));
+    } catch (error) {
+      console.error('[API] POST /boms/:id/clone error:', error.message);
+      return reply.status(500).send({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/asins/:id/bom/clone-from-listing
+   * Clone a listing's active BOM to create an ASIN scenario BOM
+   * Body: { listing_id, name? }
+   */
+  fastify.post('/api/v2/asins/:id/bom/clone-from-listing', async (request, reply) => {
+    const asinEntityId = parseInt(request.params.id, 10);
+    const { listing_id, name } = request.body;
+
+    if (!listing_id) {
+      return reply.status(400).send({ success: false, error: 'listing_id is required' });
+    }
+
+    try {
+      // Verify ASIN entity exists
+      const entityResult = await query('SELECT id, asin FROM asin_entities WHERE id = $1', [asinEntityId]);
+      if (entityResult.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'ASIN entity not found' });
+      }
+
+      // Get active BOM for the listing
+      const activeBom = await bomRepo.getActiveBom(listing_id);
+      if (!activeBom) {
+        return reply.status(404).send({ success: false, error: 'No active BOM found for the specified listing' });
+      }
+
+      // Forward to the clone endpoint logic
+      request.params.bomId = activeBom.id;
+      request.body.asin_entity_id = asinEntityId;
+      request.body.name = name;
+
+      // Reuse the clone logic via internal call
+      const entity = entityResult.rows[0];
+
+      // Get source BOM lines
+      const linesResult = await query(`
+        SELECT component_id, quantity, wastage_rate, notes
+        FROM bom_lines WHERE bom_id = $1
+      `, [activeBom.id]);
+
+      // Deactivate any existing scenario BOM for this ASIN
+      await query(`
+        UPDATE boms SET is_active = false, updated_at = CURRENT_TIMESTAMP
+        WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO' AND is_active = true
+      `, [asinEntityId]);
+
+      // Get next version number
+      const versionResult = await query(`
+        SELECT COALESCE(MAX(version), 0) + 1 as next_version
+        FROM boms WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO'
+      `, [asinEntityId]);
+      const nextVersion = versionResult.rows[0].next_version;
+
+      // Create new scenario BOM
+      const bomName = name || `Scenario BOM for ${entity.asin} (from listing #${listing_id})`;
+      const newBomResult = await query(`
+        INSERT INTO boms (asin_entity_id, scope_type, name, version, is_active, notes, created_by)
+        VALUES ($1, 'ASIN_SCENARIO', $2, $3, true, $4, 'user')
+        RETURNING *
+      `, [asinEntityId, bomName, nextVersion, `Cloned from listing #${listing_id} BOM #${activeBom.id}`]);
+
+      const newBom = newBomResult.rows[0];
+
+      // Copy lines to new BOM
+      for (const line of linesResult.rows) {
+        await query(`
+          INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [newBom.id, line.component_id, line.quantity, line.wastage_rate, line.notes]);
+      }
+
+      // Get the new BOM with lines and cost
+      const finalBom = await bomRepo.findById(newBom.id);
+
+      return reply.status(201).send(wrapResponse({
+        ...finalBom,
+        source_listing_id: listing_id,
+        source_bom_id: activeBom.id,
+        lines_copied: linesResult.rows.length,
+      }));
+    } catch (error) {
+      console.error('[API] POST /asins/:id/bom/clone-from-listing error:', error.message);
+      return reply.status(500).send({ success: false, error: error.message });
     }
   });
 
@@ -323,10 +575,15 @@ export async function registerV2Routes(fastify) {
    * Get active BOM for a listing
    */
   fastify.get('/api/v2/listings/:listingId/bom', async (request, reply) => {
-    const listingId = parseInt(request.params.listingId, 10);
-    const bom = await bomRepo.getActiveBom(listingId);
-    // Return null for no BOM - frontend handles this
-    return wrapResponse(bom || null);
+    try {
+      const listingId = parseInt(request.params.listingId, 10);
+      const bom = await bomRepo.getActiveBom(listingId);
+      // Return null for no BOM - frontend handles this
+      return wrapResponse(bom || null);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/bom error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
@@ -334,9 +591,14 @@ export async function registerV2Routes(fastify) {
    * Get all BOM versions for a listing
    */
   fastify.get('/api/v2/listings/:listingId/bom/history', async (request, reply) => {
-    const listingId = parseInt(request.params.listingId, 10);
-    const versions = await bomRepo.getVersionHistory(listingId);
-    return wrapResponse(versions);
+    try {
+      const listingId = parseInt(request.params.listingId, 10);
+      const versions = await bomRepo.getVersionHistory(listingId);
+      return wrapResponse(versions);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/bom/history error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
@@ -359,12 +621,17 @@ export async function registerV2Routes(fastify) {
    * Get a specific BOM by ID (any version)
    */
   fastify.get('/api/v2/boms/:bomId', async (request, reply) => {
-    const bomId = parseInt(request.params.bomId, 10);
-    const bom = await bomRepo.findById(bomId);
-    if (!bom) {
-      return reply.status(404).send({ success: false, error: 'BOM not found' });
+    try {
+      const bomId = parseInt(request.params.bomId, 10);
+      const bom = await bomRepo.findById(bomId);
+      if (!bom) {
+        return reply.status(404).send({ success: false, error: 'BOM not found' });
+      }
+      return wrapResponse(bom);
+    } catch (error) {
+      console.error('[API] GET /boms/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-    return wrapResponse(bom);
   });
 
   /**
@@ -393,9 +660,14 @@ export async function registerV2Routes(fastify) {
    * Get listings without a BOM
    */
   fastify.get('/api/v2/boms/missing', async (request, reply) => {
-    const { limit = '50' } = request.query;
-    const listings = await bomRepo.getListingsWithoutBom(parseInt(limit, 10));
-    return wrapResponse(listings);
+    try {
+      const { limit = '50' } = request.query;
+      const listings = await bomRepo.getListingsWithoutBom(parseInt(limit, 10));
+      return wrapResponse(listings);
+    } catch (error) {
+      console.error('[API] GET /boms/missing error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   // ============================================================================
@@ -443,14 +715,19 @@ export async function registerV2Routes(fastify) {
    * Body: { listing_ids: [1, 2, 3] }
    */
   fastify.post('/api/v2/economics/batch', async (request, reply) => {
-    const { listing_ids } = request.body;
+    try {
+      const { listing_ids } = request.body;
 
-    if (!Array.isArray(listing_ids)) {
-      return reply.status(400).send({ success: false, error: 'Expected listing_ids array in body' });
+      if (!Array.isArray(listing_ids)) {
+        return reply.status(400).send({ success: false, error: 'Expected listing_ids array in body' });
+      }
+
+      const results = await economicsService.calculateBatchEconomics(listing_ids);
+      return wrapResponse(results);
+    } catch (error) {
+      console.error('[API] POST /economics/batch error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    const results = await economicsService.calculateBatchEconomics(listing_ids);
-    return wrapResponse(results);
   });
 
   // ============================================================================
@@ -462,25 +739,30 @@ export async function registerV2Routes(fastify) {
    * Get cost overrides for a listing
    */
   fastify.get('/api/v2/listings/:listingId/cost-overrides', async (request, reply) => {
-    const listingId = parseInt(request.params.listingId, 10);
-    const { query: dbQuery } = await import('../database/connection.js');
+    try {
+      const listingId = parseInt(request.params.listingId, 10);
+      const { query: dbQuery } = await import('../database/connection.js');
 
-    const result = await dbQuery(`
-      SELECT * FROM listing_cost_overrides WHERE listing_id = $1
-    `, [listingId]);
+      const result = await dbQuery(`
+        SELECT * FROM listing_cost_overrides WHERE listing_id = $1
+      `, [listingId]);
 
-    if (result.rows.length === 0) {
-      return wrapResponse({
-        listing_id: listingId,
-        shipping_cost_ex_vat: 0,
-        packaging_cost_ex_vat: 0,
-        handling_cost_ex_vat: 0,
-        other_cost_ex_vat: 0,
-        notes: null,
-      });
+      if (result.rows.length === 0) {
+        return wrapResponse({
+          listing_id: listingId,
+          shipping_cost_ex_vat: 0,
+          packaging_cost_ex_vat: 0,
+          handling_cost_ex_vat: 0,
+          other_cost_ex_vat: 0,
+          notes: null,
+        });
+      }
+
+      return wrapResponse(result.rows[0]);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/cost-overrides error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    return wrapResponse(result.rows[0]);
   });
 
   /**
@@ -489,38 +771,43 @@ export async function registerV2Routes(fastify) {
    * Body: { shipping_cost_ex_vat?, packaging_cost_ex_vat?, handling_cost_ex_vat?, other_cost_ex_vat?, notes? }
    */
   fastify.put('/api/v2/listings/:listingId/cost-overrides', async (request, reply) => {
-    const listingId = parseInt(request.params.listingId, 10);
-    const { query: dbQuery } = await import('../database/connection.js');
+    try {
+      const listingId = parseInt(request.params.listingId, 10);
+      const { query: dbQuery } = await import('../database/connection.js');
 
-    const {
-      shipping_cost_ex_vat,
-      packaging_cost_ex_vat,
-      handling_cost_ex_vat,
-      other_cost_ex_vat,
-      notes,
-    } = request.body;
+      const {
+        shipping_cost_ex_vat,
+        packaging_cost_ex_vat,
+        handling_cost_ex_vat,
+        other_cost_ex_vat,
+        notes,
+      } = request.body;
 
-    const result = await dbQuery(`
-      INSERT INTO listing_cost_overrides (listing_id, shipping_cost_ex_vat, packaging_cost_ex_vat, handling_cost_ex_vat, other_cost_ex_vat, notes)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (listing_id) DO UPDATE SET
-        shipping_cost_ex_vat = COALESCE($2, listing_cost_overrides.shipping_cost_ex_vat),
-        packaging_cost_ex_vat = COALESCE($3, listing_cost_overrides.packaging_cost_ex_vat),
-        handling_cost_ex_vat = COALESCE($4, listing_cost_overrides.handling_cost_ex_vat),
-        other_cost_ex_vat = COALESCE($5, listing_cost_overrides.other_cost_ex_vat),
-        notes = COALESCE($6, listing_cost_overrides.notes),
-        updated_at = CURRENT_TIMESTAMP
-      RETURNING *
-    `, [
-      listingId,
-      shipping_cost_ex_vat ?? 0,
-      packaging_cost_ex_vat ?? 0,
-      handling_cost_ex_vat ?? 0,
-      other_cost_ex_vat ?? 0,
-      notes ?? null,
-    ]);
+      const result = await dbQuery(`
+        INSERT INTO listing_cost_overrides (listing_id, shipping_cost_ex_vat, packaging_cost_ex_vat, handling_cost_ex_vat, other_cost_ex_vat, notes)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (listing_id) DO UPDATE SET
+          shipping_cost_ex_vat = COALESCE($2, listing_cost_overrides.shipping_cost_ex_vat),
+          packaging_cost_ex_vat = COALESCE($3, listing_cost_overrides.packaging_cost_ex_vat),
+          handling_cost_ex_vat = COALESCE($4, listing_cost_overrides.handling_cost_ex_vat),
+          other_cost_ex_vat = COALESCE($5, listing_cost_overrides.other_cost_ex_vat),
+          notes = COALESCE($6, listing_cost_overrides.notes),
+          updated_at = CURRENT_TIMESTAMP
+        RETURNING *
+      `, [
+        listingId,
+        shipping_cost_ex_vat ?? 0,
+        packaging_cost_ex_vat ?? 0,
+        handling_cost_ex_vat ?? 0,
+        other_cost_ex_vat ?? 0,
+        notes ?? null,
+      ]);
 
-    return wrapResponse(result.rows[0]);
+      return wrapResponse(result.rows[0]);
+    } catch (error) {
+      console.error('[API] PUT /listings/:id/cost-overrides error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   // ============================================================================
@@ -532,19 +819,24 @@ export async function registerV2Routes(fastify) {
    * Get all settings
    */
   fastify.get('/api/v2/settings', async (request, reply) => {
-    const { query: dbQuery } = await import('../database/connection.js');
-    const result = await dbQuery('SELECT key, value, description FROM settings ORDER BY key');
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
+      const result = await dbQuery('SELECT key, value, description FROM settings ORDER BY key');
 
-    // Convert to object format
-    const settings = {};
-    for (const row of result.rows) {
-      settings[row.key] = {
-        value: row.value,
-        description: row.description,
-      };
+      // Convert to object format
+      const settings = {};
+      for (const row of result.rows) {
+        settings[row.key] = {
+          value: row.value,
+          description: row.description,
+        };
+      }
+
+      return wrapResponse(settings);
+    } catch (error) {
+      console.error('[API] GET /settings error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    return wrapResponse(settings);
   });
 
   /**
@@ -553,20 +845,25 @@ export async function registerV2Routes(fastify) {
    * Body: { key: value, ... }
    */
   fastify.put('/api/v2/settings', async (request, reply) => {
-    const { query: dbQuery } = await import('../database/connection.js');
-    const updates = request.body;
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
+      const updates = request.body;
 
-    for (const [key, value] of Object.entries(updates)) {
-      await dbQuery(`
-        INSERT INTO settings (key, value)
-        VALUES ($1, $2)
-        ON CONFLICT (key) DO UPDATE SET
-          value = $2,
-          "updatedAt" = CURRENT_TIMESTAMP
-      `, [key, JSON.stringify(value)]);
+      for (const [key, value] of Object.entries(updates)) {
+        await dbQuery(`
+          INSERT INTO settings (key, value)
+          VALUES ($1, $2)
+          ON CONFLICT (key) DO UPDATE SET
+            value = $2,
+            "updatedAt" = CURRENT_TIMESTAMP
+        `, [key, JSON.stringify(value)]);
+      }
+
+      return wrapResponse({ updated: true });
+    } catch (error) {
+      console.error('[API] PUT /settings error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    return wrapResponse({ updated: true });
   });
 
   // ============================================================================
@@ -2480,6 +2777,114 @@ export async function registerV2Routes(fastify) {
         });
       }
       console.error('[API] ML stats error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  // ============================================================================
+  // BUY BOX
+  // ============================================================================
+
+  /**
+   * GET /api/v2/listings/:listingId/buybox
+   * Get Buy Box status for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/buybox', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+
+      const status = await buyboxService.getBuyBoxStatusByListing(listingId);
+      return wrapResponse(status);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/buybox error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/listings/:listingId/buybox/metrics
+   * Get Buy Box competitive metrics for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/buybox/metrics', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+
+      const metrics = await buyboxService.getBuyBoxCompetitiveMetrics(listingId);
+      return wrapResponse(metrics);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/buybox/metrics error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/listings/:listingId/buybox/history
+   * Get Buy Box history for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/buybox/history', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+      const { days = '30' } = request.query;
+
+      const history = await buyboxService.getBuyBoxHistory(listingId, parseInt(days, 10));
+      return wrapResponse(history);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/buybox/history error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/listings/:listingId/buybox/snapshot
+   * Record a Buy Box snapshot for a listing
+   * Body: { buy_box_status, buy_box_price_inc_vat?, buy_box_seller?, is_our_offer }
+   */
+  fastify.post('/api/v2/listings/:listingId/buybox/snapshot', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+      const { buy_box_status, buy_box_price_inc_vat, buy_box_seller, is_our_offer } = request.body;
+
+      if (!buy_box_status) {
+        return reply.status(400).send(wrapResponse(null, 'buy_box_status is required'));
+      }
+
+      const validStatuses = Object.values(buyboxService.BUY_BOX_STATUS);
+      if (!validStatuses.includes(buy_box_status)) {
+        return reply.status(400).send(wrapResponse(null, `Invalid buy_box_status. Valid values: ${validStatuses.join(', ')}`));
+      }
+
+      const snapshot = await buyboxService.recordBuyBoxSnapshot({
+        listingId,
+        buyBoxStatus: buy_box_status,
+        buyBoxPriceIncVat: buy_box_price_inc_vat || null,
+        buyBoxSeller: buy_box_seller || null,
+        isOurOffer: is_our_offer ?? false,
+      });
+
+      return reply.status(201).send(wrapResponse(snapshot));
+    } catch (error) {
+      console.error('[API] POST /listings/:id/buybox/snapshot error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/asins/:id/buybox
+   * Get Buy Box status for an ASIN entity
+   */
+  fastify.get('/api/v2/asins/:id/buybox', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const asinEntityId = parseInt(request.params.id, 10);
+
+      const status = await buyboxService.getBuyBoxStatusByAsin(asinEntityId);
+      return wrapResponse(status);
+    } catch (error) {
+      console.error('[API] GET /asins/:id/buybox error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
