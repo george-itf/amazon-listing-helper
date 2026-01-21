@@ -1,37 +1,25 @@
 /**
  * Repository Index
- * Central export point for all repositories
+ * Central export point for all active repositories
+ *
+ * Note: Unused repositories have been removed:
+ * - score.repository.js (legacy scoring system)
+ * - alert.repository.js (alerts not implemented)
+ * - keepa.repository.js (logic moved to keepa.service.js)
+ * - settings.repository.js (settings loaded via direct SQL)
+ * - order.repository.js (orders sync not implemented)
+ * - task.repository.js (replaced by job.repository.js)
  */
 
 import listingRepository from './listing.repository.js';
-import scoreRepository from './score.repository.js';
-import taskRepository from './task.repository.js';
-import alertRepository from './alert.repository.js';
-import keepaRepository from './keepa.repository.js';
-import settingsRepository from './settings.repository.js';
 
 export {
   listingRepository,
-  scoreRepository,
-  taskRepository,
-  alertRepository,
-  keepaRepository,
-  settingsRepository,
 };
 
 // Re-export individual functions if needed
 export * as listing from './listing.repository.js';
-export * as score from './score.repository.js';
-export * as task from './task.repository.js';
-export * as alert from './alert.repository.js';
-export * as keepa from './keepa.repository.js';
-export * as settings from './settings.repository.js';
 
 export default {
   listing: listingRepository,
-  score: scoreRepository,
-  task: taskRepository,
-  alert: alertRepository,
-  keepa: keepaRepository,
-  settings: settingsRepository,
 };

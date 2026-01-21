@@ -147,8 +147,8 @@ export async function computeListingFeatures(listingId) {
     buyBoxRisk = 'HIGH';
   }
 
-  // Calculate anomaly scores (simple Z-score based)
-  const salesAnomalyScore = calculateSalesAnomalyScore(salesVelocity, listing.id);
+  // Calculate anomaly scores using Z-score analysis
+  const salesAnomalyScore = await calculateSalesAnomalyScore(salesVelocity, listing.id);
 
   // Build features object per DATA_CONTRACTS.md §9.3
   const features = {
@@ -379,22 +379,61 @@ export async function getFeatureHistory(entityType, entityId, limit = 30) {
 }
 
 /**
- * Calculate sales anomaly score
- * Simple implementation - would be more sophisticated in production
+ * Calculate sales anomaly score using Z-score analysis
+ * Compares recent sales velocity against historical average
  *
- * @param {number} currentVelocity
- * @param {number} listingId
- * @returns {number} Anomaly score (0-1, higher = more anomalous)
+ * @param {number} currentVelocity - Current daily sales velocity
+ * @param {number} listingId - Listing ID to get historical data
+ * @returns {Promise<number>} Anomaly score (0-1, higher = more anomalous)
  */
-function calculateSalesAnomalyScore(currentVelocity, listingId) {
-  // For a proper implementation, we would:
-  // 1. Get historical velocity data
-  // 2. Calculate rolling average and std dev
-  // 3. Compute Z-score
-  // 4. Convert to 0-1 score
+async function calculateSalesAnomalyScore(currentVelocity, listingId) {
+  try {
+    // Get historical daily sales for the past 90 days
+    const result = await query(`
+      SELECT
+        AVG(units)::numeric as avg_units,
+        STDDEV(units)::numeric as stddev_units,
+        COUNT(*) as days_count
+      FROM listing_sales_daily
+      WHERE listing_id = $1
+        AND date >= CURRENT_DATE - INTERVAL '90 days'
+        AND date < CURRENT_DATE - INTERVAL '7 days'
+    `, [listingId]);
 
-  // Simple placeholder: return low score
-  return 0;
+    const stats = result.rows[0];
+    const avgUnits = parseFloat(stats.avg_units) || 0;
+    const stddevUnits = parseFloat(stats.stddev_units) || 0;
+    const daysCount = parseInt(stats.days_count, 10) || 0;
+
+    // Need at least 14 days of history for meaningful stats
+    if (daysCount < 14 || stddevUnits === 0) {
+      return 0; // Not enough data to detect anomalies
+    }
+
+    // Calculate Z-score: how many standard deviations from mean
+    const zScore = (currentVelocity - avgUnits) / stddevUnits;
+
+    // Convert Z-score to 0-1 anomaly score
+    // We care about negative anomalies (sales drops) more than positive
+    // Z-score of -2 or lower = high anomaly (0.8+)
+    // Z-score of -1 to -2 = moderate anomaly (0.4-0.8)
+    // Z-score of 0 to -1 = low anomaly (0-0.4)
+    // Positive Z-scores (sales increases) = 0 (not an anomaly)
+
+    if (zScore >= 0) {
+      return 0; // Sales are normal or above average
+    }
+
+    // Normalize negative Z-score to 0-1 range
+    // Z=-1 maps to ~0.3, Z=-2 maps to ~0.7, Z=-3 maps to ~0.9
+    const absZ = Math.abs(zScore);
+    const anomalyScore = Math.min(1, 1 - Math.exp(-absZ * 0.5));
+
+    return Math.round(anomalyScore * 100) / 100;
+  } catch (error) {
+    console.warn('[FeatureStore] Error calculating anomaly score:', error.message);
+    return 0; // Default to no anomaly on error
+  }
 }
 
 export default {

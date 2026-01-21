@@ -360,11 +360,179 @@ export async function registerV2Routes(fastify) {
         const bom = await bomRepo.createVersion(listing_id, { lines: lines || [], notes });
         return reply.status(201).send(wrapResponse(bom));
       } else {
-        // For ASIN_SCENARIO BOMs, we need a different creation path
-        return reply.status(400).send({ success: false, error: 'ASIN_SCENARIO BOMs must be created via cloning' });
+        // For ASIN_SCENARIO BOMs, use the clone endpoints
+        return reply.status(400).send({
+          success: false,
+          error: 'ASIN_SCENARIO BOMs must be created via cloning. Use POST /api/v2/boms/:bomId/clone or POST /api/v2/asins/:id/bom/clone-from-listing',
+        });
       }
     } catch (error) {
       return reply.status(400).send({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/boms/:bomId/clone
+   * Clone a BOM to create an ASIN scenario BOM
+   * Body: { asin_entity_id, name? }
+   */
+  fastify.post('/api/v2/boms/:bomId/clone', async (request, reply) => {
+    const sourceBomId = parseInt(request.params.bomId, 10);
+    const { asin_entity_id, name } = request.body;
+
+    if (!asin_entity_id) {
+      return reply.status(400).send({ success: false, error: 'asin_entity_id is required' });
+    }
+
+    try {
+      // Get source BOM with lines
+      const sourceBom = await bomRepo.findById(sourceBomId);
+      if (!sourceBom) {
+        return reply.status(404).send({ success: false, error: 'Source BOM not found' });
+      }
+
+      // Verify ASIN entity exists
+      const entityResult = await query('SELECT id, asin FROM asin_entities WHERE id = $1', [asin_entity_id]);
+      if (entityResult.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'ASIN entity not found' });
+      }
+
+      const entity = entityResult.rows[0];
+
+      // Get source BOM lines
+      const linesResult = await query(`
+        SELECT component_id, quantity, wastage_rate, notes
+        FROM bom_lines WHERE bom_id = $1
+      `, [sourceBomId]);
+
+      // Deactivate any existing scenario BOM for this ASIN
+      await query(`
+        UPDATE boms SET is_active = false, updated_at = CURRENT_TIMESTAMP
+        WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO' AND is_active = true
+      `, [asin_entity_id]);
+
+      // Get next version number
+      const versionResult = await query(`
+        SELECT COALESCE(MAX(version), 0) + 1 as next_version
+        FROM boms WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO'
+      `, [asin_entity_id]);
+      const nextVersion = versionResult.rows[0].next_version;
+
+      // Create new scenario BOM
+      const bomName = name || `Scenario BOM for ${entity.asin} (cloned from BOM #${sourceBomId})`;
+      const newBomResult = await query(`
+        INSERT INTO boms (asin_entity_id, scope_type, name, version, is_active, notes, created_by)
+        VALUES ($1, 'ASIN_SCENARIO', $2, $3, true, $4, 'user')
+        RETURNING *
+      `, [asin_entity_id, bomName, nextVersion, `Cloned from BOM #${sourceBomId}`]);
+
+      const newBom = newBomResult.rows[0];
+
+      // Copy lines to new BOM
+      for (const line of linesResult.rows) {
+        await query(`
+          INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [newBom.id, line.component_id, line.quantity, line.wastage_rate, line.notes]);
+      }
+
+      // Get the new BOM with lines and cost
+      const finalBom = await bomRepo.findById(newBom.id);
+
+      return reply.status(201).send(wrapResponse({
+        ...finalBom,
+        source_bom_id: sourceBomId,
+        lines_copied: linesResult.rows.length,
+      }));
+    } catch (error) {
+      console.error('[API] POST /boms/:id/clone error:', error.message);
+      return reply.status(500).send({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/asins/:id/bom/clone-from-listing
+   * Clone a listing's active BOM to create an ASIN scenario BOM
+   * Body: { listing_id, name? }
+   */
+  fastify.post('/api/v2/asins/:id/bom/clone-from-listing', async (request, reply) => {
+    const asinEntityId = parseInt(request.params.id, 10);
+    const { listing_id, name } = request.body;
+
+    if (!listing_id) {
+      return reply.status(400).send({ success: false, error: 'listing_id is required' });
+    }
+
+    try {
+      // Verify ASIN entity exists
+      const entityResult = await query('SELECT id, asin FROM asin_entities WHERE id = $1', [asinEntityId]);
+      if (entityResult.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'ASIN entity not found' });
+      }
+
+      // Get active BOM for the listing
+      const activeBom = await bomRepo.getActiveBom(listing_id);
+      if (!activeBom) {
+        return reply.status(404).send({ success: false, error: 'No active BOM found for the specified listing' });
+      }
+
+      // Forward to the clone endpoint logic
+      request.params.bomId = activeBom.id;
+      request.body.asin_entity_id = asinEntityId;
+      request.body.name = name;
+
+      // Reuse the clone logic via internal call
+      const entity = entityResult.rows[0];
+
+      // Get source BOM lines
+      const linesResult = await query(`
+        SELECT component_id, quantity, wastage_rate, notes
+        FROM bom_lines WHERE bom_id = $1
+      `, [activeBom.id]);
+
+      // Deactivate any existing scenario BOM for this ASIN
+      await query(`
+        UPDATE boms SET is_active = false, updated_at = CURRENT_TIMESTAMP
+        WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO' AND is_active = true
+      `, [asinEntityId]);
+
+      // Get next version number
+      const versionResult = await query(`
+        SELECT COALESCE(MAX(version), 0) + 1 as next_version
+        FROM boms WHERE asin_entity_id = $1 AND scope_type = 'ASIN_SCENARIO'
+      `, [asinEntityId]);
+      const nextVersion = versionResult.rows[0].next_version;
+
+      // Create new scenario BOM
+      const bomName = name || `Scenario BOM for ${entity.asin} (from listing #${listing_id})`;
+      const newBomResult = await query(`
+        INSERT INTO boms (asin_entity_id, scope_type, name, version, is_active, notes, created_by)
+        VALUES ($1, 'ASIN_SCENARIO', $2, $3, true, $4, 'user')
+        RETURNING *
+      `, [asinEntityId, bomName, nextVersion, `Cloned from listing #${listing_id} BOM #${activeBom.id}`]);
+
+      const newBom = newBomResult.rows[0];
+
+      // Copy lines to new BOM
+      for (const line of linesResult.rows) {
+        await query(`
+          INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [newBom.id, line.component_id, line.quantity, line.wastage_rate, line.notes]);
+      }
+
+      // Get the new BOM with lines and cost
+      const finalBom = await bomRepo.findById(newBom.id);
+
+      return reply.status(201).send(wrapResponse({
+        ...finalBom,
+        source_listing_id: listing_id,
+        source_bom_id: activeBom.id,
+        lines_copied: linesResult.rows.length,
+      }));
+    } catch (error) {
+      console.error('[API] POST /asins/:id/bom/clone-from-listing error:', error.message);
+      return reply.status(500).send({ success: false, error: error.message });
     }
   });
 
@@ -2609,6 +2777,114 @@ export async function registerV2Routes(fastify) {
         });
       }
       console.error('[API] ML stats error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  // ============================================================================
+  // BUY BOX
+  // ============================================================================
+
+  /**
+   * GET /api/v2/listings/:listingId/buybox
+   * Get Buy Box status for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/buybox', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+
+      const status = await buyboxService.getBuyBoxStatusByListing(listingId);
+      return wrapResponse(status);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/buybox error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/listings/:listingId/buybox/metrics
+   * Get Buy Box competitive metrics for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/buybox/metrics', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+
+      const metrics = await buyboxService.getBuyBoxCompetitiveMetrics(listingId);
+      return wrapResponse(metrics);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/buybox/metrics error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/listings/:listingId/buybox/history
+   * Get Buy Box history for a listing
+   */
+  fastify.get('/api/v2/listings/:listingId/buybox/history', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+      const { days = '30' } = request.query;
+
+      const history = await buyboxService.getBuyBoxHistory(listingId, parseInt(days, 10));
+      return wrapResponse(history);
+    } catch (error) {
+      console.error('[API] GET /listings/:id/buybox/history error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/listings/:listingId/buybox/snapshot
+   * Record a Buy Box snapshot for a listing
+   * Body: { buy_box_status, buy_box_price_inc_vat?, buy_box_seller?, is_our_offer }
+   */
+  fastify.post('/api/v2/listings/:listingId/buybox/snapshot', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+      const { buy_box_status, buy_box_price_inc_vat, buy_box_seller, is_our_offer } = request.body;
+
+      if (!buy_box_status) {
+        return reply.status(400).send(wrapResponse(null, 'buy_box_status is required'));
+      }
+
+      const validStatuses = Object.values(buyboxService.BUY_BOX_STATUS);
+      if (!validStatuses.includes(buy_box_status)) {
+        return reply.status(400).send(wrapResponse(null, `Invalid buy_box_status. Valid values: ${validStatuses.join(', ')}`));
+      }
+
+      const snapshot = await buyboxService.recordBuyBoxSnapshot({
+        listingId,
+        buyBoxStatus: buy_box_status,
+        buyBoxPriceIncVat: buy_box_price_inc_vat || null,
+        buyBoxSeller: buy_box_seller || null,
+        isOurOffer: is_our_offer ?? false,
+      });
+
+      return reply.status(201).send(wrapResponse(snapshot));
+    } catch (error) {
+      console.error('[API] POST /listings/:id/buybox/snapshot error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/asins/:id/buybox
+   * Get Buy Box status for an ASIN entity
+   */
+  fastify.get('/api/v2/asins/:id/buybox', async (request, reply) => {
+    try {
+      const buyboxService = await import('../services/buybox.service.js');
+      const asinEntityId = parseInt(request.params.id, 10);
+
+      const status = await buyboxService.getBuyBoxStatusByAsin(asinEntityId);
+      return wrapResponse(status);
+    } catch (error) {
+      console.error('[API] GET /asins/:id/buybox error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
