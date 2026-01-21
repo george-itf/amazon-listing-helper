@@ -30,6 +30,21 @@ import { query, transaction } from '../database/connection.js';
  * @param {number} listingId
  * @returns {Promise<Object>} Complete feature vector
  */
+/**
+ * Safely compute features, returning empty object on table-missing errors
+ */
+async function safeComputeFeatures(fn, name) {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error.message?.includes('does not exist')) {
+      console.warn(`[MLFeatures] Skipping ${name}: table does not exist`);
+      return {};
+    }
+    throw error;
+  }
+}
+
 export async function computeListingFeatures(listingId) {
   const features = {};
 
@@ -40,26 +55,47 @@ export async function computeListingFeatures(listingId) {
   // 1. Core Product Features
   Object.assign(features, computeCoreFeatures(listing));
 
-  // 2. Price Features
-  Object.assign(features, await computePriceFeatures(listingId, listing));
+  // 2. Price Features (may use keepa_snapshots)
+  Object.assign(features, await safeComputeFeatures(
+    () => computePriceFeatures(listingId, listing),
+    'priceFeatures'
+  ));
 
-  // 3. Sales Features
-  Object.assign(features, await computeSalesFeatures(listingId));
+  // 3. Sales Features (uses listing_sales_daily)
+  Object.assign(features, await safeComputeFeatures(
+    () => computeSalesFeatures(listingId),
+    'salesFeatures'
+  ));
 
   // 4. Inventory Features
-  Object.assign(features, await computeInventoryFeatures(listingId, listing));
+  Object.assign(features, await safeComputeFeatures(
+    () => computeInventoryFeatures(listingId, listing),
+    'inventoryFeatures'
+  ));
 
-  // 5. Competitive Features
-  Object.assign(features, await computeCompetitiveFeatures(listing.asin));
+  // 5. Competitive Features (uses keepa_snapshots)
+  Object.assign(features, await safeComputeFeatures(
+    () => computeCompetitiveFeatures(listing.asin),
+    'competitiveFeatures'
+  ));
 
   // 6. Traffic Features
-  Object.assign(features, await computeTrafficFeatures(listing.asin));
+  Object.assign(features, await safeComputeFeatures(
+    () => computeTrafficFeatures(listing.asin),
+    'trafficFeatures'
+  ));
 
-  // 7. Financial Features
-  Object.assign(features, await computeFinancialFeatures(listingId, listing));
+  // 7. Financial Features (uses boms, components)
+  Object.assign(features, await safeComputeFeatures(
+    () => computeFinancialFeatures(listingId, listing),
+    'financialFeatures'
+  ));
 
-  // 8. Time-Series Features
-  Object.assign(features, await computeTimeSeriesFeatures(listingId, listing.asin));
+  // 8. Time-Series Features (uses listing_sales_daily, keepa_snapshots)
+  Object.assign(features, await safeComputeFeatures(
+    () => computeTimeSeriesFeatures(listingId, listing.asin),
+    'timeSeriesFeatures'
+  ));
 
   // 9. Derived/Interaction Features
   Object.assign(features, computeDerivedFeatures(features));

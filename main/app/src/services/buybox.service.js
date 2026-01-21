@@ -44,30 +44,41 @@ export const BUY_BOX_STATUS = {
  * @returns {Promise<Object>} Buy Box status data
  */
 export async function getBuyBoxStatusByListing(listingId) {
+  const defaultResult = {
+    listing_id: listingId,
+    status: BUY_BOX_STATUS.UNKNOWN,
+    owner: null,
+    price_inc_vat: null,
+    is_ours: null,
+    captured_at: null,
+    source: 'none',
+  };
+
   // Try to get from listing_offer_current table
-  const result = await query(`
-    SELECT
-      buy_box_status,
-      buy_box_price_inc_vat,
-      buy_box_seller,
-      is_our_offer,
-      captured_at
-    FROM listing_offer_current
-    WHERE listing_id = $1
-    ORDER BY captured_at DESC
-    LIMIT 1
-  `, [listingId]);
+  let result;
+  try {
+    result = await query(`
+      SELECT
+        buy_box_status,
+        buy_box_price_inc_vat,
+        buy_box_seller,
+        is_our_offer,
+        captured_at
+      FROM listing_offer_current
+      WHERE listing_id = $1
+      ORDER BY captured_at DESC
+      LIMIT 1
+    `, [listingId]);
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      return defaultResult;
+    }
+    throw error;
+  }
 
   if (result.rows.length === 0) {
-    return {
-      listing_id: listingId,
-      status: BUY_BOX_STATUS.UNKNOWN,
-      owner: null,
-      price_inc_vat: null,
-      is_ours: null,
-      captured_at: null,
-      source: 'none',
-    };
+    return defaultResult;
   }
 
   const row = result.rows[0];
@@ -88,36 +99,47 @@ export async function getBuyBoxStatusByListing(listingId) {
  * @returns {Promise<Object>} Buy Box status data
  */
 export async function getBuyBoxStatusByAsin(asinEntityId) {
+  const defaultResult = {
+    asin_entity_id: asinEntityId,
+    status: BUY_BOX_STATUS.UNKNOWN,
+    owner: null,
+    price_inc_vat: null,
+    is_amazon: null,
+    captured_at: null,
+    source: 'none',
+  };
+
   // Get ASIN entity info and latest Keepa snapshot
   // Buy box data is stored in parsed_json JSONB column
-  const result = await query(`
-    SELECT
-      ae.id as asin_entity_id,
-      ae.asin,
-      ae.listing_id,
-      ks.parsed_json,
-      ks.captured_at
-    FROM asin_entities ae
-    LEFT JOIN LATERAL (
-      SELECT parsed_json, captured_at
-      FROM keepa_snapshots
-      WHERE asin_entity_id = ae.id
-      ORDER BY captured_at DESC
-      LIMIT 1
-    ) ks ON true
-    WHERE ae.id = $1
-  `, [asinEntityId]);
+  let result;
+  try {
+    result = await query(`
+      SELECT
+        ae.id as asin_entity_id,
+        ae.asin,
+        ae.listing_id,
+        ks.parsed_json,
+        ks.captured_at
+      FROM asin_entities ae
+      LEFT JOIN LATERAL (
+        SELECT parsed_json, captured_at
+        FROM keepa_snapshots
+        WHERE asin_entity_id = ae.id
+        ORDER BY captured_at DESC
+        LIMIT 1
+      ) ks ON true
+      WHERE ae.id = $1
+    `, [asinEntityId]);
+  } catch (error) {
+    // Handle missing tables gracefully
+    if (error.message?.includes('does not exist')) {
+      return defaultResult;
+    }
+    throw error;
+  }
 
   if (result.rows.length === 0) {
-    return {
-      asin_entity_id: asinEntityId,
-      status: BUY_BOX_STATUS.UNKNOWN,
-      owner: null,
-      price_inc_vat: null,
-      is_amazon: null,
-      captured_at: null,
-      source: 'none',
-    };
+    return defaultResult;
   }
 
   const row = result.rows[0];
