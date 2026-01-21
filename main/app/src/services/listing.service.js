@@ -36,7 +36,8 @@ export async function getSalesVelocity(listingId, days = 30) {
       AND date >= CURRENT_DATE - ($2 || ' days')::interval
   `, [listingId, days]);
 
-  const totalUnits = parseInt(result.rows[0]?.total_units || 0, 10);
+  const rawUnits = parseInt(result.rows[0]?.total_units || 0, 10);
+  const totalUnits = isNaN(rawUnits) ? 0 : rawUnits;
   const velocity = totalUnits / days;
 
   return {

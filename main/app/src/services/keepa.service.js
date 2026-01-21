@@ -231,6 +231,9 @@ function calculateTrend(csvData, days = 90) {
   const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
   const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
 
+  // Guard against division by zero
+  if (firstAvg === 0) return null;
+
   return Math.round((secondAvg - firstAvg) / firstAvg * 1000) / 1000;
 }
 
