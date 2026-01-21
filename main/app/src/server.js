@@ -99,6 +99,18 @@ function sanitizeASIN(asin) {
 }
 
 function loadCreds() {
+  // First, try environment variables (Railway/cloud deployment)
+  if (process.env.SP_API_REFRESH_TOKEN || process.env.SP_API_CLIENT_ID) {
+    return {
+      refreshToken: process.env.SP_API_REFRESH_TOKEN,
+      clientId: process.env.SP_API_CLIENT_ID,
+      clientSecret: process.env.SP_API_CLIENT_SECRET,
+      sellerId: process.env.SP_API_SELLER_ID,
+      marketplaceId: process.env.SP_API_MARKETPLACE_ID || 'A1F83G8C2ARO7P',
+      keepaKey: process.env.KEEPA_API_KEY,
+    };
+  }
+  // Fall back to credentials file (local development)
   try {
     if (fs.existsSync(CREDS_FILE)) return JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
   } catch (e) { console.error(e); }

@@ -17,15 +17,29 @@ const CREDENTIALS_FILE = join(DATA_DIR, 'credentials.json');
 let cachedCredentials = null;
 
 /**
- * Load credentials from file (with caching)
+ * Load credentials from environment variables (for Railway/cloud) or file (for local)
  * @returns {Object} Raw credentials object
- * @throws {Error} If credentials file doesn't exist or is invalid
+ * @throws {Error} If no credentials found
  */
 function loadCredentials() {
   if (cachedCredentials) {
     return cachedCredentials;
   }
 
+  // First, try environment variables (Railway deployment)
+  if (process.env.SP_API_REFRESH_TOKEN || process.env.SP_API_CLIENT_ID) {
+    cachedCredentials = {
+      refreshToken: process.env.SP_API_REFRESH_TOKEN,
+      clientId: process.env.SP_API_CLIENT_ID,
+      clientSecret: process.env.SP_API_CLIENT_SECRET,
+      sellerId: process.env.SP_API_SELLER_ID,
+      marketplaceId: process.env.SP_API_MARKETPLACE_ID || 'A1F83G8C2ARO7P',
+      keepaKey: process.env.KEEPA_API_KEY,
+    };
+    return cachedCredentials;
+  }
+
+  // Fall back to credentials file (local development)
   if (!existsSync(CREDENTIALS_FILE)) {
     throw new Error(`Credentials file not found: ${CREDENTIALS_FILE}`);
   }
