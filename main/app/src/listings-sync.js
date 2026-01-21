@@ -23,13 +23,14 @@ function getSpClient() {
     credentials: config.credentials,
     options: {
       ...config.options,
-      debug_log: true,
+      debug_log: process.env.DEBUG === 'true',
     },
   });
 }
 
 /**
- * Test SP-API connection by making a simple API call
+ * Test SP-API connection by making a lightweight read-only API call
+ * Uses getMarketplaceParticipations which doesn't create any resources
  * @returns {Promise<Object>} Connection test result
  */
 export async function testConnection() {
@@ -43,28 +44,28 @@ export async function testConnection() {
   }
 
   try {
-    // Test connection by requesting a listings report - same operation used by sync
-    // This validates the refresh token and Reports API access in one call
-    const marketplaceId = getDefaultMarketplaceId();
-
+    // Use getMarketplaceParticipations - a lightweight read-only call
+    // This validates the refresh token without creating orphan reports
     const response = await sp.callAPI({
-      operation: 'createReport',
-      endpoint: 'reports',
-      body: {
-        reportType: 'GET_MERCHANT_LISTINGS_ALL_DATA',
-        marketplaceIds: [marketplaceId],
-      },
+      operation: 'getMarketplaceParticipations',
+      endpoint: 'sellers',
     });
 
-    // If we get here, connection works - we created a report
-    // Note: This will create an actual report request, but that's fine
-    console.log('[ListingsSync] Connection test successful, report requested:', response.reportId);
+    // Extract marketplace info for useful response
+    const marketplaces = response?.payload?.map(p => ({
+      id: p.marketplace?.id,
+      name: p.marketplace?.name,
+      countryCode: p.marketplace?.countryCode,
+      isParticipating: p.participation?.isParticipating,
+    })) || [];
+
+    console.log(`[ListingsSync] Connection test successful, ${marketplaces.length} marketplace(s) found`);
 
     return {
       success: true,
       configured: true,
       message: 'SP-API connection successful',
-      report_id: response.reportId,
+      marketplaces,
     };
   } catch (error) {
     console.error('[ListingsSync] Connection test failed:', error);
@@ -299,23 +300,30 @@ export async function syncListings(options = {}) {
 
     if (!options.dryRun) {
       results.stage = 'saving';
-      // Upsert each listing
-      for (const listing of listings) {
-        try {
-          const existing = await listingRepo.getBySku(listing.sku);
-          await listingRepo.upsert(listing);
 
-          if (existing) {
+      // Bulk upsert all listings in a single query (eliminates N+1 problem)
+      try {
+        const bulkResult = await listingRepo.bulkUpsert(listings);
+        results.listingsCreated = bulkResult.created;
+        results.listingsUpdated = bulkResult.updated;
+        console.log(`[ListingsSync] Bulk upsert complete: ${bulkResult.created} created, ${bulkResult.updated} updated`);
+      } catch (error) {
+        console.error(`[ListingsSync] Bulk upsert failed:`, error.message);
+
+        // Fallback to individual upserts if bulk fails (e.g., one bad record)
+        console.log('[ListingsSync] Falling back to individual upserts...');
+        for (const listing of listings) {
+          try {
+            await listingRepo.upsert(listing);
+            // Can't easily distinguish created vs updated in fallback mode
             results.listingsUpdated++;
-          } else {
-            results.listingsCreated++;
+          } catch (err) {
+            console.error(`[ListingsSync] Error saving ${listing.sku}:`, err.message);
+            results.errors.push({
+              sku: listing.sku,
+              error: err.message,
+            });
           }
-        } catch (error) {
-          console.error(`[ListingsSync] Error saving ${listing.sku}:`, error.message);
-          results.errors.push({
-            sku: listing.sku,
-            error: error.message,
-          });
         }
       }
     }

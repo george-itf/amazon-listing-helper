@@ -15,35 +15,44 @@ const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, '../../../.env') });
 
 const { Pool } = pg;
+
+// SSL Configuration
+// Default: verify SSL certificates (secure)
+// Set DB_SSL_REJECT_UNAUTHORIZED=false only if your provider requires it (e.g., some PaaS with self-signed certs)
+const sslConfig = process.env.DATABASE_URL
+  ? {
+      // Only disable cert verification if explicitly set to 'false'
+      rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+    }
+  : false; // Local dev typically doesn't use SSL
+
 // Create connection pool
 // Railway provides DATABASE_URL, local dev uses individual vars
-const pool = process.env.DATABASE_URL 
+const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: {
-        rejectUnauthorized: false  // Required for Railway
-      },
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      ssl: sslConfig,
+      max: parseInt(process.env.DB_POOL_MAX || '20', 10),
+      idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS || '30000', 10),
+      connectionTimeoutMillis: parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT_MS || '5000', 10),
     })
   : new Pool({
       host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '5432'),
+      port: parseInt(process.env.DB_PORT || '5432', 10),
       database: process.env.DB_NAME || 'amazon_listing_helper',
       user: process.env.DB_USER || 'postgres',
       password: process.env.DB_PASSWORD, // Required - no hardcoded fallback
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      max: parseInt(process.env.DB_POOL_MAX || '20', 10),
+      idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS || '30000', 10),
+      connectionTimeoutMillis: parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT_MS || '5000', 10),
     });
 // Test connection on startup
 pool.on('connect', () => {
-  console.log('📦 Database pool: new client connected');
+  console.log('[Database] Pool: new client connected');
 });
 
 pool.on('error', (err) => {
-  console.error('❌ Database pool error:', err.message);
+  console.error('[Database] Pool error:', err.message);
 });
 
 /**
@@ -60,7 +69,7 @@ export async function query(text, params = []) {
 
     // Log slow queries (>100ms)
     if (duration > 100) {
-      console.log(`⚠️ Slow query (${duration}ms):`, text.substring(0, 100));
+      console.log(`[Database] Slow query (${duration}ms):`, text.substring(0, 100));
     }
 
     return result;
@@ -85,7 +94,7 @@ export async function getClient() {
   // Override release to prevent double-release
   client.release = () => {
     if (released) {
-      console.warn('⚠️ Client already released');
+      console.warn('[Database] Warning: Client already released');
       return;
     }
     released = true;
@@ -123,10 +132,10 @@ export async function transaction(callback) {
 export async function testConnection() {
   try {
     const result = await query('SELECT NOW() as now, current_database() as db');
-    console.log('✅ Database connected:', result.rows[0]);
+    console.log('[Database] Connected:', result.rows[0]);
     return true;
   } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
+    console.error('[Database] Connection failed:', error.message);
     return false;
   }
 }
@@ -136,7 +145,7 @@ export async function testConnection() {
  */
 export async function close() {
   await pool.end();
-  console.log('📦 Database pool closed');
+  console.log('[Database] Pool closed');
 }
 
 // Alias for backwards compatibility
@@ -156,11 +165,11 @@ export async function initMlDataPool() {
     `);
 
     if (checkResult.rows[0].exists) {
-      console.log('✅ ML data pool already exists');
+      console.log('[Database] ML data pool already exists');
       return true;
     }
 
-    console.log('📊 Creating ML data pool...');
+    console.log('[Database] Creating ML data pool...');
 
     // Create the materialized view
     // Note: Column names updated per migration 001_slice_a_schema.sql
@@ -199,10 +208,10 @@ export async function initMlDataPool() {
     await query('CREATE INDEX IF NOT EXISTS idx_ml_pool_asin ON ml_data_pool(asin_entity_id)');
     await query('CREATE INDEX IF NOT EXISTS idx_ml_pool_entity ON ml_data_pool(entity_type)');
 
-    console.log('✅ ML data pool created successfully');
+    console.log('[Database] ML data pool created successfully');
     return true;
   } catch (error) {
-    console.error('⚠️ ML data pool creation failed (non-fatal):', error.message);
+    console.error('[Database] ML data pool creation failed (non-fatal):', error.message);
     return false;
   }
 }
