@@ -1,6 +1,11 @@
 -- ============================================================================
 -- ML Data Pool Migration
 -- Creates a unified view of all data for machine learning training
+--
+-- NOTE: Uses migrated column names from 001_slice_a_schema.sql:
+-- - seller_sku (was: sku)
+-- - price_inc_vat (was: price)
+-- - available_quantity (was: quantity)
 -- ============================================================================
 
 -- Drop existing view if it exists
@@ -13,7 +18,7 @@ SELECT
     -- Entity identification
     COALESCE(l.id, ae.listing_id) as listing_id,
     ae.id as asin_entity_id,
-    COALESCE(l.sku, 'ASIN_' || ae.asin) as sku,
+    COALESCE(l.seller_sku, 'ASIN_' || ae.asin) as sku,
     COALESCE(l.asin, ae.asin) as asin,
 
     -- Entity type
@@ -34,9 +39,9 @@ SELECT
     l."fulfillmentChannel" as fulfillment_channel,
     ae.is_tracked,
 
-    -- Pricing data
-    l.price as current_price,
-    l.quantity as current_quantity,
+    -- Pricing data (using migrated column names)
+    l.price_inc_vat as current_price,
+    l.available_quantity as current_quantity,
 
     -- Keepa market data (latest snapshot)
     (ks.parsed_json->'metrics'->>'price_current')::numeric as keepa_price_current,
@@ -50,9 +55,9 @@ SELECT
     (ks.parsed_json->'metrics'->>'buy_box_is_amazon')::boolean as keepa_buybox_is_amazon,
     ks.captured_at as keepa_captured_at,
 
-    -- BOM/Cost data (active BOM)
+    -- BOM/Cost data (active BOM - calculated from bom_lines)
     bom.id as bom_id,
-    bom.name as bom_name,
+    bom.notes as bom_notes,
     bom.total_cost_ex_vat as bom_cost_ex_vat,
     bom.effective_from as bom_effective_from,
 
@@ -94,12 +99,23 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) ks ON true
 
--- Active BOM
+-- Active BOM with calculated total cost
 LEFT JOIN LATERAL (
-    SELECT b.id, b.name, b.total_cost_ex_vat, b.effective_from
+    SELECT
+        b.id,
+        b.notes,
+        b.effective_from,
+        COALESCE(
+            (SELECT SUM(bl.quantity * (1 + COALESCE(bl.wastage_rate, 0)) * COALESCE(c.unit_cost_ex_vat, 0))
+             FROM bom_lines bl
+             JOIN components c ON c.id = bl.component_id
+             WHERE bl.bom_id = b.id),
+            0
+        ) as total_cost_ex_vat
     FROM boms b
     WHERE b.listing_id = l.id
-      AND b.status = 'ACTIVE'
+      AND b.is_active = true
+      AND b.scope_type = 'LISTING'
     ORDER BY b.effective_from DESC
     LIMIT 1
 ) bom ON true

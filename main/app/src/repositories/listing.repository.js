@@ -1,6 +1,11 @@
 /**
  * Listing Repository
  * Handles all database operations for listings
+ *
+ * NOTE: Column names match the migrated schema (001_slice_a_schema.sql):
+ * - seller_sku (was: sku)
+ * - price_inc_vat (was: price)
+ * - available_quantity (was: quantity)
  */
 
 import { query, transaction } from '../database/connection.js';
@@ -44,7 +49,7 @@ export async function getAll(filters = {}) {
   }
 
   if (filters.search) {
-    sql += ` AND (l.title ILIKE $${paramCount} OR l.sku ILIKE $${paramCount} OR l.asin ILIKE $${paramCount++})`;
+    sql += ` AND (l.title ILIKE $${paramCount} OR l.seller_sku ILIKE $${paramCount} OR l.asin ILIKE $${paramCount++})`;
     params.push(`%${filters.search}%`);
   }
 
@@ -96,7 +101,7 @@ export async function getById(id) {
 
 /**
  * Get a listing by SKU
- * @param {string} sku - SKU
+ * @param {string} sku - SKU (seller_sku)
  * @returns {Promise<Object|null>} Listing object or null
  */
 export async function getBySku(sku) {
@@ -116,7 +121,7 @@ export async function getBySku(sku) {
       ) as images
     FROM listings l
     LEFT JOIN listing_images li ON l.id = li."listingId"
-    WHERE l.sku = $1
+    WHERE l.seller_sku = $1
     GROUP BY l.id
   `;
 
@@ -163,20 +168,20 @@ export async function create(data) {
   return transaction(async (client) => {
     const listingSql = `
       INSERT INTO listings (
-        sku, asin, title, description, "bulletPoints", price, quantity,
+        seller_sku, asin, title, description, "bulletPoints", price_inc_vat, available_quantity,
         status, category, "fulfillmentChannel", "createdAt", "updatedAt"
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
       RETURNING *
     `;
 
     const listingResult = await client.query(listingSql, [
-      data.sku,
+      data.sku || data.seller_sku,
       data.asin,
       data.title,
       data.description || null,
       JSON.stringify(data.bulletPoints || []),
-      data.price || 0,
-      data.quantity || 0,
+      data.price || data.price_inc_vat || 0,
+      data.quantity || data.available_quantity || 0,
       data.status || 'active',
       data.category || null,
       data.fulfillmentChannel || 'FBM',
@@ -211,17 +216,27 @@ export async function update(id, data) {
     const values = [];
     let paramCount = 1;
 
-    const allowedFields = [
-      'sku', 'asin', 'title', 'description', 'bulletPoints', 'price',
-      'quantity', 'status', 'category', 'fulfillmentChannel'
-    ];
+    // Map of input field names to database column names
+    const fieldMap = {
+      'sku': 'seller_sku',
+      'seller_sku': 'seller_sku',
+      'asin': 'asin',
+      'title': 'title',
+      'description': 'description',
+      'bulletPoints': '"bulletPoints"',
+      'price': 'price_inc_vat',
+      'price_inc_vat': 'price_inc_vat',
+      'quantity': 'available_quantity',
+      'available_quantity': 'available_quantity',
+      'status': 'status',
+      'category': 'category',
+      'fulfillmentChannel': '"fulfillmentChannel"',
+    };
 
-    for (const field of allowedFields) {
-      if (data[field] !== undefined) {
-        const dbField = field === 'bulletPoints' ? '"bulletPoints"' :
-                       field === 'fulfillmentChannel' ? '"fulfillmentChannel"' : field;
-        fields.push(`${dbField} = $${paramCount++}`);
-        values.push(field === 'bulletPoints' ? JSON.stringify(data[field]) : data[field]);
+    for (const [inputField, dbColumn] of Object.entries(fieldMap)) {
+      if (data[inputField] !== undefined) {
+        fields.push(`${dbColumn} = $${paramCount++}`);
+        values.push(inputField === 'bulletPoints' ? JSON.stringify(data[inputField]) : data[inputField]);
       }
     }
 
@@ -304,16 +319,16 @@ export async function getStatusCounts() {
 export async function upsert(data) {
   const sql = `
     INSERT INTO listings (
-      sku, asin, title, description, "bulletPoints", price, quantity,
+      seller_sku, asin, title, description, "bulletPoints", price_inc_vat, available_quantity,
       status, category, "fulfillmentChannel", "currentScore", "createdAt", "updatedAt"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
-    ON CONFLICT (sku) DO UPDATE SET
+    ON CONFLICT (seller_sku) DO UPDATE SET
       asin = COALESCE(EXCLUDED.asin, listings.asin),
       title = COALESCE(EXCLUDED.title, listings.title),
       description = COALESCE(EXCLUDED.description, listings.description),
       "bulletPoints" = COALESCE(EXCLUDED."bulletPoints", listings."bulletPoints"),
-      price = COALESCE(EXCLUDED.price, listings.price),
-      quantity = COALESCE(EXCLUDED.quantity, listings.quantity),
+      price_inc_vat = COALESCE(EXCLUDED.price_inc_vat, listings.price_inc_vat),
+      available_quantity = COALESCE(EXCLUDED.available_quantity, listings.available_quantity),
       status = COALESCE(EXCLUDED.status, listings.status),
       category = COALESCE(EXCLUDED.category, listings.category),
       "fulfillmentChannel" = COALESCE(EXCLUDED."fulfillmentChannel", listings."fulfillmentChannel"),
@@ -323,13 +338,13 @@ export async function upsert(data) {
   `;
 
   const result = await query(sql, [
-    data.sku,
+    data.sku || data.seller_sku,
     data.asin || null,
     data.title || null,
     data.description || null,
     JSON.stringify(data.bulletPoints || data.bullet_points || []),
-    data.price || 0,
-    data.quantity || 0,
+    data.price || data.price_inc_vat || 0,
+    data.quantity || data.available_quantity || 0,
     data.status || 'active',
     data.category || null,
     data.fulfillmentChannel || data.fulfillment_channel || 'FBM',

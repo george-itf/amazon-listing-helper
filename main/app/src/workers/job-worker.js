@@ -14,7 +14,8 @@
 
 import { query, transaction } from '../database/connection.js';
 import * as jobRepo from '../repositories/job.repository.js';
-import { hasSpApiCredentials, getSpApiCredentials } from '../credentials-provider.js';
+import { hasSpApiCredentials, getSpApiClientConfig, getSellerId, getDefaultMarketplaceId } from '../credentials-provider.js';
+import SellingPartner from 'amazon-sp-api';
 
 // Worker configuration
 const WORKER_POLL_INTERVAL_MS = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '5000', 10);
@@ -354,61 +355,241 @@ async function queueFeatureRecompute(listingId, reason) {
 }
 
 /**
- * Call SP-API to update price
- * TODO: Implement actual SP-API call
+ * Create SP-API client
+ * @returns {SellingPartner} SP-API client
+ */
+function createSpApiClient() {
+  const config = getSpApiClientConfig();
+  return new SellingPartner({
+    region: config.region,
+    refresh_token: config.refresh_token,
+    credentials: config.credentials,
+    options: {
+      ...config.options,
+      debug_log: process.env.DEBUG === 'true',
+    },
+  });
+}
+
+/**
+ * Call SP-API to update price using Listings Items API
+ * Uses PATCH operation to update only the price attribute
  * @param {number} listingId
  * @param {number} newPrice
  * @returns {Promise<Object>}
  */
 async function callSpApiUpdatePrice(listingId, newPrice) {
-  // Get listing SKU
-  const result = await query('SELECT seller_sku FROM listings WHERE id = $1', [listingId]);
+  // Get listing details
+  const result = await query(
+    'SELECT seller_sku, asin, "fulfillmentChannel" FROM listings WHERE id = $1',
+    [listingId]
+  );
   if (result.rows.length === 0) {
     throw new Error(`Listing not found: ${listingId}`);
   }
 
-  const sellerSku = result.rows[0].seller_sku;
-  const credentials = getSpApiCredentials();
+  const { seller_sku: sellerSku, fulfillmentChannel } = result.rows[0];
+  const sellerId = getSellerId();
+  const marketplaceId = getDefaultMarketplaceId();
 
-  // TODO: Implement actual SP-API call using @sp-api-sdk or direct HTTP
-  // For now, simulate success
-  console.log(`[Worker] TODO: Call SP-API to update price for SKU ${sellerSku} to £${newPrice}`);
+  if (!sellerId) {
+    throw new Error('SP_API_SELLER_ID not configured');
+  }
 
-  return {
-    status: 'simulated',
-    seller_sku: sellerSku,
-    new_price: newPrice,
-    timestamp: new Date().toISOString(),
+  console.log(`[Worker] Calling SP-API to update price for SKU ${sellerSku} to £${newPrice}`);
+
+  const sp = createSpApiClient();
+
+  // Use Listings Items API patchListingsItem operation
+  // This updates only the specified attributes (price in this case)
+  const patchBody = {
+    productType: 'PRODUCT', // Generic product type
+    patches: [
+      {
+        op: 'replace',
+        path: '/attributes/purchasable_offer',
+        value: [
+          {
+            marketplace_id: marketplaceId,
+            currency: 'GBP',
+            our_price: [
+              {
+                schedule: [
+                  {
+                    value_with_tax: newPrice,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
   };
+
+  try {
+    const response = await sp.callAPI({
+      operation: 'patchListingsItem',
+      path: {
+        sellerId: sellerId,
+        sku: sellerSku,
+      },
+      query: {
+        marketplaceIds: [marketplaceId],
+      },
+      body: patchBody,
+    });
+
+    console.log(`[Worker] SP-API price update response:`, JSON.stringify(response));
+
+    // Check for submission status
+    const status = response?.status || 'UNKNOWN';
+    const submissionId = response?.submissionId;
+
+    if (status === 'ACCEPTED' || status === 'VALID') {
+      return {
+        status: 'success',
+        seller_sku: sellerSku,
+        new_price: newPrice,
+        sp_api_status: status,
+        submission_id: submissionId,
+        timestamp: new Date().toISOString(),
+      };
+    } else if (status === 'INVALID') {
+      const issues = response?.issues || [];
+      throw new Error(`SP-API rejected price update: ${JSON.stringify(issues)}`);
+    } else {
+      // Pending or unknown - treat as success since we submitted
+      return {
+        status: 'pending',
+        seller_sku: sellerSku,
+        new_price: newPrice,
+        sp_api_status: status,
+        submission_id: submissionId,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  } catch (error) {
+    console.error(`[Worker] SP-API price update failed for ${sellerSku}:`, error);
+
+    // Extract error details
+    const errorMessage = error.message || 'Unknown SP-API error';
+    const errorCode = error.code || error.statusCode;
+
+    throw new Error(`SP-API price update failed: ${errorMessage}${errorCode ? ` (${errorCode})` : ''}`);
+  }
 }
 
 /**
  * Call SP-API to update inventory
- * TODO: Implement actual SP-API call
+ * Uses Listings Items API for MFN (FBM) or submits inventory feed for FBA
  * @param {number} listingId
  * @param {number} newQuantity
  * @returns {Promise<Object>}
  */
 async function callSpApiUpdateInventory(listingId, newQuantity) {
-  // Get listing SKU
-  const result = await query('SELECT seller_sku FROM listings WHERE id = $1', [listingId]);
+  // Get listing details
+  const result = await query(
+    'SELECT seller_sku, asin, "fulfillmentChannel" FROM listings WHERE id = $1',
+    [listingId]
+  );
   if (result.rows.length === 0) {
     throw new Error(`Listing not found: ${listingId}`);
   }
 
-  const sellerSku = result.rows[0].seller_sku;
-  const credentials = getSpApiCredentials();
+  const { seller_sku: sellerSku, fulfillmentChannel } = result.rows[0];
+  const sellerId = getSellerId();
+  const marketplaceId = getDefaultMarketplaceId();
 
-  // TODO: Implement actual SP-API call using @sp-api-sdk or direct HTTP
-  // For now, simulate success
-  console.log(`[Worker] TODO: Call SP-API to update inventory for SKU ${sellerSku} to ${newQuantity}`);
+  if (!sellerId) {
+    throw new Error('SP_API_SELLER_ID not configured');
+  }
 
-  return {
-    status: 'simulated',
-    seller_sku: sellerSku,
-    new_quantity: newQuantity,
-    timestamp: new Date().toISOString(),
+  console.log(`[Worker] Calling SP-API to update inventory for SKU ${sellerSku} to ${newQuantity} units (${fulfillmentChannel})`);
+
+  const sp = createSpApiClient();
+
+  // For FBA listings, inventory is managed by Amazon - we can't update it directly
+  // For FBM (MFN) listings, we use Listings Items API
+  if (fulfillmentChannel === 'FBA') {
+    console.log(`[Worker] FBA listing ${sellerSku} - inventory managed by Amazon, skipping SP-API update`);
+    return {
+      status: 'skipped',
+      reason: 'FBA inventory managed by Amazon',
+      seller_sku: sellerSku,
+      new_quantity: newQuantity,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  // Use Listings Items API patchListingsItem operation for FBM/MFN inventory
+  const patchBody = {
+    productType: 'PRODUCT',
+    patches: [
+      {
+        op: 'replace',
+        path: '/attributes/fulfillment_availability',
+        value: [
+          {
+            fulfillment_channel_code: 'DEFAULT', // MFN/FBM
+            quantity: newQuantity,
+          },
+        ],
+      },
+    ],
   };
+
+  try {
+    const response = await sp.callAPI({
+      operation: 'patchListingsItem',
+      path: {
+        sellerId: sellerId,
+        sku: sellerSku,
+      },
+      query: {
+        marketplaceIds: [marketplaceId],
+      },
+      body: patchBody,
+    });
+
+    console.log(`[Worker] SP-API inventory update response:`, JSON.stringify(response));
+
+    // Check for submission status
+    const status = response?.status || 'UNKNOWN';
+    const submissionId = response?.submissionId;
+
+    if (status === 'ACCEPTED' || status === 'VALID') {
+      return {
+        status: 'success',
+        seller_sku: sellerSku,
+        new_quantity: newQuantity,
+        sp_api_status: status,
+        submission_id: submissionId,
+        timestamp: new Date().toISOString(),
+      };
+    } else if (status === 'INVALID') {
+      const issues = response?.issues || [];
+      throw new Error(`SP-API rejected inventory update: ${JSON.stringify(issues)}`);
+    } else {
+      // Pending or unknown - treat as success since we submitted
+      return {
+        status: 'pending',
+        seller_sku: sellerSku,
+        new_quantity: newQuantity,
+        sp_api_status: status,
+        submission_id: submissionId,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  } catch (error) {
+    console.error(`[Worker] SP-API inventory update failed for ${sellerSku}:`, error);
+
+    // Extract error details
+    const errorMessage = error.message || 'Unknown SP-API error';
+    const errorCode = error.code || error.statusCode;
+
+    throw new Error(`SP-API inventory update failed: ${errorMessage}${errorCode ? ` (${errorCode})` : ''}`);
+  }
 }
 
 // ============================================================================
