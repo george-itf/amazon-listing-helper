@@ -26,25 +26,25 @@ const SAFE_ERROR_MESSAGES = {
 
 /**
  * Patterns that indicate internal errors (should not be exposed)
+ * Be specific to avoid filtering legitimate error messages
  */
 const INTERNAL_ERROR_PATTERNS = [
-  /password/i,
+  /password\s*[=:]/i,
   /connection refused/i,
   /ECONNREFUSED/i,
-  /database/i,
-  /postgres/i,
-  /sql/i,
-  /syntax error/i,
+  /database error/i,
+  /postgres.*error/i,
+  /syntax error at/i,
   /column .* does not exist/i,
   /relation .* does not exist/i,
-  /permission denied/i,
+  /permission denied for/i,
   /stack trace/i,
   /node_modules/i,
   /at .+:\d+:\d+/i, // Stack trace line pattern
-  /secret/i,
-  /credential/i,
-  /token/i,
-  /key/i,
+  /secret_key\s*[=:]/i,
+  /client_secret\s*[=:]/i,
+  /api_key\s*[=:]/i,
+  /private_key/i,
   /ENOENT/i,
   /EACCES/i,
 ];
