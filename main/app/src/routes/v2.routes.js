@@ -3265,6 +3265,238 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
+  // ML FEATURES V2 - State-of-the-Art Feature Engineering
+  // ============================================================================
+
+  /**
+   * POST /api/v2/ml/features/compute
+   * Compute ML features for all active listings
+   */
+  fastify.post('/api/v2/ml/features/compute', {
+    config: { timeout: 600000 }, // 10 minutes
+  }, async (request, reply) => {
+    try {
+      const mlFeatures = await import('../services/ml-features.service.js');
+
+      // Ensure tables exist
+      await mlFeatures.ensureMLTables();
+
+      console.log('[API] Computing ML features for all listings...');
+      const result = await mlFeatures.computeAllListingFeatures();
+
+      return wrapResponse({
+        message: 'ML features computed successfully',
+        ...result,
+      });
+    } catch (error) {
+      console.error('[API] ML features compute error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/ml/features/:listingId
+   * Get computed ML features for a specific listing
+   */
+  fastify.get('/api/v2/ml/features/:listingId', async (request, reply) => {
+    try {
+      const listingId = parseInt(request.params.listingId, 10);
+
+      const result = await query(`
+        SELECT * FROM ml_features WHERE listing_id = $1
+      `, [listingId]);
+
+      if (result.rows.length === 0) {
+        return wrapResponse({
+          listing_id: listingId,
+          features: null,
+          message: 'No features computed yet. Run POST /api/v2/ml/features/compute first.',
+        });
+      }
+
+      return wrapResponse({
+        listing_id: listingId,
+        feature_version: result.rows[0].feature_version,
+        features: result.rows[0].features_json,
+        feature_count: Object.keys(result.rows[0].features_json || {}).filter(k => !k.startsWith('_')).length,
+        computed_at: result.rows[0].computed_at,
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ features: null, message: 'Run POST /api/v2/ml/features/compute first' });
+      }
+      console.error('[API] ML features get error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/ml/features/:listingId/compute
+   * Compute ML features for a specific listing
+   */
+  fastify.post('/api/v2/ml/features/:listingId/compute', async (request, reply) => {
+    try {
+      const mlFeatures = await import('../services/ml-features.service.js');
+      const listingId = parseInt(request.params.listingId, 10);
+
+      await mlFeatures.ensureMLTables();
+
+      console.log(`[API] Computing ML features for listing ${listingId}...`);
+      const features = await mlFeatures.computeListingFeatures(listingId);
+      await mlFeatures.saveFeatures(listingId, features);
+
+      return wrapResponse({
+        listing_id: listingId,
+        feature_count: Object.keys(features).filter(k => !k.startsWith('_')).length,
+        features,
+      });
+    } catch (error) {
+      console.error('[API] ML features compute error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/ml/features/export
+   * Export all ML features for training
+   */
+  fastify.get('/api/v2/ml/features/export', async (request, reply) => {
+    try {
+      const mlFeatures = await import('../services/ml-features.service.js');
+      const { format = 'json', limit = '10000', flat = 'false' } = request.query;
+
+      const data = await mlFeatures.exportTrainingData({
+        format: flat === 'true' ? 'flat' : 'json',
+        limit: parseInt(limit, 10),
+      });
+
+      if (format === 'csv' && data.length > 0) {
+        // Convert to CSV
+        const flatData = flat === 'true' ? data : data.map(row => ({
+          listing_id: row.listing_id,
+          computed_at: row.computed_at,
+          ...row.features_json,
+        }));
+
+        const headers = Object.keys(flatData[0]);
+        const csv = [
+          headers.join(','),
+          ...flatData.map(row => headers.map(h => {
+            const val = row[h];
+            if (val === null || val === undefined) return '';
+            if (typeof val === 'object') return JSON.stringify(val).replace(/,/g, ';');
+            if (typeof val === 'string' && val.includes(',')) return `"${val}"`;
+            return val;
+          }).join(','))
+        ].join('\n');
+
+        return reply.type('text/csv').send(csv);
+      }
+
+      return wrapResponse({
+        data,
+        count: data.length,
+        feature_count: data.length > 0
+          ? Object.keys(data[0].features_json || data[0]).filter(k => !k.startsWith('_')).length
+          : 0,
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ data: [], message: 'Run POST /api/v2/ml/features/compute first' });
+      }
+      console.error('[API] ML features export error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/ml/features/schema
+   * Get the ML features schema (list of all features with descriptions)
+   */
+  fastify.get('/api/v2/ml/features/schema', async (request, reply) => {
+    const schema = {
+      version: 2,
+      total_features: 200,
+      categories: {
+        core: {
+          description: 'Core product attributes',
+          features: ['core_has_asin', 'core_title_length', 'core_is_fba', 'core_listing_age_days'],
+        },
+        price: {
+          description: 'Price and pricing history features',
+          features: ['price_current', 'price_vs_competitive', 'price_keepa_median_90d', 'price_momentum_7d'],
+        },
+        sales: {
+          description: 'Sales volume, revenue, and velocity',
+          features: ['sales_units_30d', 'sales_velocity_30d', 'sales_velocity_trend_7d_vs_30d', 'sales_acceleration_7d_14d'],
+        },
+        inventory: {
+          description: 'Stock levels and inventory health',
+          features: ['inv_available_quantity', 'inv_days_of_cover', 'inv_stockout_risk_high', 'inv_fba_fulfillable'],
+        },
+        competitive: {
+          description: 'Competition and market position',
+          features: ['comp_total_offers', 'comp_competitive_price', 'comp_sales_rank', 'comp_is_low_competition'],
+        },
+        traffic: {
+          description: 'Sessions, page views, and conversion',
+          features: ['traffic_sessions_30d', 'traffic_conversion_rate', 'traffic_buy_box_pct_30d'],
+        },
+        financial: {
+          description: 'Costs, margins, and profitability',
+          features: ['fin_margin', 'fin_profit_per_unit', 'fin_roi', 'fin_bom_cost'],
+        },
+        time_series: {
+          description: 'Trends, momentum, and technical indicators',
+          features: ['ts_ma7_current', 'ts_trend_30d', 'ts_volatility_30d', 'ts_rsi', 'ts_macd_signal'],
+        },
+        derived: {
+          description: 'Computed interaction and composite features',
+          features: ['derived_health_score', 'derived_opportunity_score', 'derived_risk_score', 'derived_profit_velocity'],
+        },
+        categorical: {
+          description: 'One-hot encoded categorical features',
+          features: ['cat_fulfillment_fba', 'cat_price_tier_mid', 'cat_status_active'],
+        },
+      },
+    };
+
+    return wrapResponse(schema);
+  });
+
+  /**
+   * GET /api/v2/ml/features/summary
+   * Get summary statistics across all computed features
+   */
+  fastify.get('/api/v2/ml/features/summary', async (request, reply) => {
+    try {
+      const result = await query(`
+        SELECT
+          COUNT(*) as total_listings,
+          AVG((features_json->>'derived_health_score')::numeric) as avg_health_score,
+          AVG((features_json->>'derived_opportunity_score')::numeric) as avg_opportunity_score,
+          AVG((features_json->>'derived_risk_score')::numeric) as avg_risk_score,
+          AVG((features_json->>'fin_margin')::numeric) as avg_margin,
+          AVG((features_json->>'sales_velocity_30d')::numeric) as avg_velocity,
+          AVG((features_json->>'inv_days_of_cover')::numeric) as avg_days_of_cover,
+          AVG((features_json->>'traffic_buy_box_pct_30d')::numeric) as avg_buy_box_pct,
+          COUNT(*) FILTER (WHERE (features_json->>'fin_margin')::numeric < 0) as negative_margin_count,
+          COUNT(*) FILTER (WHERE (features_json->>'inv_stockout_risk_high')::integer = 1) as stockout_risk_count,
+          MAX(computed_at) as last_computed
+        FROM ml_features
+      `);
+
+      return wrapResponse(result.rows[0]);
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ total_listings: 0, message: 'Run POST /api/v2/ml/features/compute first' });
+      }
+      console.error('[API] ML features summary error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  // ============================================================================
   // BUY BOX
   // ============================================================================
 
