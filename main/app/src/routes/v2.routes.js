@@ -2271,6 +2271,46 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
+  // LISTING SYNC
+  // ============================================================================
+
+  /**
+   * POST /api/v2/sync/listings
+   * Trigger a sync of listings from Amazon SP-API
+   */
+  fastify.post('/api/v2/sync/listings', async (request, reply) => {
+    try {
+      const { syncListings } = await import('../listings-sync.js');
+      const { dryRun } = request.body || {};
+
+      const result = await syncListings({ dryRun });
+
+      return wrapResponse({
+        message: 'Listing sync completed',
+        ...result,
+      });
+    } catch (error) {
+      console.error('[API] Sync listings error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/sync/status
+   * Get current sync status
+   */
+  fastify.get('/api/v2/sync/status', async (request, reply) => {
+    try {
+      const { getSyncStatus } = await import('../listings-sync.js');
+      const status = await getSyncStatus();
+      return wrapResponse(status);
+    } catch (error) {
+      console.error('[API] Sync status error:', error);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  // ============================================================================
   // HEALTH CHECK
   // ============================================================================
 
