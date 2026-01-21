@@ -2646,6 +2646,478 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
+  // AMAZON DATA SYNC - ALL AVAILABLE APIs
+  // ============================================================================
+
+  /**
+   * POST /api/v2/sync/all
+   * Sync ALL available Amazon data (orders, inventory, pricing, fees, etc.)
+   * This is a comprehensive sync that may take 10-30 minutes
+   */
+  fastify.post('/api/v2/sync/all', {
+    config: { timeout: 1800000 }, // 30 minutes
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+
+      // Ensure tables exist first
+      await amazonSync.ensureTables();
+
+      console.log('[API] Starting full Amazon data sync...');
+      const result = await amazonSync.syncAll();
+
+      return wrapResponse({
+        message: 'Full Amazon sync completed',
+        ...result,
+      });
+    } catch (error) {
+      console.error('[API] Full sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/orders
+   * Sync orders from Amazon Orders API
+   */
+  fastify.post('/api/v2/sync/orders', {
+    config: { timeout: 300000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const { daysBack = 30 } = request.body || {};
+      const result = await amazonSync.syncOrders(daysBack);
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Orders sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/fba-inventory
+   * Sync FBA inventory levels from Amazon
+   */
+  fastify.post('/api/v2/sync/fba-inventory', {
+    config: { timeout: 300000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const result = await amazonSync.syncFbaInventory();
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] FBA inventory sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/competitive-pricing
+   * Sync competitive pricing data for all ASINs
+   */
+  fastify.post('/api/v2/sync/competitive-pricing', {
+    config: { timeout: 600000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const result = await amazonSync.syncCompetitivePricing();
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Competitive pricing sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/listing-offers
+   * Sync competitor offers/prices for all ASINs
+   */
+  fastify.post('/api/v2/sync/listing-offers', {
+    config: { timeout: 600000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const result = await amazonSync.syncListingOffers();
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Listing offers sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/fba-fees
+   * Sync FBA fee estimates for all SKUs
+   */
+  fastify.post('/api/v2/sync/fba-fees', {
+    config: { timeout: 600000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const result = await amazonSync.syncFbaFees();
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] FBA fees sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/sales-traffic
+   * Sync sales and traffic report (Business Reports)
+   */
+  fastify.post('/api/v2/sync/sales-traffic', {
+    config: { timeout: 600000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const { daysBack = 30 } = request.body || {};
+      const result = await amazonSync.syncSalesAndTraffic(daysBack);
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Sales/traffic sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/financial-events
+   * Sync financial events (settlements, refunds, fees)
+   */
+  fastify.post('/api/v2/sync/financial-events', {
+    config: { timeout: 300000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const { daysBack = 30 } = request.body || {};
+      const result = await amazonSync.syncFinancialEvents(daysBack);
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Financial events sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/sync/catalog
+   * Sync catalog/product details for all ASINs
+   */
+  fastify.post('/api/v2/sync/catalog', {
+    config: { timeout: 600000 },
+  }, async (request, reply) => {
+    try {
+      const amazonSync = await import('../amazon-data-sync.js');
+      await amazonSync.ensureTables();
+
+      const result = await amazonSync.syncCatalogItems();
+
+      return wrapResponse(result);
+    } catch (error) {
+      console.error('[API] Catalog sync error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/amazon/orders
+   * Get synced Amazon orders
+   */
+  fastify.get('/api/v2/amazon/orders', async (request, reply) => {
+    try {
+      const { limit = '50', offset = '0', status } = request.query;
+
+      let sql = 'SELECT * FROM amazon_orders WHERE 1=1';
+      const params = [];
+      let paramCount = 1;
+
+      if (status) {
+        sql += ` AND order_status = $${paramCount++}`;
+        params.push(status);
+      }
+
+      sql += ` ORDER BY purchase_date DESC LIMIT $${paramCount++} OFFSET $${paramCount++}`;
+      params.push(parseInt(limit, 10), parseInt(offset, 10));
+
+      const result = await query(sql, params);
+      const countResult = await query('SELECT COUNT(*) as total FROM amazon_orders');
+
+      return wrapResponse({
+        orders: result.rows,
+        total: parseInt(countResult.rows[0]?.total || 0, 10),
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ orders: [], total: 0, message: 'Run sync first to create tables' });
+      }
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/amazon/fba-inventory
+   * Get synced FBA inventory
+   */
+  fastify.get('/api/v2/amazon/fba-inventory', async (request, reply) => {
+    try {
+      const { limit = '100', offset = '0' } = request.query;
+
+      const result = await query(
+        'SELECT * FROM amazon_fba_inventory ORDER BY updated_at DESC LIMIT $1 OFFSET $2',
+        [parseInt(limit, 10), parseInt(offset, 10)]
+      );
+
+      const countResult = await query('SELECT COUNT(*) as total FROM amazon_fba_inventory');
+
+      return wrapResponse({
+        inventory: result.rows,
+        total: parseInt(countResult.rows[0]?.total || 0, 10),
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ inventory: [], total: 0, message: 'Run sync first to create tables' });
+      }
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/amazon/competitive-pricing
+   * Get synced competitive pricing data
+   */
+  fastify.get('/api/v2/amazon/competitive-pricing', async (request, reply) => {
+    try {
+      const { asin } = request.query;
+
+      let sql = 'SELECT * FROM amazon_competitive_pricing';
+      const params = [];
+
+      if (asin) {
+        sql += ' WHERE asin = $1';
+        params.push(asin);
+      }
+
+      sql += ' ORDER BY captured_at DESC';
+
+      const result = await query(sql, params);
+
+      return wrapResponse({
+        pricing: result.rows,
+        total: result.rows.length,
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ pricing: [], total: 0, message: 'Run sync first to create tables' });
+      }
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/amazon/fba-fees
+   * Get synced FBA fee estimates
+   */
+  fastify.get('/api/v2/amazon/fba-fees', async (request, reply) => {
+    try {
+      const { sku } = request.query;
+
+      let sql = 'SELECT * FROM amazon_fba_fees';
+      const params = [];
+
+      if (sku) {
+        sql += ' WHERE seller_sku = $1';
+        params.push(sku);
+      }
+
+      sql += ' ORDER BY captured_at DESC';
+
+      const result = await query(sql, params);
+
+      return wrapResponse({
+        fees: result.rows,
+        total: result.rows.length,
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ fees: [], total: 0, message: 'Run sync first to create tables' });
+      }
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/amazon/sales-traffic
+   * Get synced sales and traffic data
+   */
+  fastify.get('/api/v2/amazon/sales-traffic', async (request, reply) => {
+    try {
+      const { asin, days = '30' } = request.query;
+
+      let sql = `
+        SELECT * FROM amazon_sales_traffic
+        WHERE date >= CURRENT_DATE - INTERVAL '${parseInt(days, 10)} days'
+      `;
+      const params = [];
+
+      if (asin) {
+        sql += ' AND asin = $1';
+        params.push(asin);
+      }
+
+      sql += ' ORDER BY date DESC, asin';
+
+      const result = await query(sql, params);
+
+      return wrapResponse({
+        data: result.rows,
+        total: result.rows.length,
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ data: [], total: 0, message: 'Run sync first to create tables' });
+      }
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/amazon/financial-events
+   * Get synced financial events
+   */
+  fastify.get('/api/v2/amazon/financial-events', async (request, reply) => {
+    try {
+      const { limit = '100', offset = '0', event_type } = request.query;
+
+      let sql = 'SELECT * FROM amazon_financial_events WHERE 1=1';
+      const params = [];
+      let paramCount = 1;
+
+      if (event_type) {
+        sql += ` AND event_type = $${paramCount++}`;
+        params.push(event_type);
+      }
+
+      sql += ` ORDER BY posted_date DESC NULLS LAST LIMIT $${paramCount++} OFFSET $${paramCount++}`;
+      params.push(parseInt(limit, 10), parseInt(offset, 10));
+
+      const result = await query(sql, params);
+
+      return wrapResponse({
+        events: result.rows,
+        total: result.rows.length,
+      });
+    } catch (error) {
+      if (error.message.includes('does not exist')) {
+        return wrapResponse({ events: [], total: 0, message: 'Run sync first to create tables' });
+      }
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/amazon/dashboard
+   * Get comprehensive Amazon data dashboard
+   */
+  fastify.get('/api/v2/amazon/dashboard', async (request, reply) => {
+    try {
+      const dashboard = {};
+
+      // Orders summary
+      try {
+        const ordersResult = await query(`
+          SELECT
+            COUNT(*) as total_orders,
+            COUNT(*) FILTER (WHERE order_status = 'Shipped') as shipped,
+            COUNT(*) FILTER (WHERE order_status = 'Pending') as pending,
+            COUNT(*) FILTER (WHERE purchase_date >= CURRENT_DATE - INTERVAL '7 days') as orders_7d,
+            COALESCE(SUM(order_total_amount) FILTER (WHERE purchase_date >= CURRENT_DATE - INTERVAL '7 days'), 0) as revenue_7d
+          FROM amazon_orders
+        `);
+        dashboard.orders = ordersResult.rows[0];
+      } catch { dashboard.orders = null; }
+
+      // FBA Inventory summary
+      try {
+        const inventoryResult = await query(`
+          SELECT
+            COUNT(*) as total_skus,
+            COALESCE(SUM(fulfillable_quantity), 0) as total_fulfillable,
+            COALESCE(SUM(inbound_shipped_quantity), 0) as total_inbound,
+            COALESCE(SUM(reserved_quantity), 0) as total_reserved,
+            COALESCE(SUM(unfulfillable_quantity), 0) as total_unfulfillable
+          FROM amazon_fba_inventory
+        `);
+        dashboard.inventory = inventoryResult.rows[0];
+      } catch { dashboard.inventory = null; }
+
+      // Competitive pricing summary
+      try {
+        const pricingResult = await query(`
+          SELECT
+            COUNT(DISTINCT asin) as asins_tracked,
+            AVG(competitive_price_amount) as avg_competitive_price,
+            AVG(number_of_offer_listings) as avg_competitors
+          FROM amazon_competitive_pricing
+        `);
+        dashboard.pricing = pricingResult.rows[0];
+      } catch { dashboard.pricing = null; }
+
+      // Sales traffic summary (last 7 days)
+      try {
+        const trafficResult = await query(`
+          SELECT
+            COALESCE(SUM(sessions), 0) as total_sessions,
+            COALESCE(SUM(page_views), 0) as total_page_views,
+            COALESCE(SUM(units_ordered), 0) as total_units,
+            COALESCE(SUM(ordered_product_sales_amount), 0) as total_sales,
+            COALESCE(AVG(buy_box_percentage), 0) as avg_buy_box_pct
+          FROM amazon_sales_traffic
+          WHERE date >= CURRENT_DATE - INTERVAL '7 days'
+        `);
+        dashboard.traffic_7d = trafficResult.rows[0];
+      } catch { dashboard.traffic_7d = null; }
+
+      // Financial summary
+      try {
+        const financialResult = await query(`
+          SELECT
+            COUNT(*) as total_events,
+            COALESCE(SUM(amount) FILTER (WHERE event_type = 'SHIPMENT'), 0) as total_shipment_revenue,
+            COALESCE(SUM(amount) FILTER (WHERE event_type = 'REFUND'), 0) as total_refunds
+          FROM amazon_financial_events
+          WHERE posted_date >= CURRENT_DATE - INTERVAL '30 days'
+        `);
+        dashboard.financial_30d = financialResult.rows[0];
+      } catch { dashboard.financial_30d = null; }
+
+      return wrapResponse(dashboard);
+    } catch (error) {
+      console.error('[API] Dashboard error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  // ============================================================================
   // ML DATA POOL
   // ============================================================================
 
