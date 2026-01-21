@@ -1685,21 +1685,29 @@ export async function registerV2Routes(fastify) {
    */
   fastify.get('/api/v2/listings/:listingId/features', async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
-    const featureStoreService = await import('../services/feature-store.service.js');
 
-    const features = await featureStoreService.getLatestFeatures('LISTING', listingId);
+    try {
+      const featureStoreService = await import('../services/feature-store.service.js');
+      const features = await featureStoreService.getLatestFeatures('LISTING', listingId);
 
-    if (!features) {
-      return wrapResponse({ listing_id: listingId, features: null, message: 'No features computed yet' });
+      if (!features) {
+        return wrapResponse({ listing_id: listingId, features: null, message: 'No features computed yet' });
+      }
+
+      return wrapResponse({
+        listing_id: listingId,
+        feature_store_id: features.id,
+        feature_version: features.feature_version,
+        features: features.features_json,
+        computed_at: features.computed_at,
+      });
+    } catch (error) {
+      // Handle missing table or query errors gracefully
+      if (error.message?.includes('does not exist')) {
+        return wrapResponse({ listing_id: listingId, features: null, message: 'Feature store not initialized' });
+      }
+      throw error;
     }
-
-    return wrapResponse({
-      listing_id: listingId,
-      feature_store_id: features.id,
-      feature_version: features.feature_version,
-      features: features.features_json,
-      computed_at: features.computed_at,
-    });
   });
 
   /**
@@ -1732,21 +1740,28 @@ export async function registerV2Routes(fastify) {
    */
   fastify.get('/api/v2/asins/:id/features', async (request, reply) => {
     const asinEntityId = parseInt(request.params.id, 10);
-    const featureStoreService = await import('../services/feature-store.service.js');
 
-    const features = await featureStoreService.getLatestFeatures('ASIN', asinEntityId);
+    try {
+      const featureStoreService = await import('../services/feature-store.service.js');
+      const features = await featureStoreService.getLatestFeatures('ASIN', asinEntityId);
 
-    if (!features) {
-      return wrapResponse({ asin_entity_id: asinEntityId, features: null, message: 'No features computed yet' });
+      if (!features) {
+        return wrapResponse({ asin_entity_id: asinEntityId, features: null, message: 'No features computed yet' });
+      }
+
+      return wrapResponse({
+        asin_entity_id: asinEntityId,
+        feature_store_id: features.id,
+        feature_version: features.feature_version,
+        features: features.features_json,
+        computed_at: features.computed_at,
+      });
+    } catch (error) {
+      if (error.message?.includes('does not exist')) {
+        return wrapResponse({ asin_entity_id: asinEntityId, features: null, message: 'Feature store not initialized' });
+      }
+      throw error;
     }
-
-    return wrapResponse({
-      asin_entity_id: asinEntityId,
-      feature_store_id: features.id,
-      feature_version: features.feature_version,
-      features: features.features_json,
-      computed_at: features.computed_at,
-    });
   });
 
   /**

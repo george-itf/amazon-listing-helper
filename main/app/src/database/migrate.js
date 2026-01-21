@@ -74,6 +74,11 @@ export async function runMigrations() {
             error.message.includes('duplicate key')) {
           console.log(`[Migrations] ${file} - objects already exist, marking as applied`);
           await query('INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT DO NOTHING', [file]);
+        } else if (file.startsWith('005_')) {
+          // Migration 005 (ML data pool) is non-critical - log warning but continue
+          console.warn(`[Migrations] ${file} - non-critical migration failed: ${error.message}`);
+          console.warn('[Migrations] ML data pool will not be available, but app will continue');
+          await query('INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT DO NOTHING', [file]);
         } else {
           console.error(`[Migrations] Failed: ${file} - ${error.message}`);
           throw error;
