@@ -155,11 +155,12 @@ export const closePool = close;
 
 /**
  * Initialize ML data pool materialized view
- * Creates or updates the view on startup
+ * Creates view on startup if it doesn't exist (migration 005 handles full creation)
+ * This is a fallback for cases where migrations haven't run yet
  */
 export async function initMlDataPool() {
   try {
-    // Check if view exists
+    // Check if view exists (migration 005 should have created it)
     const checkResult = await query(`
       SELECT EXISTS (
         SELECT FROM pg_matviews WHERE matviewname = 'ml_data_pool'
@@ -171,75 +172,37 @@ export async function initMlDataPool() {
       return true;
     }
 
-    console.log('[Database] Creating ML data pool...');
+    // View doesn't exist - create a simplified version as fallback
+    // (The full version is created by migration 005)
+    console.log('[Database] Creating simplified ML data pool (fallback)...');
 
-    // Create the materialized view using UNION approach
-    // (PostgreSQL doesn't support FULL OUTER JOIN with OR conditions)
     await query(`
       CREATE MATERIALIZED VIEW ml_data_pool AS
-      -- Listings with their ASIN entities (joined by asin or listing_id)
       SELECT
         l.id as listing_id,
-        ae.id as asin_entity_id,
+        NULL::integer as asin_entity_id,
         l.seller_sku as sku,
-        COALESCE(l.asin, ae.asin) as asin,
+        l.asin,
         'LISTING' as entity_type,
-        COALESCE(l.title, ae.title) as title,
-        ae.brand,
-        ae.category,
+        l.title,
+        NULL::varchar as brand,
+        l.category::varchar as category,
         l.status as listing_status,
         l.price_inc_vat as current_price,
         l.available_quantity as current_quantity,
-        (fs.features_json->>'margin')::numeric as computed_margin,
-        (fs.features_json->>'opportunity_score')::numeric as opportunity_score,
-        fs.features_json as all_features,
-        fs.computed_at as features_computed_at,
+        NULL::numeric as computed_margin,
+        NULL::numeric as opportunity_score,
+        NULL::jsonb as all_features,
+        NULL::timestamp as features_computed_at,
         CURRENT_TIMESTAMP as snapshot_at
       FROM listings l
-      LEFT JOIN asin_entities ae ON ae.asin = l.asin OR ae.listing_id = l.id
-      LEFT JOIN LATERAL (
-        SELECT features_json, computed_at FROM feature_store
-        WHERE (entity_type = 'LISTING' AND entity_id = l.id)
-        ORDER BY computed_at DESC LIMIT 1
-      ) fs ON true
-
-      UNION ALL
-
-      -- ASIN entities without a listing
-      SELECT
-        NULL as listing_id,
-        ae.id as asin_entity_id,
-        'ASIN_' || ae.asin as sku,
-        ae.asin,
-        'ASIN' as entity_type,
-        ae.title,
-        ae.brand,
-        ae.category,
-        NULL as listing_status,
-        NULL as current_price,
-        NULL as current_quantity,
-        (fs.features_json->>'margin')::numeric as computed_margin,
-        (fs.features_json->>'opportunity_score')::numeric as opportunity_score,
-        fs.features_json as all_features,
-        fs.computed_at as features_computed_at,
-        CURRENT_TIMESTAMP as snapshot_at
-      FROM asin_entities ae
-      LEFT JOIN LATERAL (
-        SELECT features_json, computed_at FROM feature_store
-        WHERE entity_type = 'ASIN' AND entity_id = ae.id
-        ORDER BY computed_at DESC LIMIT 1
-      ) fs ON true
-      WHERE NOT EXISTS (
-        SELECT 1 FROM listings l WHERE l.asin = ae.asin OR l.id = ae.listing_id
-      )
     `);
 
     // Create indexes
     await query('CREATE INDEX IF NOT EXISTS idx_ml_pool_listing ON ml_data_pool(listing_id)');
-    await query('CREATE INDEX IF NOT EXISTS idx_ml_pool_asin ON ml_data_pool(asin_entity_id)');
     await query('CREATE INDEX IF NOT EXISTS idx_ml_pool_entity ON ml_data_pool(entity_type)');
 
-    console.log('[Database] ML data pool created successfully');
+    console.log('[Database] Simplified ML data pool created');
     return true;
   } catch (error) {
     console.error('[Database] ML data pool creation failed (non-fatal):', error.message);
