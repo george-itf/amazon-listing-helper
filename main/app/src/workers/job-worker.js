@@ -20,6 +20,25 @@ import { workerLogger, logJobEvent } from '../lib/logger.js';
 import { recordJobEvent, updateJobQueueLength } from '../lib/metrics.js';
 import { captureException } from '../lib/sentry.js';
 
+/**
+ * Safe database query wrapper - returns null on table not exist errors
+ * @param {string} text - SQL query
+ * @param {Array} params - Query parameters
+ * @param {string} operation - Operation name for logging
+ * @returns {Promise<pg.QueryResult|null>}
+ */
+async function safeQuery(text, params = [], operation = 'query') {
+  try {
+    return await query(text, params);
+  } catch (error) {
+    if (error.message?.includes('does not exist')) {
+      workerLogger.warn({ operation }, `Skipping ${operation}: table does not exist`);
+      return null;
+    }
+    throw error;
+  }
+}
+
 // Worker configuration
 const WORKER_POLL_INTERVAL_MS = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '5000', 10);
 const WORKER_BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE || '5', 10);
@@ -81,8 +100,8 @@ async function processPriceChange(job) {
 
   workerLogger.info({ listingId, newPrice }, 'Publishing price change');
 
-  // Update listing_event to PUBLISHED
-  await query(`
+  // Update listing_event to PUBLISHED (safe - may not exist)
+  await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'PRICE_CHANGE_PUBLISHED', $2, $3, $4, $5, 'worker')
   `, [
@@ -91,7 +110,7 @@ async function processPriceChange(job) {
     JSON.stringify({ price_inc_vat: input.previous_price_inc_vat }),
     JSON.stringify({ price_inc_vat: newPrice }),
     input.reason,
-  ]);
+  ], 'record_price_published');
 
   // Check if we have SP-API credentials
   if (!hasSpApiCredentials()) {
@@ -149,8 +168,8 @@ async function processStockChange(job) {
 
   workerLogger.info(` Publishing stock change for listing ${listingId}: ${newQuantity} units`);
 
-  // Update listing_event to PUBLISHED
-  await query(`
+  // Update listing_event to PUBLISHED (safe - may not exist)
+  await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'STOCK_CHANGE_PUBLISHED', $2, $3, $4, $5, 'worker')
   `, [
@@ -159,7 +178,7 @@ async function processStockChange(job) {
     JSON.stringify({ available_quantity: input.previous_quantity }),
     JSON.stringify({ available_quantity: newQuantity }),
     input.reason,
-  ]);
+  ], 'record_stock_published');
 
   // Check if we have SP-API credentials
   if (!hasSpApiCredentials()) {
@@ -209,21 +228,35 @@ async function processStockChange(job) {
  * @param {number} newPrice
  */
 async function updateListingPrice(listingId, newPrice) {
-  await query(`
-    UPDATE listings
-    SET price_inc_vat = $2, "updatedAt" = CURRENT_TIMESTAMP
-    WHERE id = $1
-  `, [listingId, newPrice]);
+  // Try new column name first, fallback to old column name
+  try {
+    await query(`
+      UPDATE listings
+      SET price_inc_vat = $2, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE id = $1
+    `, [listingId, newPrice]);
+  } catch (error) {
+    if (error.message?.includes('column "price_inc_vat" does not exist')) {
+      // Fallback to old column name
+      await query(`
+        UPDATE listings
+        SET price = $2, "updatedAt" = CURRENT_TIMESTAMP
+        WHERE id = $1
+      `, [listingId, newPrice]);
+    } else {
+      throw error;
+    }
+  }
 
-  // Update listing_offer_current if exists
-  await query(`
+  // Update listing_offer_current if exists (safe - table may not exist)
+  await safeQuery(`
     INSERT INTO listing_offer_current (listing_id, price_inc_vat, observed_at)
     VALUES ($1, $2, CURRENT_TIMESTAMP)
     ON CONFLICT (listing_id) DO UPDATE SET
       price_inc_vat = $2,
       observed_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP
-  `, [listingId, newPrice]);
+  `, [listingId, newPrice], 'update_offer_price');
 }
 
 /**
@@ -232,28 +265,42 @@ async function updateListingPrice(listingId, newPrice) {
  * @param {number} newQuantity
  */
 async function updateListingStock(listingId, newQuantity) {
-  await query(`
-    UPDATE listings
-    SET available_quantity = $2, "updatedAt" = CURRENT_TIMESTAMP
-    WHERE id = $1
-  `, [listingId, newQuantity]);
+  // Try new column name first, fallback to old column name
+  try {
+    await query(`
+      UPDATE listings
+      SET available_quantity = $2, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE id = $1
+    `, [listingId, newQuantity]);
+  } catch (error) {
+    if (error.message?.includes('column "available_quantity" does not exist')) {
+      // Fallback to old column name
+      await query(`
+        UPDATE listings
+        SET quantity = $2, "updatedAt" = CURRENT_TIMESTAMP
+        WHERE id = $1
+      `, [listingId, newQuantity]);
+    } else {
+      throw error;
+    }
+  }
 
-  // Update listing_offer_current if exists
-  await query(`
+  // Update listing_offer_current if exists (safe - table may not exist)
+  await safeQuery(`
     INSERT INTO listing_offer_current (listing_id, available_quantity, observed_at)
     VALUES ($1, $2, CURRENT_TIMESTAMP)
     ON CONFLICT (listing_id) DO UPDATE SET
       available_quantity = $2,
       observed_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP
-  `, [listingId, newQuantity]);
+  `, [listingId, newQuantity], 'update_offer_stock');
 }
 
 /**
  * Record price change success event and queue feature recompute
  */
 async function recordPriceChangeSuccess(listingId, jobId, input) {
-  await query(`
+  await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'PRICE_CHANGE_SUCCEEDED', $2, $3, $4, $5, 'worker')
   `, [
@@ -262,7 +309,7 @@ async function recordPriceChangeSuccess(listingId, jobId, input) {
     JSON.stringify({ price_inc_vat: input.previous_price_inc_vat }),
     JSON.stringify({ price_inc_vat: input.price_inc_vat }),
     input.reason,
-  ]);
+  ], 'record_price_success');
 
   // Queue feature recompute after price change (Addendum E)
   await queueFeatureRecompute(listingId, 'price_change');
@@ -272,7 +319,7 @@ async function recordPriceChangeSuccess(listingId, jobId, input) {
  * Record price change failure event
  */
 async function recordPriceChangeFailure(listingId, jobId, input, errorMessage) {
-  await query(`
+  await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'PRICE_CHANGE_FAILED', $2, $3, $4, $5, 'worker')
   `, [
@@ -281,14 +328,14 @@ async function recordPriceChangeFailure(listingId, jobId, input, errorMessage) {
     JSON.stringify({ price_inc_vat: input.previous_price_inc_vat }),
     JSON.stringify({ price_inc_vat: input.price_inc_vat, error: errorMessage }),
     input.reason,
-  ]);
+  ], 'record_price_failure');
 }
 
 /**
  * Record stock change success event and queue feature recompute
  */
 async function recordStockChangeSuccess(listingId, jobId, input) {
-  await query(`
+  await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'STOCK_CHANGE_SUCCEEDED', $2, $3, $4, $5, 'worker')
   `, [
@@ -297,7 +344,7 @@ async function recordStockChangeSuccess(listingId, jobId, input) {
     JSON.stringify({ available_quantity: input.previous_quantity }),
     JSON.stringify({ available_quantity: input.available_quantity }),
     input.reason,
-  ]);
+  ], 'record_stock_success');
 
   // Queue feature recompute after stock change (Addendum E)
   await queueFeatureRecompute(listingId, 'stock_change');
@@ -307,7 +354,7 @@ async function recordStockChangeSuccess(listingId, jobId, input) {
  * Record stock change failure event
  */
 async function recordStockChangeFailure(listingId, jobId, input, errorMessage) {
-  await query(`
+  await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'STOCK_CHANGE_FAILED', $2, $3, $4, $5, 'worker')
   `, [
@@ -316,7 +363,7 @@ async function recordStockChangeFailure(listingId, jobId, input, errorMessage) {
     JSON.stringify({ available_quantity: input.previous_quantity }),
     JSON.stringify({ available_quantity: input.available_quantity, error: errorMessage }),
     input.reason,
-  ]);
+  ], 'record_stock_failure');
 }
 
 /**
@@ -328,28 +375,28 @@ async function recordStockChangeFailure(listingId, jobId, input, errorMessage) {
 async function queueFeatureRecompute(listingId, reason) {
   try {
     // Check if there's already a pending feature compute job for this listing
-    const existing = await query(`
+    const existing = await safeQuery(`
       SELECT id FROM jobs
       WHERE listing_id = $1
         AND job_type = 'COMPUTE_FEATURES_LISTING'
         AND status = 'PENDING'
       LIMIT 1
-    `, [listingId]);
+    `, [listingId], 'check_pending_feature_job');
 
-    if (existing.rows.length > 0) {
+    if (existing && existing.rows.length > 0) {
       workerLogger.info(` Feature recompute already pending for listing ${listingId}`);
       return;
     }
 
-    // Create low-priority feature recompute job
-    await query(`
+    // Create low-priority feature recompute job (safe - jobs table may not exist)
+    await safeQuery(`
       INSERT INTO jobs (
         job_type, scope_type, listing_id, status, priority, input_json, created_by
       ) VALUES ('COMPUTE_FEATURES_LISTING', 'LISTING', $1, 'PENDING', 3, $2, 'worker')
     `, [
       listingId,
       JSON.stringify({ trigger: reason, triggered_at: new Date().toISOString() }),
-    ]);
+    ], 'queue_feature_recompute');
 
     workerLogger.info(` Queued feature recompute for listing ${listingId} (trigger: ${reason})`);
   } catch (error) {
@@ -623,12 +670,12 @@ async function processSyncKeepaAsin(job) {
 
   const result = await keepaService.syncKeepaAsin(asin, marketplaceId);
 
-  // Create listing event if this is for a listing
+  // Create listing event if this is for a listing (safe - table may not exist)
   if (job.listing_id) {
-    await query(`
+    await safeQuery(`
       INSERT INTO listing_events (listing_id, event_type, job_id, after_json, created_by)
       VALUES ($1, 'KEEPA_SYNC_COMPLETED', $2, $3, 'worker')
-    `, [job.listing_id, job.id, JSON.stringify(result)]);
+    `, [job.listing_id, job.id, JSON.stringify(result)], 'record_keepa_sync');
   }
 
   return result;
@@ -652,11 +699,11 @@ async function processComputeFeaturesListing(job) {
 
   const result = await featureStoreService.computeListingFeatures(listingId);
 
-  // Create listing event
-  await query(`
+  // Create listing event (safe - table may not exist)
+  await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, after_json, created_by)
     VALUES ($1, 'FEATURES_COMPUTED', $2, $3, 'worker')
-  `, [listingId, job.id, JSON.stringify({ feature_store_id: result.feature_store_id })]);
+  `, [listingId, job.id, JSON.stringify({ feature_store_id: result.feature_store_id })], 'record_features_computed');
 
   return result;
 }
