@@ -3715,6 +3715,72 @@ export async function registerV2Routes(fastify) {
   });
 
   /**
+   * GET /api/v2/health/schema
+   * Database schema health check - identifies missing tables
+   */
+  fastify.get('/api/v2/health/schema', async (request, reply) => {
+    try {
+      const { checkSchemaHealth } = await import('../database/connection.js');
+      const health = await checkSchemaHealth();
+
+      return wrapResponse({
+        healthy: health.healthy,
+        missing_tables: health.missing,
+        issues: health.issues,
+        message: health.healthy
+          ? 'All required tables exist'
+          : `Missing ${health.missing.length} table(s) - migrations may need to re-run`,
+      });
+    } catch (error) {
+      httpLogger.error('[API] GET /health/schema error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/health/schema/repair
+   * Reset failed migrations to allow re-running
+   * Then triggers migration re-run
+   */
+  fastify.post('/api/v2/health/schema/repair', async (request, reply) => {
+    try {
+      const { checkSchemaHealth, resetFailedMigrations } = await import('../database/connection.js');
+      const { runMigrations } = await import('../database/migrate.js');
+
+      // Check current health
+      const beforeHealth = await checkSchemaHealth();
+      if (beforeHealth.healthy) {
+        return wrapResponse({
+          message: 'Schema is already healthy, no repair needed',
+          status: 'healthy',
+        });
+      }
+
+      // Reset failed migrations
+      const resetResult = await resetFailedMigrations();
+
+      // Re-run migrations
+      const migrationResult = await runMigrations();
+
+      // Check health again
+      const afterHealth = await checkSchemaHealth();
+
+      return wrapResponse({
+        message: afterHealth.healthy
+          ? 'Schema repair completed successfully'
+          : 'Schema repair attempted but some tables still missing',
+        status: afterHealth.healthy ? 'repaired' : 'partial',
+        reset_migrations: resetResult.reset,
+        migrations_run: migrationResult.migrationsRun,
+        remaining_issues: afterHealth.missing,
+      });
+    } catch (error) {
+      httpLogger.error('[API] POST /health/schema/repair error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
    * GET /api/v2/metrics
    * Prometheus metrics endpoint
    */

@@ -210,4 +210,125 @@ export async function initMlDataPool() {
   }
 }
 
-export default { query, getClient, transaction, testConnection, close, closePool, initMlDataPool };
+/**
+ * Check database schema health
+ * Verifies that required tables exist and reports missing ones
+ * @returns {Promise<{healthy: boolean, missing: string[], issues: string[]}>}
+ */
+export async function checkSchemaHealth() {
+  const requiredTables = [
+    'listings',
+    'marketplaces',
+    'components',
+    'suppliers',
+    'boms',
+    'bom_lines',
+    'listing_cost_overrides',
+    'jobs',
+    'listing_events',
+    'listing_offer_current',
+    'asin_entities',
+    'keepa_snapshots',
+    'feature_store',
+    'recommendations',
+    'recommendation_events',
+    'settings',
+  ];
+
+  const missing = [];
+  const issues = [];
+
+  for (const table of requiredTables) {
+    try {
+      const result = await query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = $1
+        ) as exists
+      `, [table]);
+
+      if (!result.rows[0].exists) {
+        missing.push(table);
+      }
+    } catch (error) {
+      issues.push(`Error checking table ${table}: ${error.message}`);
+    }
+  }
+
+  // Check if migrations are marked as applied
+  try {
+    const migrationsResult = await query('SELECT name FROM _migrations ORDER BY name');
+    const appliedMigrations = migrationsResult.rows.map(r => r.name);
+    console.log('[Database] Applied migrations:', appliedMigrations);
+
+    // Check if migration says it's applied but tables are missing
+    if (appliedMigrations.includes('001_slice_a_schema.sql') &&
+        (missing.includes('boms') || missing.includes('components'))) {
+      issues.push('Migration 001 marked as applied but tables missing - migration likely failed');
+    }
+  } catch {
+    // _migrations table might not exist
+  }
+
+  return {
+    healthy: missing.length === 0 && issues.length === 0,
+    missing,
+    issues,
+  };
+}
+
+/**
+ * Reset migration status for re-running
+ * Only resets migrations that have missing tables
+ * @returns {Promise<{reset: string[]}>}
+ */
+export async function resetFailedMigrations() {
+  const health = await checkSchemaHealth();
+  const reset = [];
+
+  if (health.missing.length === 0) {
+    console.log('[Database] No failed migrations to reset');
+    return { reset: [] };
+  }
+
+  // Map tables to their migrations
+  const tableMigrationMap = {
+    'marketplaces': '001_slice_a_schema.sql',
+    'suppliers': '001_slice_a_schema.sql',
+    'components': '001_slice_a_schema.sql',
+    'boms': '001_slice_a_schema.sql',
+    'bom_lines': '001_slice_a_schema.sql',
+    'listing_cost_overrides': '001_slice_a_schema.sql',
+    'jobs': '002_slice_b_schema.sql',
+    'listing_events': '002_slice_b_schema.sql',
+    'listing_offer_current': '002_slice_b_schema.sql',
+    'asin_entities': '003_slice_c_schema.sql',
+    'keepa_snapshots': '003_slice_c_schema.sql',
+    'feature_store': '003_slice_c_schema.sql',
+    'recommendations': '004_slice_d_schema.sql',
+    'recommendation_events': '004_slice_d_schema.sql',
+  };
+
+  const migrationsToReset = new Set();
+  for (const table of health.missing) {
+    const migration = tableMigrationMap[table];
+    if (migration) {
+      migrationsToReset.add(migration);
+    }
+  }
+
+  // Reset the migrations
+  for (const migration of migrationsToReset) {
+    try {
+      await query('DELETE FROM _migrations WHERE name = $1', [migration]);
+      reset.push(migration);
+      console.log(`[Database] Reset migration: ${migration}`);
+    } catch (error) {
+      console.error(`[Database] Failed to reset migration ${migration}:`, error.message);
+    }
+  }
+
+  return { reset };
+}
+
+export default { query, getClient, transaction, testConnection, close, closePool, initMlDataPool, checkSchemaHealth, resetFailedMigrations };
