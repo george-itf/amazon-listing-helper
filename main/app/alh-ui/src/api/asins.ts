@@ -19,7 +19,8 @@ export interface AsinEntity {
 export interface AsinAnalysis {
   asin_entity_id: number;
   asin: string;
-  market_data: {
+  sync_job_id?: number;
+  market_data?: {
     keepa_price_median_90d: number | null;
     keepa_price_p25_90d: number | null;
     keepa_price_p75_90d: number | null;

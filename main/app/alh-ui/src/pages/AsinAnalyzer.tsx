@@ -119,7 +119,7 @@ export function AsinAnalyzerPage() {
                 <span className="text-gray-600">ASIN</span>
                 <span className="font-mono">{analysis.asin}</span>
               </div>
-              {analysis.market_data.keepa_price_median_90d != null && (
+              {analysis.market_data?.keepa_price_median_90d != null && (
                 <>
                   <div className="flex justify-between">
                     <span className="text-gray-600">Price Median (90d)</span>
@@ -128,19 +128,19 @@ export function AsinAnalyzerPage() {
                   <div className="flex justify-between">
                     <span className="text-gray-600">Price Range</span>
                     <span>
-                      £{analysis.market_data.keepa_price_p25_90d?.toFixed(2) ?? '-'} - £
-                      {analysis.market_data.keepa_price_p75_90d?.toFixed(2) ?? '-'}
+                      £{analysis.market_data?.keepa_price_p25_90d?.toFixed(2) ?? '-'} - £
+                      {analysis.market_data?.keepa_price_p75_90d?.toFixed(2) ?? '-'}
                     </span>
                   </div>
                 </>
               )}
-              {analysis.market_data.keepa_offers_count_current != null && (
+              {analysis.market_data?.keepa_offers_count_current != null && (
                 <div className="flex justify-between">
                   <span className="text-gray-600">Current Offers</span>
                   <span>{analysis.market_data.keepa_offers_count_current}</span>
                 </div>
               )}
-              {analysis.market_data.keepa_volatility_90d != null && (
+              {analysis.market_data?.keepa_volatility_90d != null && (
                 <div className="flex justify-between">
                   <span className="text-gray-600">Price Volatility</span>
                   <span>{(analysis.market_data.keepa_volatility_90d * 100).toFixed(1)}%</span>
