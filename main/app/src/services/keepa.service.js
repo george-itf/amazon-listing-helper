@@ -16,6 +16,9 @@
 
 import { query, transaction } from '../database/connection.js';
 import { hasKeepaCredentials, getKeepaApiKey } from '../credentials-provider.js';
+import { keepaLogger } from '../lib/logger.js';
+import { recordKeepaCall, keepaTokensRemaining } from '../lib/metrics.js';
+import { captureException } from '../lib/sentry.js';
 
 const KEEPA_API_BASE = 'https://api.keepa.com';
 const UK_KEEPA_DOMAIN_ID = 2; // UK domain ID for Keepa
@@ -200,7 +203,7 @@ export async function fetchKeepaData(asins, options = {}) {
           ? parseInt(retryAfter, 10) * 1000
           : calculateBackoffDelay(attempt);
 
-        console.log(`[Keepa] Rate limited (429), attempt ${attempt + 1}/${config.maxRetries + 1}, waiting ${waitTime}ms`);
+        keepaLogger.warn({ attempt: attempt + 1, maxRetries: config.maxRetries + 1, waitTimeMs: waitTime }, 'Rate limited (429)');
 
         if (attempt < config.maxRetries) {
           await sleep(waitTime);
@@ -219,9 +222,10 @@ export async function fetchKeepaData(asins, options = {}) {
         throw new Error(`Keepa API error: ${data.error.message || data.error}`);
       }
 
-      // Log tokens remaining for monitoring
+      // Log tokens remaining for monitoring and update metrics
       if (rateLimitState.tokensRemaining !== null) {
-        console.log(`[Keepa] Request successful, tokens remaining: ${rateLimitState.tokensRemaining}`);
+        keepaLogger.debug({ tokensRemaining: rateLimitState.tokensRemaining }, 'Request successful');
+        keepaTokensRemaining.set(rateLimitState.tokensRemaining);
       }
 
       return data;
@@ -232,7 +236,7 @@ export async function fetchKeepaData(asins, options = {}) {
       // Check if we should retry
       if (isRetryableError(error, lastStatusCode) && attempt < config.maxRetries) {
         const delay = calculateBackoffDelay(attempt);
-        console.log(`[Keepa] Retryable error, attempt ${attempt + 1}/${config.maxRetries + 1}, waiting ${delay}ms: ${error.message}`);
+        keepaLogger.warn({ attempt: attempt + 1, maxRetries: config.maxRetries + 1, delayMs: delay, error: error.message }, 'Retryable error');
         await sleep(delay);
         continue;
       }
@@ -269,11 +273,11 @@ export async function fetchKeepaDataBatched(asins, options = {}) {
     batches.push(uniqueAsins.slice(i, i + config.maxBatchSize));
   }
 
-  console.log(`[Keepa] Fetching ${uniqueAsins.length} ASINs in ${batches.length} batch(es)`);
+  keepaLogger.info({ asinCount: uniqueAsins.length, batchCount: batches.length }, 'Fetching ASINs in batches');
 
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex];
-    console.log(`[Keepa] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} ASINs)`);
+    keepaLogger.debug({ batchNum: batchIndex + 1, totalBatches: batches.length, asinCount: batch.length }, 'Processing batch');
 
     try {
       const response = await fetchKeepaData(batch, options);
@@ -292,7 +296,8 @@ export async function fetchKeepaDataBatched(asins, options = {}) {
       }
 
     } catch (error) {
-      console.error(`[Keepa] Batch ${batchIndex + 1} failed: ${error.message}`);
+      keepaLogger.error({ batchNum: batchIndex + 1, err: error }, 'Batch failed');
+      captureException(error, { batchNum: batchIndex + 1, asins: batch });
       // Continue with other batches, mark failed ASINs
       for (const asin of batch) {
         results.set(asin, { error: error.message, failed: true });

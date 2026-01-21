@@ -29,20 +29,23 @@ export async function getListingById(listingId) {
  * @returns {Promise<Object>} Sales data including velocity
  */
 export async function getSalesVelocity(listingId, days = 30) {
+  // Validate days is a positive integer to prevent any injection
+  const safeDays = Math.max(1, Math.floor(Number(days) || 30));
+
   const result = await query(`
     SELECT COALESCE(SUM(units), 0) as total_units
     FROM listing_sales_daily
     WHERE listing_id = $1
-      AND date >= CURRENT_DATE - ($2 || ' days')::interval
-  `, [listingId, days]);
+      AND date >= CURRENT_DATE - (INTERVAL '1 day' * $2)
+  `, [listingId, safeDays]);
 
   const rawUnits = parseInt(result.rows[0]?.total_units || 0, 10);
   const totalUnits = isNaN(rawUnits) ? 0 : rawUnits;
-  const velocity = totalUnits / days;
+  const velocity = totalUnits / safeDays;
 
   return {
     listing_id: listingId,
-    days,
+    days: safeDays,
     total_units: totalUnits,
     velocity: Math.round(velocity * 100) / 100,
   };

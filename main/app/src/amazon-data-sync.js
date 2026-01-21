@@ -84,14 +84,21 @@ export async function syncOrders(daysBack = 30) {
 
   console.log(`[AmazonSync] Total orders fetched: ${orders.length}`);
 
-  // Save to database
+  // Save to database using batch upsert (eliminates N+1)
   let saved = 0;
-  for (const order of orders) {
-    try {
-      await upsertOrder(order);
-      saved++;
-    } catch (error) {
-      console.error(`[AmazonSync] Error saving order ${order.AmazonOrderId}:`, error.message);
+  try {
+    saved = await batchUpsertOrders(orders);
+    console.log(`[AmazonSync] Batch upserted ${saved} orders`);
+  } catch (error) {
+    console.error(`[AmazonSync] Batch upsert failed, falling back to sequential:`, error.message);
+    // Fallback to individual upserts if batch fails
+    for (const order of orders) {
+      try {
+        await upsertOrder(order);
+        saved++;
+      } catch (err) {
+        console.error(`[AmazonSync] Error saving order ${order.AmazonOrderId}:`, err.message);
+      }
     }
   }
 
@@ -181,14 +188,20 @@ export async function syncFbaInventory() {
     if (nextToken) await sleep(500);
   } while (nextToken);
 
-  // Save to database
+  // Save to database using batch upsert (eliminates N+1)
   let saved = 0;
-  for (const item of inventoryItems) {
-    try {
-      await upsertFbaInventory(item);
-      saved++;
-    } catch (error) {
-      console.error(`[AmazonSync] Error saving inventory ${item.sellerSku}:`, error.message);
+  try {
+    saved = await batchUpsertFbaInventory(inventoryItems);
+    console.log(`[AmazonSync] Batch upserted ${saved} inventory items`);
+  } catch (error) {
+    console.error(`[AmazonSync] Batch upsert failed, falling back to sequential:`, error.message);
+    for (const item of inventoryItems) {
+      try {
+        await upsertFbaInventory(item);
+        saved++;
+      } catch (err) {
+        console.error(`[AmazonSync] Error saving inventory ${item.sellerSku}:`, err.message);
+      }
     }
   }
 
@@ -239,11 +252,10 @@ export async function syncCompetitivePricing() {
         },
       });
 
-      if (response) {
-        for (const item of response) {
-          await upsertCompetitivePricing(item);
-          saved++;
-        }
+      if (response && Array.isArray(response)) {
+        // Batch upsert all items from this API call
+        const batchSaved = await batchUpsertCompetitivePricing(response);
+        saved += batchSaved;
       }
 
       console.log(`[AmazonSync] Processed ${Math.min(i + batchSize, asins.length)}/${asins.length} ASINs`);
@@ -482,13 +494,20 @@ export async function syncSalesAndTraffic(daysBack = 30) {
     const data = JSON.parse(content);
 
     let saved = 0;
-    if (data.salesAndTrafficByAsin) {
-      for (const item of data.salesAndTrafficByAsin) {
-        try {
-          await upsertSalesTraffic(item);
-          saved++;
-        } catch (error) {
-          console.error(`[AmazonSync] Error saving sales data:`, error.message);
+    if (data.salesAndTrafficByAsin && data.salesAndTrafficByAsin.length > 0) {
+      // Batch upsert all sales/traffic data (eliminates N+1)
+      try {
+        saved = await batchUpsertSalesTraffic(data.salesAndTrafficByAsin);
+        console.log(`[AmazonSync] Batch upserted ${saved} sales/traffic records`);
+      } catch (error) {
+        console.error(`[AmazonSync] Batch upsert failed, falling back to sequential:`, error.message);
+        for (const item of data.salesAndTrafficByAsin) {
+          try {
+            await upsertSalesTraffic(item);
+            saved++;
+          } catch (err) {
+            console.error(`[AmazonSync] Error saving sales data:`, err.message);
+          }
         }
       }
     }
@@ -657,6 +676,14 @@ export async function syncCatalogItems() {
 
 /**
  * Sync ALL available Amazon data
+ * Uses parallel execution where possible for better performance.
+ *
+ * Sync order:
+ * 1. Listings (must be first - provides base data)
+ * 2. Parallel batch 1: FBA Inventory, Orders, Financial Events (independent API endpoints)
+ * 3. Parallel batch 2: Competitive Pricing, FBA Fees, Catalog Items, Sales & Traffic
+ * 4. Listing Offers (last - most API intensive, separate rate limit bucket)
+ *
  * @returns {Promise<Object>} Combined results from all syncs
  */
 export async function syncAll() {
@@ -666,11 +693,11 @@ export async function syncAll() {
     errors: [],
   };
 
-  console.log('[AmazonSync] === STARTING FULL AMAZON DATA SYNC ===');
+  console.log('[AmazonSync] === STARTING FULL AMAZON DATA SYNC (PARALLELIZED) ===');
 
-  // 0. Listings Report (core data - sync first)
+  // Phase 0: Listings Report (core data - MUST sync first)
   try {
-    console.log('[AmazonSync] 0/9 - Syncing Listings from Report...');
+    console.log('[AmazonSync] Phase 0 - Syncing Listings from Report...');
     const listingsResult = await syncListings();
     results.syncs.listings = {
       success: true,
@@ -683,83 +710,60 @@ export async function syncAll() {
     results.errors.push({ sync: 'listings', error: error.message });
   }
 
-  // 1. FBA Inventory (API)
-  try {
-    console.log('[AmazonSync] 1/9 - Syncing FBA Inventory...');
-    results.syncs.fba_inventory = await syncFbaInventory();
-  } catch (error) {
-    console.error('[AmazonSync] FBA Inventory sync failed:', error.message);
-    results.errors.push({ sync: 'fba_inventory', error: error.message });
+  // Phase 1: Parallel - Independent API endpoints
+  console.log('[AmazonSync] Phase 1 - Parallel: FBA Inventory, Orders, Financial Events...');
+  const phase1Results = await Promise.allSettled([
+    syncFbaInventory().then(r => ({ name: 'fba_inventory', result: r })),
+    syncOrders(30).then(r => ({ name: 'orders', result: r })),
+    syncFinancialEvents(30).then(r => ({ name: 'financial_events', result: r })),
+  ]);
+
+  for (const outcome of phase1Results) {
+    if (outcome.status === 'fulfilled') {
+      results.syncs[outcome.value.name] = outcome.value.result;
+    } else {
+      const syncName = outcome.reason?.name || 'unknown';
+      console.error(`[AmazonSync] ${syncName} sync failed:`, outcome.reason?.message || outcome.reason);
+      results.errors.push({ sync: syncName, error: outcome.reason?.message || String(outcome.reason) });
+    }
   }
 
-  // 2. Orders (API)
-  try {
-    console.log('[AmazonSync] 2/9 - Syncing Orders...');
-    results.syncs.orders = await syncOrders(30);
-  } catch (error) {
-    console.error('[AmazonSync] Orders sync failed:', error.message);
-    results.errors.push({ sync: 'orders', error: error.message });
+  // Phase 2: Parallel - Syncs that query listings table + reports
+  console.log('[AmazonSync] Phase 2 - Parallel: Pricing, Fees, Catalog, Sales...');
+  const phase2Results = await Promise.allSettled([
+    syncCompetitivePricing().then(r => ({ name: 'competitive_pricing', result: r })),
+    syncFbaFees().then(r => ({ name: 'fba_fees', result: r })),
+    syncCatalogItems().then(r => ({ name: 'catalog_items', result: r })),
+    syncSalesAndTraffic(30).then(r => ({ name: 'sales_traffic', result: r })),
+  ]);
+
+  for (const outcome of phase2Results) {
+    if (outcome.status === 'fulfilled') {
+      results.syncs[outcome.value.name] = outcome.value.result;
+    } else {
+      const syncName = outcome.reason?.name || 'unknown';
+      console.error(`[AmazonSync] ${syncName} sync failed:`, outcome.reason?.message || outcome.reason);
+      results.errors.push({ sync: syncName, error: outcome.reason?.message || String(outcome.reason) });
+    }
   }
 
-  // 3. Competitive Pricing
+  // Phase 3: Listing Offers (most API intensive - run alone to avoid rate limits)
+  console.log('[AmazonSync] Phase 3 - Listing Offers...');
   try {
-    console.log('[AmazonSync] 3/9 - Syncing Competitive Pricing...');
-    results.syncs.competitive_pricing = await syncCompetitivePricing();
-  } catch (error) {
-    console.error('[AmazonSync] Competitive pricing sync failed:', error.message);
-    results.errors.push({ sync: 'competitive_pricing', error: error.message });
-  }
-
-  // 4. Listing Offers
-  try {
-    console.log('[AmazonSync] 4/9 - Syncing Listing Offers...');
     results.syncs.listing_offers = await syncListingOffers();
   } catch (error) {
     console.error('[AmazonSync] Listing offers sync failed:', error.message);
     results.errors.push({ sync: 'listing_offers', error: error.message });
   }
 
-  // 5. FBA Fees
-  try {
-    console.log('[AmazonSync] 5/9 - Syncing FBA Fees...');
-    results.syncs.fba_fees = await syncFbaFees();
-  } catch (error) {
-    console.error('[AmazonSync] FBA fees sync failed:', error.message);
-    results.errors.push({ sync: 'fba_fees', error: error.message });
-  }
-
-  // 6. Sales & Traffic Report
-  try {
-    console.log('[AmazonSync] 6/9 - Syncing Sales & Traffic...');
-    results.syncs.sales_traffic = await syncSalesAndTraffic(30);
-  } catch (error) {
-    console.error('[AmazonSync] Sales & traffic sync failed:', error.message);
-    results.errors.push({ sync: 'sales_traffic', error: error.message });
-  }
-
-  // 7. Financial Events
-  try {
-    console.log('[AmazonSync] 7/9 - Syncing Financial Events...');
-    results.syncs.financial_events = await syncFinancialEvents(30);
-  } catch (error) {
-    console.error('[AmazonSync] Financial events sync failed:', error.message);
-    results.errors.push({ sync: 'financial_events', error: error.message });
-  }
-
-  // 8. Catalog Items
-  try {
-    console.log('[AmazonSync] 8/9 - Syncing Catalog Items...');
-    results.syncs.catalog_items = await syncCatalogItems();
-  } catch (error) {
-    console.error('[AmazonSync] Catalog items sync failed:', error.message);
-    results.errors.push({ sync: 'catalog_items', error: error.message });
-  }
-
   results.completed_at = new Date().toISOString();
   results.success = results.errors.length === 0;
 
+  const successCount = Object.keys(results.syncs).length;
+  const totalCount = successCount + results.errors.length;
+
   console.log('[AmazonSync] === FULL SYNC COMPLETE ===');
-  console.log(`[AmazonSync] Successful: ${Object.keys(results.syncs).length - results.errors.length}/${Object.keys(results.syncs).length}`);
+  console.log(`[AmazonSync] Successful: ${successCount}/${totalCount}`);
 
   return results;
 }
@@ -1003,6 +1007,334 @@ export async function ensureTables() {
 
   console.log('[AmazonSync] Database tables ready');
 }
+
+// ============================================================================
+// BATCH UPSERT FUNCTIONS (eliminates N+1)
+// ============================================================================
+
+/**
+ * Batch upsert orders using UNNEST
+ */
+async function batchUpsertOrders(orders) {
+  if (!orders || orders.length === 0) return 0;
+
+  const amazonOrderIds = [];
+  const sellerOrderIds = [];
+  const purchaseDates = [];
+  const orderStatuses = [];
+  const fulfillmentChannels = [];
+  const salesChannels = [];
+  const shipServiceLevels = [];
+  const orderTotalAmounts = [];
+  const orderTotalCurrencies = [];
+  const numbersOfItemsShipped = [];
+  const numbersOfItemsUnshipped = [];
+  const buyerEmails = [];
+  const buyerNames = [];
+  const shippingAddresses = [];
+  const rawJsons = [];
+
+  for (const order of orders) {
+    amazonOrderIds.push(order.AmazonOrderId);
+    sellerOrderIds.push(order.SellerOrderId || null);
+    purchaseDates.push(order.PurchaseDate || null);
+    orderStatuses.push(order.OrderStatus || null);
+    fulfillmentChannels.push(order.FulfillmentChannel || null);
+    salesChannels.push(order.SalesChannel || null);
+    shipServiceLevels.push(order.ShipServiceLevel || null);
+    orderTotalAmounts.push(order.OrderTotal?.Amount || null);
+    orderTotalCurrencies.push(order.OrderTotal?.CurrencyCode || null);
+    numbersOfItemsShipped.push(order.NumberOfItemsShipped || 0);
+    numbersOfItemsUnshipped.push(order.NumberOfItemsUnshipped || 0);
+    buyerEmails.push(order.BuyerEmail || null);
+    buyerNames.push(order.BuyerName || null);
+    shippingAddresses.push(JSON.stringify(order.ShippingAddress || {}));
+    rawJsons.push(JSON.stringify(order));
+  }
+
+  const result = await query(`
+    INSERT INTO amazon_orders (
+      amazon_order_id, seller_order_id, purchase_date, order_status,
+      fulfillment_channel, sales_channel, ship_service_level,
+      order_total_amount, order_total_currency,
+      number_of_items_shipped, number_of_items_unshipped,
+      buyer_email, buyer_name, shipping_address_json, raw_json, updated_at
+    )
+    SELECT * FROM UNNEST(
+      $1::varchar[], $2::varchar[], $3::timestamp[], $4::varchar[],
+      $5::varchar[], $6::varchar[], $7::varchar[],
+      $8::decimal[], $9::varchar[],
+      $10::integer[], $11::integer[],
+      $12::varchar[], $13::varchar[], $14::jsonb[], $15::jsonb[]
+    ) AS t(amazon_order_id, seller_order_id, purchase_date, order_status,
+           fulfillment_channel, sales_channel, ship_service_level,
+           order_total_amount, order_total_currency,
+           number_of_items_shipped, number_of_items_unshipped,
+           buyer_email, buyer_name, shipping_address_json, raw_json)
+    CROSS JOIN (SELECT CURRENT_TIMESTAMP AS updated_at) AS times
+    ON CONFLICT (amazon_order_id) DO UPDATE SET
+      order_status = EXCLUDED.order_status,
+      number_of_items_shipped = EXCLUDED.number_of_items_shipped,
+      number_of_items_unshipped = EXCLUDED.number_of_items_unshipped,
+      raw_json = EXCLUDED.raw_json,
+      updated_at = CURRENT_TIMESTAMP
+  `, [
+    amazonOrderIds, sellerOrderIds, purchaseDates, orderStatuses,
+    fulfillmentChannels, salesChannels, shipServiceLevels,
+    orderTotalAmounts, orderTotalCurrencies,
+    numbersOfItemsShipped, numbersOfItemsUnshipped,
+    buyerEmails, buyerNames, shippingAddresses, rawJsons,
+  ]);
+
+  return result.rowCount;
+}
+
+/**
+ * Batch upsert FBA inventory using UNNEST
+ */
+async function batchUpsertFbaInventory(items) {
+  if (!items || items.length === 0) return 0;
+
+  const sellerSkus = [];
+  const asins = [];
+  const fnSkus = [];
+  const productNames = [];
+  const conditions = [];
+  const fulfillableQuantities = [];
+  const inboundWorkingQuantities = [];
+  const inboundShippedQuantities = [];
+  const inboundReceivingQuantities = [];
+  const reservedQuantities = [];
+  const unfulfillableQuantities = [];
+  const researchingQuantities = [];
+  const totalQuantities = [];
+  const rawJsons = [];
+
+  for (const item of items) {
+    sellerSkus.push(item.sellerSku);
+    asins.push(item.asin || null);
+    fnSkus.push(item.fnSku || null);
+    productNames.push(item.productName || null);
+    conditions.push(item.condition || null);
+    fulfillableQuantities.push(item.inventoryDetails?.fulfillableQuantity || 0);
+    inboundWorkingQuantities.push(item.inventoryDetails?.inboundWorkingQuantity || 0);
+    inboundShippedQuantities.push(item.inventoryDetails?.inboundShippedQuantity || 0);
+    inboundReceivingQuantities.push(item.inventoryDetails?.inboundReceivingQuantity || 0);
+    reservedQuantities.push(item.inventoryDetails?.reservedQuantity?.totalReservedQuantity || 0);
+    unfulfillableQuantities.push(item.inventoryDetails?.unfulfillableQuantity?.totalUnfulfillableQuantity || 0);
+    researchingQuantities.push(item.inventoryDetails?.researchingQuantity?.totalResearchingQuantity || 0);
+    totalQuantities.push(item.totalQuantity || 0);
+    rawJsons.push(JSON.stringify(item));
+  }
+
+  const result = await query(`
+    INSERT INTO amazon_fba_inventory (
+      seller_sku, asin, fn_sku, product_name, condition,
+      fulfillable_quantity, inbound_working_quantity, inbound_shipped_quantity,
+      inbound_receiving_quantity, reserved_quantity, unfulfillable_quantity,
+      researching_quantity, total_quantity, raw_json, captured_at, updated_at
+    )
+    SELECT seller_sku, asin, fn_sku, product_name, condition,
+           fulfillable_quantity, inbound_working_quantity, inbound_shipped_quantity,
+           inbound_receiving_quantity, reserved_quantity, unfulfillable_quantity,
+           researching_quantity, total_quantity, raw_json,
+           CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    FROM UNNEST(
+      $1::varchar[], $2::varchar[], $3::varchar[], $4::text[], $5::varchar[],
+      $6::integer[], $7::integer[], $8::integer[],
+      $9::integer[], $10::integer[], $11::integer[],
+      $12::integer[], $13::integer[], $14::jsonb[]
+    ) AS t(seller_sku, asin, fn_sku, product_name, condition,
+           fulfillable_quantity, inbound_working_quantity, inbound_shipped_quantity,
+           inbound_receiving_quantity, reserved_quantity, unfulfillable_quantity,
+           researching_quantity, total_quantity, raw_json)
+    ON CONFLICT (seller_sku) DO UPDATE SET
+      fulfillable_quantity = EXCLUDED.fulfillable_quantity,
+      inbound_working_quantity = EXCLUDED.inbound_working_quantity,
+      inbound_shipped_quantity = EXCLUDED.inbound_shipped_quantity,
+      inbound_receiving_quantity = EXCLUDED.inbound_receiving_quantity,
+      reserved_quantity = EXCLUDED.reserved_quantity,
+      unfulfillable_quantity = EXCLUDED.unfulfillable_quantity,
+      researching_quantity = EXCLUDED.researching_quantity,
+      total_quantity = EXCLUDED.total_quantity,
+      raw_json = EXCLUDED.raw_json,
+      captured_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+  `, [
+    sellerSkus, asins, fnSkus, productNames, conditions,
+    fulfillableQuantities, inboundWorkingQuantities, inboundShippedQuantities,
+    inboundReceivingQuantities, reservedQuantities, unfulfillableQuantities,
+    researchingQuantities, totalQuantities, rawJsons,
+  ]);
+
+  return result.rowCount;
+}
+
+/**
+ * Batch upsert sales/traffic data using UNNEST
+ */
+async function batchUpsertSalesTraffic(items) {
+  if (!items || items.length === 0) return 0;
+
+  const asins = [];
+  const dates = [];
+  const sessions = [];
+  const sessionPercentages = [];
+  const pageViews = [];
+  const pageViewsPercentages = [];
+  const buyBoxPercentages = [];
+  const unitsOrdered = [];
+  const unitsOrderedB2B = [];
+  const unitSessionPercentages = [];
+  const salesAmounts = [];
+  const salesCurrencies = [];
+  const totalOrderItems = [];
+  const rawJsons = [];
+
+  for (const item of items) {
+    const traffic = item.trafficByAsin || {};
+    const sales = item.salesByAsin || {};
+
+    asins.push(item.parentAsin || item.childAsin);
+    dates.push(item.date);
+    sessions.push(traffic.sessions || 0);
+    sessionPercentages.push(traffic.sessionPercentage || 0);
+    pageViews.push(traffic.pageViews || 0);
+    pageViewsPercentages.push(traffic.pageViewsPercentage || 0);
+    buyBoxPercentages.push(traffic.buyBoxPercentage || 0);
+    unitsOrdered.push(sales.unitsOrdered || 0);
+    unitsOrderedB2B.push(sales.unitsOrderedB2B || 0);
+    unitSessionPercentages.push(traffic.unitSessionPercentage || 0);
+    salesAmounts.push(sales.orderedProductSales?.amount || 0);
+    salesCurrencies.push(sales.orderedProductSales?.currencyCode || 'GBP');
+    totalOrderItems.push(sales.totalOrderItems || 0);
+    rawJsons.push(JSON.stringify(item));
+  }
+
+  const result = await query(`
+    INSERT INTO amazon_sales_traffic (
+      asin, date, sessions, session_percentage, page_views,
+      page_views_percentage, buy_box_percentage, units_ordered,
+      units_ordered_b2b, unit_session_percentage, ordered_product_sales_amount,
+      ordered_product_sales_currency, total_order_items, raw_json, updated_at
+    )
+    SELECT asin, date, sessions, session_percentage, page_views,
+           page_views_percentage, buy_box_percentage, units_ordered,
+           units_ordered_b2b, unit_session_percentage, ordered_product_sales_amount,
+           ordered_product_sales_currency, total_order_items, raw_json,
+           CURRENT_TIMESTAMP
+    FROM UNNEST(
+      $1::varchar[], $2::date[], $3::integer[], $4::decimal[], $5::integer[],
+      $6::decimal[], $7::decimal[], $8::integer[],
+      $9::integer[], $10::decimal[], $11::decimal[],
+      $12::varchar[], $13::integer[], $14::jsonb[]
+    ) AS t(asin, date, sessions, session_percentage, page_views,
+           page_views_percentage, buy_box_percentage, units_ordered,
+           units_ordered_b2b, unit_session_percentage, ordered_product_sales_amount,
+           ordered_product_sales_currency, total_order_items, raw_json)
+    ON CONFLICT (asin, date) DO UPDATE SET
+      sessions = EXCLUDED.sessions,
+      session_percentage = EXCLUDED.session_percentage,
+      page_views = EXCLUDED.page_views,
+      buy_box_percentage = EXCLUDED.buy_box_percentage,
+      units_ordered = EXCLUDED.units_ordered,
+      ordered_product_sales_amount = EXCLUDED.ordered_product_sales_amount,
+      raw_json = EXCLUDED.raw_json,
+      updated_at = CURRENT_TIMESTAMP
+  `, [
+    asins, dates, sessions, sessionPercentages, pageViews,
+    pageViewsPercentages, buyBoxPercentages, unitsOrdered,
+    unitsOrderedB2B, unitSessionPercentages, salesAmounts,
+    salesCurrencies, totalOrderItems, rawJsons,
+  ]);
+
+  return result.rowCount;
+}
+
+/**
+ * Batch upsert competitive pricing using UNNEST
+ */
+async function batchUpsertCompetitivePricing(items) {
+  if (!items || items.length === 0) return 0;
+
+  const marketplaceId = getDefaultMarketplaceId();
+  const asins = [];
+  const marketplaceIds = [];
+  const competitivePriceAmounts = [];
+  const competitivePriceCurrencies = [];
+  const competitivePriceConditions = [];
+  const landedPriceAmounts = [];
+  const listingPriceAmounts = [];
+  const shippingAmounts = [];
+  const numbersOfOfferListings = [];
+  const salesRanks = [];
+  const salesRankCategories = [];
+  const rawJsons = [];
+
+  for (const item of items) {
+    const pricing = item.Product?.CompetitivePricing;
+    const offers = item.Product?.NumberOfOfferListings;
+    const salesRank = item.Product?.SalesRankings?.[0];
+
+    asins.push(item.ASIN);
+    marketplaceIds.push(marketplaceId);
+    competitivePriceAmounts.push(pricing?.CompetitivePrices?.[0]?.Price?.LandedPrice?.Amount || null);
+    competitivePriceCurrencies.push(pricing?.CompetitivePrices?.[0]?.Price?.LandedPrice?.CurrencyCode || null);
+    competitivePriceConditions.push(pricing?.CompetitivePrices?.[0]?.condition || null);
+    landedPriceAmounts.push(pricing?.CompetitivePrices?.[0]?.Price?.LandedPrice?.Amount || null);
+    listingPriceAmounts.push(pricing?.CompetitivePrices?.[0]?.Price?.ListingPrice?.Amount || null);
+    shippingAmounts.push(pricing?.CompetitivePrices?.[0]?.Price?.Shipping?.Amount || null);
+    numbersOfOfferListings.push(offers?.[0]?.Count || null);
+    salesRanks.push(salesRank?.Rank || null);
+    salesRankCategories.push(salesRank?.ProductCategoryId || null);
+    rawJsons.push(JSON.stringify(item));
+  }
+
+  const result = await query(`
+    INSERT INTO amazon_competitive_pricing (
+      asin, marketplace_id, competitive_price_amount, competitive_price_currency,
+      competitive_price_condition, landed_price_amount, listing_price_amount,
+      shipping_amount, number_of_offer_listings, sales_rank, sales_rank_category,
+      raw_json, captured_at, updated_at
+    )
+    SELECT asin, marketplace_id, competitive_price_amount, competitive_price_currency,
+           competitive_price_condition, landed_price_amount, listing_price_amount,
+           shipping_amount, number_of_offer_listings, sales_rank, sales_rank_category,
+           raw_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    FROM UNNEST(
+      $1::varchar[], $2::varchar[], $3::decimal[], $4::varchar[],
+      $5::varchar[], $6::decimal[], $7::decimal[],
+      $8::decimal[], $9::integer[], $10::integer[], $11::varchar[],
+      $12::jsonb[]
+    ) AS t(asin, marketplace_id, competitive_price_amount, competitive_price_currency,
+           competitive_price_condition, landed_price_amount, listing_price_amount,
+           shipping_amount, number_of_offer_listings, sales_rank, sales_rank_category,
+           raw_json)
+    ON CONFLICT (asin, marketplace_id) DO UPDATE SET
+      competitive_price_amount = EXCLUDED.competitive_price_amount,
+      competitive_price_currency = EXCLUDED.competitive_price_currency,
+      landed_price_amount = EXCLUDED.landed_price_amount,
+      listing_price_amount = EXCLUDED.listing_price_amount,
+      shipping_amount = EXCLUDED.shipping_amount,
+      number_of_offer_listings = EXCLUDED.number_of_offer_listings,
+      sales_rank = EXCLUDED.sales_rank,
+      sales_rank_category = EXCLUDED.sales_rank_category,
+      raw_json = EXCLUDED.raw_json,
+      captured_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+  `, [
+    asins, marketplaceIds, competitivePriceAmounts, competitivePriceCurrencies,
+    competitivePriceConditions, landedPriceAmounts, listingPriceAmounts,
+    shippingAmounts, numbersOfOfferListings, salesRanks, salesRankCategories,
+    rawJsons,
+  ]);
+
+  return result.rowCount;
+}
+
+// ============================================================================
+// SINGLE-ROW UPSERT FUNCTIONS (used as fallback or for single items)
+// ============================================================================
 
 // Upsert functions for each data type
 async function upsertOrder(order) {

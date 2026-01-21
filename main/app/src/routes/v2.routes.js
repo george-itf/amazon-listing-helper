@@ -14,18 +14,47 @@ import * as listingRepo from '../repositories/listing.repository.js';
 import * as economicsService from '../services/economics.service.js';
 import * as listingService from '../services/listing.service.js';
 import { query } from '../database/connection.js';
+import { getSafeErrorMessage, logError } from '../lib/error-handler.js';
+import * as schemas from '../lib/validation-schemas.js';
+import { httpLogger } from '../lib/logger.js';
 
 /**
  * Wrap response data in standard API response format
  * Frontend expects: { success: boolean, data?: T, error?: string }
  * @param {any} data - Response data (or null for errors)
- * @param {string} [errorMessage] - Error message if this is an error response
+ * @param {string|Error} [errorMessage] - Error message if this is an error response
  */
 function wrapResponse(data, errorMessage = null) {
   if (errorMessage) {
-    return { success: false, error: errorMessage, data: null };
+    // Sanitize error message to prevent internal details leaking
+    const safeMessage = typeof errorMessage === 'string'
+      ? getSafeErrorMessage({ message: errorMessage })
+      : getSafeErrorMessage(errorMessage);
+    return { success: false, error: safeMessage, data: null };
   }
   return { success: true, data };
+}
+
+/**
+ * Handle and log errors safely
+ * @param {string} context - Error context for logging
+ * @param {Error} error - The error
+ * @param {Object} reply - Fastify reply
+ * @param {number} [statusCode=500] - HTTP status code
+ */
+function handleError(context, error, reply, statusCode = 500) {
+  logError(context, error);
+  const safeMessage = getSafeErrorMessage(error);
+
+  // Determine status code from error if not specified
+  if (statusCode === 500) {
+    const msg = error?.message?.toLowerCase() || '';
+    if (msg.includes('not found')) statusCode = 404;
+    else if (msg.includes('already exists') || msg.includes('duplicate')) statusCode = 409;
+    else if (msg.includes('invalid') || msg.includes('required')) statusCode = 400;
+  }
+
+  return reply.status(statusCode).send({ success: false, error: safeMessage });
 }
 
 /**
@@ -48,7 +77,7 @@ export async function registerV2Routes(fastify) {
       });
       return wrapResponse(suppliers);
     } catch (error) {
-      console.error('[API] GET /suppliers error:', error.message);
+      httpLogger.error('[API] GET /suppliers error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -61,7 +90,7 @@ export async function registerV2Routes(fastify) {
       }
       return wrapResponse(supplier);
     } catch (error) {
-      console.error('[API] GET /suppliers/:id error:', error.message);
+      httpLogger.error('[API] GET /suppliers/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -71,7 +100,7 @@ export async function registerV2Routes(fastify) {
       const supplier = await supplierRepo.create(request.body);
       return reply.status(201).send(wrapResponse(supplier));
     } catch (error) {
-      console.error('[API] POST /suppliers error:', error.message);
+      httpLogger.error('[API] POST /suppliers error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -87,7 +116,7 @@ export async function registerV2Routes(fastify) {
       }
       return wrapResponse(supplier);
     } catch (error) {
-      console.error('[API] PUT /suppliers/:id error:', error.message);
+      httpLogger.error('[API] PUT /suppliers/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -100,7 +129,7 @@ export async function registerV2Routes(fastify) {
       }
       return wrapResponse({ deleted: true });
     } catch (error) {
-      console.error('[API] DELETE /suppliers/:id error:', error.message);
+      httpLogger.error('[API] DELETE /suppliers/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -121,7 +150,7 @@ export async function registerV2Routes(fastify) {
       });
       return wrapResponse(components);
     } catch (error) {
-      console.error('[API] GET /components error:', error.message);
+      httpLogger.error('[API] GET /components error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -131,7 +160,7 @@ export async function registerV2Routes(fastify) {
       const categories = await componentRepo.getCategories();
       return wrapResponse(categories);
     } catch (error) {
-      console.error('[API] GET /components/categories error:', error.message);
+      httpLogger.error('[API] GET /components/categories error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -144,7 +173,7 @@ export async function registerV2Routes(fastify) {
       }
       return wrapResponse(component);
     } catch (error) {
-      console.error('[API] GET /components/:id error:', error.message);
+      httpLogger.error('[API] GET /components/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -159,7 +188,7 @@ export async function registerV2Routes(fastify) {
       const component = await componentRepo.create(request.body);
       return reply.status(201).send(wrapResponse(component));
     } catch (error) {
-      console.error('[API] POST /components error:', error.message);
+      httpLogger.error('[API] POST /components error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -175,7 +204,7 @@ export async function registerV2Routes(fastify) {
       }
       return wrapResponse(component);
     } catch (error) {
-      console.error('[API] PUT /components/:id error:', error.message);
+      httpLogger.error('[API] PUT /components/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -188,7 +217,7 @@ export async function registerV2Routes(fastify) {
       }
       return wrapResponse({ deleted: true });
     } catch (error) {
-      console.error('[API] DELETE /components/:id error:', error.message);
+      httpLogger.error('[API] DELETE /components/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -207,7 +236,7 @@ export async function registerV2Routes(fastify) {
       const result = await componentRepo.importFromCsv(rows);
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] POST /components/import error:', error.message);
+      httpLogger.error('[API] POST /components/import error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -246,7 +275,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(mapped);
     } catch (error) {
-      console.error('[API] GET /listings error:', error.message);
+      httpLogger.error('[API] GET /listings error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -281,7 +310,7 @@ export async function registerV2Routes(fastify) {
         updated_at: listing.updatedAt || listing.updated_at || new Date().toISOString(),
       });
     } catch (error) {
-      console.error('[API] GET /listings/:id error:', error.message);
+      httpLogger.error('[API] GET /listings/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -336,7 +365,7 @@ export async function registerV2Routes(fastify) {
       const result = await query(sql, params);
       return wrapResponse(result.rows);
     } catch (error) {
-      console.error('[API] GET /boms error:', error.message);
+      httpLogger.error('[API] GET /boms error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -447,7 +476,7 @@ export async function registerV2Routes(fastify) {
         lines_copied: linesResult.rows.length,
       }));
     } catch (error) {
-      console.error('[API] POST /boms/:id/clone error:', error.message);
+      httpLogger.error('[API] POST /boms/:id/clone error:', error.message);
       return reply.status(500).send({ success: false, error: error.message });
     }
   });
@@ -533,7 +562,7 @@ export async function registerV2Routes(fastify) {
         lines_copied: linesResult.rows.length,
       }));
     } catch (error) {
-      console.error('[API] POST /asins/:id/bom/clone-from-listing error:', error.message);
+      httpLogger.error('[API] POST /asins/:id/bom/clone-from-listing error:', error.message);
       return reply.status(500).send({ success: false, error: error.message });
     }
   });
@@ -583,7 +612,7 @@ export async function registerV2Routes(fastify) {
       // Return null for no BOM - frontend handles this
       return wrapResponse(bom || null);
     } catch (error) {
-      console.error('[API] GET /listings/:id/bom error:', error.message);
+      httpLogger.error('[API] GET /listings/:id/bom error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -598,7 +627,7 @@ export async function registerV2Routes(fastify) {
       const versions = await bomRepo.getVersionHistory(listingId);
       return wrapResponse(versions);
     } catch (error) {
-      console.error('[API] GET /listings/:id/bom/history error:', error.message);
+      httpLogger.error('[API] GET /listings/:id/bom/history error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -631,7 +660,7 @@ export async function registerV2Routes(fastify) {
       }
       return wrapResponse(bom);
     } catch (error) {
-      console.error('[API] GET /boms/:id error:', error.message);
+      httpLogger.error('[API] GET /boms/:id error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -667,7 +696,7 @@ export async function registerV2Routes(fastify) {
       const listings = await bomRepo.getListingsWithoutBom(parseInt(limit, 10));
       return wrapResponse(listings);
     } catch (error) {
-      console.error('[API] GET /boms/missing error:', error.message);
+      httpLogger.error('[API] GET /boms/missing error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -727,7 +756,7 @@ export async function registerV2Routes(fastify) {
       const results = await economicsService.calculateBatchEconomics(listing_ids);
       return wrapResponse(results);
     } catch (error) {
-      console.error('[API] POST /economics/batch error:', error.message);
+      httpLogger.error('[API] POST /economics/batch error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -762,7 +791,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result.rows[0]);
     } catch (error) {
-      console.error('[API] GET /listings/:id/cost-overrides error:', error.message);
+      httpLogger.error('[API] GET /listings/:id/cost-overrides error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -807,7 +836,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result.rows[0]);
     } catch (error) {
-      console.error('[API] PUT /listings/:id/cost-overrides error:', error.message);
+      httpLogger.error('[API] PUT /listings/:id/cost-overrides error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -836,7 +865,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(settings);
     } catch (error) {
-      console.error('[API] GET /settings error:', error.message);
+      httpLogger.error('[API] GET /settings error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -863,7 +892,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse({ updated: true });
     } catch (error) {
-      console.error('[API] PUT /settings error:', error.message);
+      httpLogger.error('[API] PUT /settings error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -878,18 +907,12 @@ export async function registerV2Routes(fastify) {
    * Body: { price_inc_vat }
    * Response: economics at new price + guardrails result
    */
-  fastify.post('/api/v2/listings/:listingId/price/preview', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/price/preview', {
+    schema: schemas.pricePreviewSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { price_inc_vat } = request.body;
-
-    if (price_inc_vat === undefined || price_inc_vat === null) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat is required' });
-    }
-
     const newPriceIncVat = parseFloat(price_inc_vat);
-    if (isNaN(newPriceIncVat) || newPriceIncVat < 0) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat must be a positive number' });
-    }
 
     try {
       const { validatePriceChange, calculateDaysOfCover } = await import('../services/guardrails.service.js');
@@ -961,22 +984,12 @@ export async function registerV2Routes(fastify) {
    * Body: { price_inc_vat, reason, correlation_id? }
    * Response: { job_id, status, listing_event_id }
    */
-  fastify.post('/api/v2/listings/:listingId/price/publish', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/price/publish', {
+    schema: schemas.pricePublishSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { price_inc_vat, reason, correlation_id } = request.body;
-
-    // Validate required fields per DATA_CONTRACTS §5.1
-    if (price_inc_vat === undefined || price_inc_vat === null) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat is required' });
-    }
-    if (!reason) {
-      return reply.status(400).send({ success: false, error: 'reason is required' });
-    }
-
     const newPriceIncVat = parseFloat(price_inc_vat);
-    if (isNaN(newPriceIncVat) || newPriceIncVat < 0) {
-      return reply.status(400).send({ success: false, error: 'price_inc_vat must be a positive number' });
-    }
 
     try {
       const { validatePriceChange, calculateDaysOfCover } = await import('../services/guardrails.service.js');
@@ -1058,18 +1071,12 @@ export async function registerV2Routes(fastify) {
    * Preview stock change with guardrails check
    * Body: { available_quantity }
    */
-  fastify.post('/api/v2/listings/:listingId/stock/preview', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/stock/preview', {
+    schema: schemas.stockPreviewSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { available_quantity } = request.body;
-
-    if (available_quantity === undefined || available_quantity === null) {
-      return reply.status(400).send({ success: false, error: 'available_quantity is required' });
-    }
-
     const newQuantity = parseInt(available_quantity, 10);
-    if (isNaN(newQuantity) || newQuantity < 0) {
-      return reply.status(400).send({ success: false, error: 'available_quantity must be a non-negative integer' });
-    }
 
     try {
       const { query: dbQuery } = await import('../database/connection.js');
@@ -1131,22 +1138,12 @@ export async function registerV2Routes(fastify) {
    * Publish stock change - creates job and listing_event
    * Body: { available_quantity, reason }
    */
-  fastify.post('/api/v2/listings/:listingId/stock/publish', async (request, reply) => {
+  fastify.post('/api/v2/listings/:listingId/stock/publish', {
+    schema: schemas.stockPublishSchema,
+  }, async (request, reply) => {
     const listingId = parseInt(request.params.listingId, 10);
     const { available_quantity, reason } = request.body;
-
-    // Validate required fields per DATA_CONTRACTS §5.2
-    if (available_quantity === undefined || available_quantity === null) {
-      return reply.status(400).send({ success: false, error: 'available_quantity is required' });
-    }
-    if (!reason) {
-      return reply.status(400).send({ success: false, error: 'reason is required' });
-    }
-
     const newQuantity = parseInt(available_quantity, 10);
-    if (isNaN(newQuantity) || newQuantity < 0) {
-      return reply.status(400).send({ success: false, error: 'available_quantity must be a non-negative integer' });
-    }
 
     try {
       // Get current listing via service
@@ -2592,7 +2589,7 @@ export async function registerV2Routes(fastify) {
       const result = await testConnection();
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] Sync test error:', error);
+      httpLogger.error('[API] Sync test error:', error);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2620,8 +2617,8 @@ export async function registerV2Routes(fastify) {
         ...result,
       });
     } catch (error) {
-      console.error('[API] Sync listings error:', error.message);
-      console.error('[API] Sync listings stack:', error.stack);
+      httpLogger.error('[API] Sync listings error:', error.message);
+      httpLogger.error('[API] Sync listings stack:', error.stack);
       return reply.status(500).send({
         success: false,
         error: error.message || 'Sync failed',
@@ -2640,7 +2637,7 @@ export async function registerV2Routes(fastify) {
       const status = await getSyncStatus();
       return wrapResponse(status);
     } catch (error) {
-      console.error('[API] Sync status error:', error);
+      httpLogger.error('[API] Sync status error:', error);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2671,7 +2668,7 @@ export async function registerV2Routes(fastify) {
         ...result,
       });
     } catch (error) {
-      console.error('[API] Full sync error:', error.message);
+      httpLogger.error('[API] Full sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2692,7 +2689,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] Orders sync error:', error.message);
+      httpLogger.error('[API] Orders sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2712,7 +2709,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] FBA inventory sync error:', error.message);
+      httpLogger.error('[API] FBA inventory sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2732,7 +2729,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] Competitive pricing sync error:', error.message);
+      httpLogger.error('[API] Competitive pricing sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2752,7 +2749,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] Listing offers sync error:', error.message);
+      httpLogger.error('[API] Listing offers sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2772,7 +2769,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] FBA fees sync error:', error.message);
+      httpLogger.error('[API] FBA fees sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2793,7 +2790,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] Sales/traffic sync error:', error.message);
+      httpLogger.error('[API] Sales/traffic sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2814,7 +2811,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] Financial events sync error:', error.message);
+      httpLogger.error('[API] Financial events sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -2834,7 +2831,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result);
     } catch (error) {
-      console.error('[API] Catalog sync error:', error.message);
+      httpLogger.error('[API] Catalog sync error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3112,7 +3109,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(dashboard);
     } catch (error) {
-      console.error('[API] Dashboard error:', error.message);
+      httpLogger.error('[API] Dashboard error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3161,7 +3158,7 @@ export async function registerV2Routes(fastify) {
       if (error.message.includes('does not exist')) {
         return reply.status(400).send(wrapResponse(null, 'ML data pool not initialized. Run migration 005_ml_data_pool.sql'));
       }
-      console.error('[API] ML data pool error:', error);
+      httpLogger.error('[API] ML data pool error:', error);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3209,7 +3206,7 @@ export async function registerV2Routes(fastify) {
       if (error.message.includes('does not exist')) {
         return reply.status(400).send(wrapResponse(null, 'ML training export not initialized. Run migration 005_ml_data_pool.sql'));
       }
-      console.error('[API] ML training export error:', error);
+      httpLogger.error('[API] ML training export error:', error);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3224,7 +3221,7 @@ export async function registerV2Routes(fastify) {
       await dbQuery('SELECT refresh_ml_data_pool()');
       return wrapResponse({ message: 'ML data pool refreshed successfully' });
     } catch (error) {
-      console.error('[API] ML refresh error:', error);
+      httpLogger.error('[API] ML refresh error:', error);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3259,7 +3256,7 @@ export async function registerV2Routes(fastify) {
           message: 'ML data pool not initialized. Run migration 005_ml_data_pool.sql'
         });
       }
-      console.error('[API] ML stats error:', error);
+      httpLogger.error('[API] ML stats error:', error);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3289,7 +3286,7 @@ export async function registerV2Routes(fastify) {
         ...result,
       });
     } catch (error) {
-      console.error('[API] ML features compute error:', error.message);
+      httpLogger.error('[API] ML features compute error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3325,7 +3322,7 @@ export async function registerV2Routes(fastify) {
       if (error.message.includes('does not exist')) {
         return wrapResponse({ features: null, message: 'Run POST /api/v2/ml/features/compute first' });
       }
-      console.error('[API] ML features get error:', error.message);
+      httpLogger.error('[API] ML features get error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3351,7 +3348,7 @@ export async function registerV2Routes(fastify) {
         features,
       });
     } catch (error) {
-      console.error('[API] ML features compute error:', error.message);
+      httpLogger.error('[API] ML features compute error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3404,7 +3401,7 @@ export async function registerV2Routes(fastify) {
       if (error.message.includes('does not exist')) {
         return wrapResponse({ data: [], message: 'Run POST /api/v2/ml/features/compute first' });
       }
-      console.error('[API] ML features export error:', error.message);
+      httpLogger.error('[API] ML features export error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3491,7 +3488,7 @@ export async function registerV2Routes(fastify) {
       if (error.message.includes('does not exist')) {
         return wrapResponse({ total_listings: 0, message: 'Run POST /api/v2/ml/features/compute first' });
       }
-      console.error('[API] ML features summary error:', error.message);
+      httpLogger.error('[API] ML features summary error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3512,7 +3509,7 @@ export async function registerV2Routes(fastify) {
       const status = await buyboxService.getBuyBoxStatusByListing(listingId);
       return wrapResponse(status);
     } catch (error) {
-      console.error('[API] GET /listings/:id/buybox error:', error.message);
+      httpLogger.error('[API] GET /listings/:id/buybox error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3529,7 +3526,7 @@ export async function registerV2Routes(fastify) {
       const metrics = await buyboxService.getBuyBoxCompetitiveMetrics(listingId);
       return wrapResponse(metrics);
     } catch (error) {
-      console.error('[API] GET /listings/:id/buybox/metrics error:', error.message);
+      httpLogger.error('[API] GET /listings/:id/buybox/metrics error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3547,7 +3544,7 @@ export async function registerV2Routes(fastify) {
       const history = await buyboxService.getBuyBoxHistory(listingId, parseInt(days, 10));
       return wrapResponse(history);
     } catch (error) {
-      console.error('[API] GET /listings/:id/buybox/history error:', error.message);
+      httpLogger.error('[API] GET /listings/:id/buybox/history error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3582,7 +3579,7 @@ export async function registerV2Routes(fastify) {
 
       return reply.status(201).send(wrapResponse(snapshot));
     } catch (error) {
-      console.error('[API] POST /listings/:id/buybox/snapshot error:', error.message);
+      httpLogger.error('[API] POST /listings/:id/buybox/snapshot error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
@@ -3599,7 +3596,7 @@ export async function registerV2Routes(fastify) {
       const status = await buyboxService.getBuyBoxStatusByAsin(asinEntityId);
       return wrapResponse(status);
     } catch (error) {
-      console.error('[API] GET /asins/:id/buybox error:', error.message);
+      httpLogger.error('[API] GET /asins/:id/buybox error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });

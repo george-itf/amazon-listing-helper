@@ -189,15 +189,25 @@ export async function create(data) {
 
     const listing = listingResult.rows[0];
 
-    // Insert images if provided
+    // Batch insert images if provided (avoids N+1)
     if (data.images && data.images.length > 0) {
+      const listingIds = [];
+      const urls = [];
+      const positions = [];
+      const variants = [];
+
       for (const image of data.images) {
-        await client.query(
-          `INSERT INTO listing_images ("listingId", url, position, variant)
-           VALUES ($1, $2, $3, $4)`,
-          [listing.id, image.url, image.position || 0, image.variant || null]
-        );
+        listingIds.push(listing.id);
+        urls.push(image.url);
+        positions.push(image.position || 0);
+        variants.push(image.variant || null);
       }
+
+      await client.query(
+        `INSERT INTO listing_images ("listingId", url, position, variant)
+         SELECT * FROM UNNEST($1::integer[], $2::text[], $3::integer[], $4::text[])`,
+        [listingIds, urls, positions, variants]
+      );
     }
 
     return getById(listing.id);
@@ -261,12 +271,25 @@ export async function update(id, data) {
       // Delete existing images
       await client.query('DELETE FROM listing_images WHERE "listingId" = $1', [id]);
 
-      // Insert new images
-      for (const image of data.images || []) {
+      // Batch insert new images (avoids N+1)
+      const images = data.images || [];
+      if (images.length > 0) {
+        const listingIds = [];
+        const urls = [];
+        const positions = [];
+        const variants = [];
+
+        for (const image of images) {
+          listingIds.push(id);
+          urls.push(image.url);
+          positions.push(image.position || 0);
+          variants.push(image.variant || null);
+        }
+
         await client.query(
           `INSERT INTO listing_images ("listingId", url, position, variant)
-           VALUES ($1, $2, $3, $4)`,
-          [id, image.url, image.position || 0, image.variant || null]
+           SELECT * FROM UNNEST($1::integer[], $2::text[], $3::integer[], $4::text[])`,
+          [listingIds, urls, positions, variants]
         );
       }
     }
@@ -372,6 +395,113 @@ export async function getLowScoreListings(threshold = 50) {
   return result.rows;
 }
 
+/**
+ * Bulk upsert listings (single query for all listings)
+ * Uses UNNEST arrays for efficient bulk insert with conflict handling.
+ * Returns counts of created vs updated rows.
+ *
+ * @param {Array<Object>} listings - Array of listing data
+ * @returns {Promise<{created: number, updated: number, rows: Array}>}
+ */
+export async function bulkUpsert(listings) {
+  if (!listings || listings.length === 0) {
+    return { created: 0, updated: 0, rows: [] };
+  }
+
+  // Prepare arrays for UNNEST - each column is a separate array
+  const skus = [];
+  const asins = [];
+  const titles = [];
+  const descriptions = [];
+  const bulletPoints = [];
+  const prices = [];
+  const quantities = [];
+  const statuses = [];
+  const categories = [];
+  const fulfillmentChannels = [];
+
+  for (const listing of listings) {
+    skus.push(listing.sku || listing.seller_sku);
+    asins.push(listing.asin || null);
+    titles.push(listing.title || null);
+    descriptions.push(listing.description || null);
+    bulletPoints.push(JSON.stringify(listing.bulletPoints || listing.bullet_points || []));
+    prices.push(listing.price || listing.price_inc_vat || 0);
+    quantities.push(listing.quantity || listing.available_quantity || 0);
+    statuses.push(listing.status || 'active');
+    categories.push(listing.category || null);
+    fulfillmentChannels.push(listing.fulfillmentChannel || listing.fulfillment_channel || 'FBM');
+  }
+
+  // Use UNNEST to create rows from parallel arrays
+  // xmax = 0 means the row was inserted (not updated)
+  const sql = `
+    INSERT INTO listings (
+      seller_sku, asin, title, description, "bulletPoints",
+      price_inc_vat, available_quantity, status, category, "fulfillmentChannel",
+      "createdAt", "updatedAt"
+    )
+    SELECT * FROM UNNEST(
+      $1::text[], $2::text[], $3::text[], $4::text[], $5::jsonb[],
+      $6::numeric[], $7::integer[], $8::text[], $9::text[], $10::text[]
+    ) AS t(seller_sku, asin, title, description, "bulletPoints",
+           price_inc_vat, available_quantity, status, category, "fulfillmentChannel")
+    CROSS JOIN (SELECT NOW() AS created, NOW() AS updated) AS times
+    ON CONFLICT (seller_sku) DO UPDATE SET
+      asin = COALESCE(EXCLUDED.asin, listings.asin),
+      title = COALESCE(EXCLUDED.title, listings.title),
+      description = COALESCE(EXCLUDED.description, listings.description),
+      "bulletPoints" = COALESCE(EXCLUDED."bulletPoints", listings."bulletPoints"),
+      price_inc_vat = COALESCE(EXCLUDED.price_inc_vat, listings.price_inc_vat),
+      available_quantity = COALESCE(EXCLUDED.available_quantity, listings.available_quantity),
+      status = COALESCE(EXCLUDED.status, listings.status),
+      category = COALESCE(EXCLUDED.category, listings.category),
+      "fulfillmentChannel" = COALESCE(EXCLUDED."fulfillmentChannel", listings."fulfillmentChannel"),
+      "updatedAt" = NOW()
+    RETURNING *, (xmax = 0) AS is_insert
+  `;
+
+  const result = await query(sql, [
+    skus, asins, titles, descriptions, bulletPoints,
+    prices, quantities, statuses, categories, fulfillmentChannels,
+  ]);
+
+  // Count inserts vs updates using xmax
+  let created = 0;
+  let updated = 0;
+  for (const row of result.rows) {
+    if (row.is_insert) {
+      created++;
+    } else {
+      updated++;
+    }
+  }
+
+  return {
+    created,
+    updated,
+    rows: result.rows,
+  };
+}
+
+/**
+ * Get existing SKUs from a list (bulk check)
+ * @param {string[]} skus - Array of SKUs to check
+ * @returns {Promise<Set<string>>} Set of existing SKUs
+ */
+export async function getExistingSkus(skus) {
+  if (!skus || skus.length === 0) {
+    return new Set();
+  }
+
+  const result = await query(
+    'SELECT seller_sku FROM listings WHERE seller_sku = ANY($1)',
+    [skus]
+  );
+
+  return new Set(result.rows.map(r => r.seller_sku));
+}
+
 export default {
   getAll,
   getById,
@@ -380,6 +510,8 @@ export default {
   create,
   update,
   upsert,
+  bulkUpsert,
+  getExistingSkus,
   remove,
   getCountByStatus,
   getStatusCounts,
