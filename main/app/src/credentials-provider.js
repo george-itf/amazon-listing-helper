@@ -200,6 +200,10 @@ export function getSpApiClientConfig(overrideMarketplaceId = null) {
     options: {
       auto_request_tokens: true,
       auto_request_throttled: true,
+      // Increase retry attempts for throttled requests (default is 3)
+      max_retries: 5,
+      // Wait times in ms for retries (exponential backoff)
+      use_sandbox: false,
     },
     // Seller info for reference
     sellerId: creds.sellerId,
