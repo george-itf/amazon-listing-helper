@@ -280,6 +280,16 @@ const start = async () => {
       logger.info({ count: migrationResult.migrationsRun }, 'Database migrations applied');
     }
 
+    // Check schema health (warn but don't block startup)
+    const { checkSchemaHealth } = await import('./database/connection.js');
+    const schemaHealth = await checkSchemaHealth();
+    if (!schemaHealth.healthy) {
+      logger.warn({
+        missing: schemaHealth.missing,
+        issues: schemaHealth.issues,
+      }, 'Schema health check failed - some tables are missing. Use POST /api/v2/health/schema/repair to fix.');
+    }
+
     // Initialize ML data pool (non-blocking)
     initMlDataPool().catch(err => logger.warn({ err }, 'ML pool init warning'));
 

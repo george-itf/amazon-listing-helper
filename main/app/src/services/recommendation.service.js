@@ -621,17 +621,26 @@ export async function snoozeRecommendation(recommendationId, days = 7, reason = 
  * Get a recommendation by ID
  */
 export async function getRecommendation(recommendationId) {
-  const result = await query(`
-    SELECT r.*,
-           CASE WHEN r.entity_type = 'LISTING' THEN l.seller_sku ELSE NULL END as listing_sku,
-           CASE WHEN r.entity_type = 'ASIN' THEN ae.asin ELSE NULL END as asin
-    FROM recommendations r
-    LEFT JOIN listings l ON r.entity_type = 'LISTING' AND l.id = r.entity_id
-    LEFT JOIN asin_entities ae ON r.entity_type = 'ASIN' AND ae.id = r.entity_id
-    WHERE r.id = $1
-  `, [recommendationId]);
+  try {
+    const result = await query(`
+      SELECT r.*,
+             CASE WHEN r.entity_type = 'LISTING' THEN l.seller_sku ELSE NULL END as listing_sku,
+             CASE WHEN r.entity_type = 'ASIN' THEN ae.asin ELSE NULL END as asin
+      FROM recommendations r
+      LEFT JOIN listings l ON r.entity_type = 'LISTING' AND l.id = r.entity_id
+      LEFT JOIN asin_entities ae ON r.entity_type = 'ASIN' AND ae.id = r.entity_id
+      WHERE r.id = $1
+    `, [recommendationId]);
 
-  return result.rows[0] || null;
+    return result.rows[0] || null;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Recommendations] recommendations table does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -666,40 +675,49 @@ export async function getRecommendationsForEntity(entityType, entityId, options 
  * Get all pending recommendations
  */
 export async function getPendingRecommendations(options = {}) {
-  const { entityType, type, limit = 50 } = options;
-  const params = [];
-  const conditions = ["r.status = 'PENDING'"];
-  let paramIndex = 1;
+  try {
+    const { entityType, type, limit = 50 } = options;
+    const params = [];
+    const conditions = ["r.status = 'PENDING'"];
+    let paramIndex = 1;
 
-  if (entityType) {
-    conditions.push(`r.entity_type = $${paramIndex}`);
-    params.push(entityType);
-    paramIndex++;
+    if (entityType) {
+      conditions.push(`r.entity_type = $${paramIndex}`);
+      params.push(entityType);
+      paramIndex++;
+    }
+
+    if (type) {
+      conditions.push(`r.recommendation_type = $${paramIndex}`);
+      params.push(type);
+      paramIndex++;
+    }
+
+    params.push(limit);
+
+    const result = await query(`
+      SELECT r.*,
+             CASE WHEN r.entity_type = 'LISTING' THEN l.seller_sku ELSE NULL END as listing_sku,
+             CASE WHEN r.entity_type = 'LISTING' THEN l.title ELSE NULL END as listing_title,
+             CASE WHEN r.entity_type = 'ASIN' THEN ae.asin ELSE NULL END as asin,
+             CASE WHEN r.entity_type = 'ASIN' THEN ae.title ELSE NULL END as asin_title
+      FROM recommendations r
+      LEFT JOIN listings l ON r.entity_type = 'LISTING' AND l.id = r.entity_id
+      LEFT JOIN asin_entities ae ON r.entity_type = 'ASIN' AND ae.id = r.entity_id
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY r.confidence DESC, r.generated_at DESC
+      LIMIT $${paramIndex}
+    `, params);
+
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Recommendations] recommendations table does not exist');
+      return [];
+    }
+    throw error;
   }
-
-  if (type) {
-    conditions.push(`r.recommendation_type = $${paramIndex}`);
-    params.push(type);
-    paramIndex++;
-  }
-
-  params.push(limit);
-
-  const result = await query(`
-    SELECT r.*,
-           CASE WHEN r.entity_type = 'LISTING' THEN l.seller_sku ELSE NULL END as listing_sku,
-           CASE WHEN r.entity_type = 'LISTING' THEN l.title ELSE NULL END as listing_title,
-           CASE WHEN r.entity_type = 'ASIN' THEN ae.asin ELSE NULL END as asin,
-           CASE WHEN r.entity_type = 'ASIN' THEN ae.title ELSE NULL END as asin_title
-    FROM recommendations r
-    LEFT JOIN listings l ON r.entity_type = 'LISTING' AND l.id = r.entity_id
-    LEFT JOIN asin_entities ae ON r.entity_type = 'ASIN' AND ae.id = r.entity_id
-    WHERE ${conditions.join(' AND ')}
-    ORDER BY r.confidence DESC, r.generated_at DESC
-    LIMIT $${paramIndex}
-  `, params);
-
-  return result.rows;
 }
 
 /**

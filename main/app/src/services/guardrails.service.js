@@ -46,11 +46,6 @@ function safeParseInt(value, defaultValue = 0) {
  * @returns {Promise<Object>} Guardrails configuration
  */
 export async function loadGuardrails() {
-  const result = await query(`
-    SELECT key, value FROM settings
-    WHERE key LIKE 'guardrails.%'
-  `);
-
   const guardrails = {
     minMargin: 0.15,
     maxPriceChangePctPerDay: 0.05,
@@ -58,6 +53,20 @@ export async function loadGuardrails() {
     minStockThreshold: 5,
     allowPriceBelowBreakEven: false,
   };
+
+  let result;
+  try {
+    result = await query(`
+      SELECT key, value FROM settings
+      WHERE key LIKE 'guardrails.%'
+    `);
+  } catch (error) {
+    // Handle missing settings table - use defaults
+    if (error.message?.includes('does not exist')) {
+      return guardrails;
+    }
+    throw error;
+  }
 
   for (const row of result.rows) {
     const key = row.key.replace('guardrails.', '');
@@ -275,14 +284,21 @@ export async function getGuardrailsSummary(listingId) {
   const listing = listingResult.rows[0];
 
   // Get 30-day sales for velocity calculation
-  const salesResult = await query(`
-    SELECT COALESCE(SUM(units), 0) as total_units
-    FROM listing_sales_daily
-    WHERE listing_id = $1
-      AND date >= CURRENT_DATE - INTERVAL '30 days'
-  `, [listingId]);
-
-  const totalUnits30d = safeParseInt(salesResult.rows[0]?.total_units || 0, 0);
+  let totalUnits30d = 0;
+  try {
+    const salesResult = await query(`
+      SELECT COALESCE(SUM(units), 0) as total_units
+      FROM listing_sales_daily
+      WHERE listing_id = $1
+        AND date >= CURRENT_DATE - INTERVAL '30 days'
+    `, [listingId]);
+    totalUnits30d = safeParseInt(salesResult.rows[0]?.total_units || 0, 0);
+  } catch (error) {
+    // Handle missing table gracefully
+    if (!error.message?.includes('does not exist')) {
+      throw error;
+    }
+  }
   const salesVelocity = totalUnits30d / 30;
   const daysOfCover = calculateDaysOfCover(listing.available_quantity || 0, salesVelocity);
   const stockoutRisk = calculateStockoutRisk(daysOfCover);

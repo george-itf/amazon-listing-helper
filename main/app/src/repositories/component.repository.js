@@ -25,38 +25,47 @@ export async function findAll({
   limit = 100,
   offset = 0
 } = {}) {
-  const conditions = [];
-  const params = [];
-  let paramIndex = 1;
+  try {
+    const conditions = [];
+    const params = [];
+    let paramIndex = 1;
 
-  if (activeOnly) {
-    conditions.push('c.is_active = true');
+    if (activeOnly) {
+      conditions.push('c.is_active = true');
+    }
+    if (supplierId) {
+      conditions.push(`c.supplier_id = $${paramIndex}`);
+      params.push(supplierId);
+      paramIndex++;
+    }
+    if (category) {
+      conditions.push(`c.category = $${paramIndex}`);
+      params.push(category);
+      paramIndex++;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    params.push(limit, offset);
+
+    const result = await query(`
+      SELECT c.*, s.name as supplier_name
+      FROM components c
+      LEFT JOIN suppliers s ON s.id = c.supplier_id
+      ${whereClause}
+      ORDER BY c.name ASC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `, params);
+
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Components] components table does not exist');
+      return [];
+    }
+    throw error;
   }
-  if (supplierId) {
-    conditions.push(`c.supplier_id = $${paramIndex}`);
-    params.push(supplierId);
-    paramIndex++;
-  }
-  if (category) {
-    conditions.push(`c.category = $${paramIndex}`);
-    params.push(category);
-    paramIndex++;
-  }
-
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  params.push(limit, offset);
-
-  const result = await query(`
-    SELECT c.*, s.name as supplier_name
-    FROM components c
-    LEFT JOIN suppliers s ON s.id = c.supplier_id
-    ${whereClause}
-    ORDER BY c.name ASC
-    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-  `, params);
-
-  return result.rows;
 }
 
 /**
@@ -275,12 +284,21 @@ export async function importFromCsv(rows) {
  * @returns {Promise<string[]>}
  */
 export async function getCategories() {
-  const result = await query(`
-    SELECT DISTINCT category FROM components
-    WHERE is_active = true AND category IS NOT NULL
-    ORDER BY category
-  `);
-  return result.rows.map(r => r.category);
+  try {
+    const result = await query(`
+      SELECT DISTINCT category FROM components
+      WHERE is_active = true AND category IS NOT NULL
+      ORDER BY category
+    `);
+    return result.rows.map(r => r.category);
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Components] components table does not exist');
+      return [];
+    }
+    throw error;
+  }
 }
 
 /**

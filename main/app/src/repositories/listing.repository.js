@@ -16,57 +16,66 @@ import { query, transaction } from '../database/connection.js';
  * @returns {Promise<Array>} Array of listings
  */
 export async function getAll(filters = {}) {
-  let sql = `
-    SELECT
-      l.*,
-      COALESCE(
-        json_agg(
-          DISTINCT jsonb_build_object(
-            'id', li.id,
-            'url', li.url,
-            'position', li.position,
-            'variant', li.variant
-          )
-        ) FILTER (WHERE li.id IS NOT NULL),
-        '[]'
-      ) as images
-    FROM listings l
-    LEFT JOIN listing_images li ON l.id = li."listingId"
-    WHERE 1=1
-  `;
+  try {
+    let sql = `
+      SELECT
+        l.*,
+        COALESCE(
+          json_agg(
+            DISTINCT jsonb_build_object(
+              'id', li.id,
+              'url', li.url,
+              'position', li.position,
+              'variant', li.variant
+            )
+          ) FILTER (WHERE li.id IS NOT NULL),
+          '[]'
+        ) as images
+      FROM listings l
+      LEFT JOIN listing_images li ON l.id = li."listingId"
+      WHERE 1=1
+    `;
 
-  const params = [];
-  let paramCount = 1;
+    const params = [];
+    let paramCount = 1;
 
-  if (filters.status) {
-    sql += ` AND l.status = $${paramCount++}`;
-    params.push(filters.status);
+    if (filters.status) {
+      sql += ` AND l.status = $${paramCount++}`;
+      params.push(filters.status);
+    }
+
+    if (filters.category) {
+      sql += ` AND l.category = $${paramCount++}`;
+      params.push(filters.category);
+    }
+
+    if (filters.search) {
+      sql += ` AND (l.title ILIKE $${paramCount} OR l.seller_sku ILIKE $${paramCount} OR l.asin ILIKE $${paramCount++})`;
+      params.push(`%${filters.search}%`);
+    }
+
+    sql += ` GROUP BY l.id ORDER BY l."updatedAt" DESC`;
+
+    if (filters.limit) {
+      sql += ` LIMIT $${paramCount++}`;
+      params.push(filters.limit);
+    }
+
+    if (filters.offset) {
+      sql += ` OFFSET $${paramCount++}`;
+      params.push(filters.offset);
+    }
+
+    const result = await query(sql, params);
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Listings] listings or listing_images table does not exist');
+      return [];
+    }
+    throw error;
   }
-
-  if (filters.category) {
-    sql += ` AND l.category = $${paramCount++}`;
-    params.push(filters.category);
-  }
-
-  if (filters.search) {
-    sql += ` AND (l.title ILIKE $${paramCount} OR l.seller_sku ILIKE $${paramCount} OR l.asin ILIKE $${paramCount++})`;
-    params.push(`%${filters.search}%`);
-  }
-
-  sql += ` GROUP BY l.id ORDER BY l."updatedAt" DESC`;
-
-  if (filters.limit) {
-    sql += ` LIMIT $${paramCount++}`;
-    params.push(filters.limit);
-  }
-
-  if (filters.offset) {
-    sql += ` OFFSET $${paramCount++}`;
-    params.push(filters.offset);
-  }
-
-  const result = await query(sql, params);
-  return result.rows;
 }
 
 /**
@@ -75,28 +84,36 @@ export async function getAll(filters = {}) {
  * @returns {Promise<Object|null>} Listing object or null
  */
 export async function getById(id) {
-  const sql = `
-    SELECT
-      l.*,
-      COALESCE(
-        json_agg(
-          DISTINCT jsonb_build_object(
-            'id', li.id,
-            'url', li.url,
-            'position', li.position,
-            'variant', li.variant
-          )
-        ) FILTER (WHERE li.id IS NOT NULL),
-        '[]'
-      ) as images
-    FROM listings l
-    LEFT JOIN listing_images li ON l.id = li."listingId"
-    WHERE l.id = $1
-    GROUP BY l.id
-  `;
+  try {
+    const sql = `
+      SELECT
+        l.*,
+        COALESCE(
+          json_agg(
+            DISTINCT jsonb_build_object(
+              'id', li.id,
+              'url', li.url,
+              'position', li.position,
+              'variant', li.variant
+            )
+          ) FILTER (WHERE li.id IS NOT NULL),
+          '[]'
+        ) as images
+      FROM listings l
+      LEFT JOIN listing_images li ON l.id = li."listingId"
+      WHERE l.id = $1
+      GROUP BY l.id
+    `;
 
-  const result = await query(sql, [id]);
-  return result.rows[0] || null;
+    const result = await query(sql, [id]);
+    return result.rows[0] || null;
+  } catch (error) {
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Listings] Table does not exist:', error.message);
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -105,7 +122,8 @@ export async function getById(id) {
  * @returns {Promise<Object|null>} Listing object or null
  */
 export async function getBySku(sku) {
-  const sql = `
+  // Try new column name first
+  const sqlNew = `
     SELECT
       l.*,
       COALESCE(
@@ -125,8 +143,40 @@ export async function getBySku(sku) {
     GROUP BY l.id
   `;
 
-  const result = await query(sql, [sku]);
-  return result.rows[0] || null;
+  try {
+    const result = await query(sqlNew, [sku]);
+    return result.rows[0] || null;
+  } catch (error) {
+    // Fallback to old column name
+    if (error.message?.includes('column "seller_sku" does not exist')) {
+      const sqlOld = `
+        SELECT
+          l.*,
+          COALESCE(
+            json_agg(
+              DISTINCT jsonb_build_object(
+                'id', li.id,
+                'url', li.url,
+                'position', li.position,
+                'variant', li.variant
+              )
+            ) FILTER (WHERE li.id IS NOT NULL),
+            '[]'
+          ) as images
+        FROM listings l
+        LEFT JOIN listing_images li ON l.id = li."listingId"
+        WHERE l.sku = $1
+        GROUP BY l.id
+      `;
+      const result = await query(sqlOld, [sku]);
+      return result.rows[0] || null;
+    }
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Listings] Table does not exist:', error.message);
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -166,7 +216,8 @@ export async function getByAsin(asin) {
  */
 export async function create(data) {
   return transaction(async (client) => {
-    const listingSql = `
+    // Try new column names first
+    let listingSql = `
       INSERT INTO listings (
         seller_sku, asin, title, description, "bulletPoints", price_inc_vat, available_quantity,
         status, category, "fulfillmentChannel", "createdAt", "updatedAt"
@@ -174,7 +225,7 @@ export async function create(data) {
       RETURNING *
     `;
 
-    const listingResult = await client.query(listingSql, [
+    const params = [
       data.sku || data.seller_sku,
       data.asin,
       data.title,
@@ -185,7 +236,26 @@ export async function create(data) {
       data.status || 'active',
       data.category || null,
       data.fulfillmentChannel || 'FBM',
-    ]);
+    ];
+
+    let listingResult;
+    try {
+      listingResult = await client.query(listingSql, params);
+    } catch (error) {
+      // Fallback to old column names
+      if (error.message?.includes('column') && error.message?.includes('does not exist')) {
+        listingSql = `
+          INSERT INTO listings (
+            sku, asin, title, description, "bulletPoints", price, quantity,
+            status, category, "fulfillmentChannel", "createdAt", "updatedAt"
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+          RETURNING *
+        `;
+        listingResult = await client.query(listingSql, params);
+      } else {
+        throw error;
+      }
+    }
 
     const listing = listingResult.rows[0];
 

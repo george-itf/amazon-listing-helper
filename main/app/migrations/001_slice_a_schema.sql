@@ -81,7 +81,12 @@ CREATE INDEX IF NOT EXISTS idx_components_is_active ON components(is_active);
 -- ============================================================================
 -- 4. BOMS TABLE (SPEC §4.7) - Versioned Bill of Materials
 -- ============================================================================
-CREATE TYPE bom_scope_type AS ENUM ('LISTING', 'ASIN_SCENARIO');
+-- Create enum idempotently (avoid "already exists" failure)
+DO $$ BEGIN
+    CREATE TYPE bom_scope_type AS ENUM ('LISTING', 'ASIN_SCENARIO');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
 CREATE TABLE IF NOT EXISTS boms (
     id SERIAL PRIMARY KEY,

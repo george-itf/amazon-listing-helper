@@ -1352,7 +1352,7 @@ export async function registerV2Routes(fastify) {
     const result = await dbQuery(`
       SELECT ae.*, m.name as marketplace_name
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       ${whereClause}
       ORDER BY ae.updated_at DESC
       LIMIT $1 OFFSET $2
@@ -1372,7 +1372,7 @@ export async function registerV2Routes(fastify) {
     const result = await dbQuery(`
       SELECT ae.*, m.name as marketplace_name, m.vat_rate
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       WHERE ae.id = $1
     `, [asinEntityId]);
 
@@ -1508,7 +1508,7 @@ export async function registerV2Routes(fastify) {
       const result = await dbQuery(`
         SELECT ae.*, m.name as marketplace_name
         FROM asin_entities ae
-        JOIN marketplaces m ON m.id = ae.marketplace_id
+        LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
         WHERE ae.id = $1
       `, [asinEntity.id]);
 
@@ -1797,16 +1797,25 @@ export async function registerV2Routes(fastify) {
    * Get all pending recommendations
    */
   fastify.get('/api/v2/recommendations', async (request, reply) => {
-    const recommendationService = await import('../services/recommendation.service.js');
-    const { entity_type, type, limit = '50' } = request.query;
+    try {
+      const recommendationService = await import('../services/recommendation.service.js');
+      const { entity_type, type, limit = '50' } = request.query;
 
-    const recommendations = await recommendationService.getPendingRecommendations({
-      entityType: entity_type,
-      type,
-      limit: parseInt(limit, 10),
-    });
+      const recommendations = await recommendationService.getPendingRecommendations({
+        entityType: entity_type,
+        type,
+        limit: parseInt(limit, 10),
+      });
 
-    return wrapResponse(recommendations);
+      return wrapResponse(recommendations);
+    } catch (error) {
+      // Handle missing table gracefully
+      if (error.message?.includes('does not exist')) {
+        return wrapResponse([]);
+      }
+      httpLogger.error('[API] GET /recommendations error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
@@ -1814,53 +1823,67 @@ export async function registerV2Routes(fastify) {
    * Get recommendation summary statistics
    */
   fastify.get('/api/v2/recommendations/stats', async (request, reply) => {
-    const { query: dbQuery } = await import('../database/connection.js');
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
 
-    // Get counts by status
-    const statusResult = await dbQuery(`
-      SELECT status, COUNT(*)::int as count
-      FROM recommendations
-      GROUP BY status
-    `);
+      // Get counts by status
+      const statusResult = await dbQuery(`
+        SELECT status, COUNT(*)::int as count
+        FROM recommendations
+        GROUP BY status
+      `);
 
-    // Get counts by type
-    const typeResult = await dbQuery(`
-      SELECT type, COUNT(*)::int as count
-      FROM recommendations
-      WHERE status = 'PENDING'
-      GROUP BY type
-    `);
+      // Get counts by type (column is recommendation_type, not type)
+      const typeResult = await dbQuery(`
+        SELECT recommendation_type, COUNT(*)::int as count
+        FROM recommendations
+        WHERE status = 'PENDING'
+        GROUP BY recommendation_type
+      `);
 
-    // Get counts by severity
-    const severityResult = await dbQuery(`
-      SELECT severity, COUNT(*)::int as count
-      FROM recommendations
-      WHERE status = 'PENDING'
-      GROUP BY severity
-    `);
+      // Get counts by confidence (not severity - column doesn't exist)
+      const confidenceResult = await dbQuery(`
+        SELECT confidence, COUNT(*)::int as count
+        FROM recommendations
+        WHERE status = 'PENDING'
+        GROUP BY confidence
+      `);
 
-    // Get total pending
-    const totalResult = await dbQuery(`
-      SELECT COUNT(*)::int as total
-      FROM recommendations
-      WHERE status = 'PENDING'
-    `);
+      // Get total pending
+      const totalResult = await dbQuery(`
+        SELECT COUNT(*)::int as total
+        FROM recommendations
+        WHERE status = 'PENDING'
+      `);
 
-    const by_status = {};
-    statusResult.rows.forEach(row => { by_status[row.status] = row.count; });
+      const by_status = {};
+      statusResult.rows.forEach(row => { by_status[row.status] = row.count; });
 
-    const by_type = {};
-    typeResult.rows.forEach(row => { by_type[row.type] = row.count; });
+      const by_type = {};
+      typeResult.rows.forEach(row => { by_type[row.recommendation_type] = row.count; });
 
-    const by_severity = {};
-    severityResult.rows.forEach(row => { by_severity[row.severity] = row.count; });
+      const by_confidence = {};
+      confidenceResult.rows.forEach(row => { by_confidence[row.confidence] = row.count; });
 
-    return wrapResponse({
-      total: totalResult.rows[0]?.total || 0,
-      by_status,
-      by_type,
-      by_severity,
-    });
+      return wrapResponse({
+        total: totalResult.rows[0]?.total || 0,
+        by_status,
+        by_type,
+        by_confidence,
+      });
+    } catch (error) {
+      // Handle missing table gracefully
+      if (error.message?.includes('does not exist')) {
+        return wrapResponse({
+          total: 0,
+          by_status: {},
+          by_type: {},
+          by_confidence: {},
+        });
+      }
+      httpLogger.error('[API] GET /recommendations/stats error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
@@ -1868,15 +1891,24 @@ export async function registerV2Routes(fastify) {
    * Get a specific recommendation
    */
   fastify.get('/api/v2/recommendations/:id', async (request, reply) => {
-    const recommendationService = await import('../services/recommendation.service.js');
-    const recommendationId = parseInt(request.params.id, 10);
+    try {
+      const recommendationService = await import('../services/recommendation.service.js');
+      const recommendationId = parseInt(request.params.id, 10);
 
-    const recommendation = await recommendationService.getRecommendation(recommendationId);
-    if (!recommendation) {
-      return reply.status(404).send({ success: false, error: 'Recommendation not found' });
+      const recommendation = await recommendationService.getRecommendation(recommendationId);
+      if (!recommendation) {
+        return reply.status(404).send({ success: false, error: 'Recommendation not found' });
+      }
+
+      return wrapResponse(recommendation);
+    } catch (error) {
+      // Handle missing table gracefully
+      if (error.message?.includes('does not exist')) {
+        return reply.status(404).send({ success: false, error: 'Recommendation not found' });
+      }
+      httpLogger.error('[API] GET /recommendations/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
     }
-
-    return wrapResponse(recommendation);
   });
 
   /**
@@ -2210,7 +2242,7 @@ export async function registerV2Routes(fastify) {
     const entityResult = await dbQuery(`
       SELECT ae.*, m.vat_rate
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       WHERE ae.id = $1
     `, [asinEntityId]);
 
@@ -2365,7 +2397,7 @@ export async function registerV2Routes(fastify) {
     const entityResult = await dbQuery(`
       SELECT ae.*, m.name as marketplace_name, m.vat_rate
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       WHERE ae.id = $1
     `, [asinEntityId]);
 
@@ -2458,7 +2490,7 @@ export async function registerV2Routes(fastify) {
         COALESCE(ks.parsed_json->'metrics'->>'price_current', '0')::numeric as current_price,
         COALESCE(ks.parsed_json->'metrics'->>'offers_count_current', '0')::int as competition_count
       FROM asin_entities ae
-      JOIN marketplaces m ON m.id = ae.marketplace_id
+      LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       LEFT JOIN LATERAL (
         SELECT features_json, computed_at
         FROM feature_store
@@ -3680,6 +3712,72 @@ export async function registerV2Routes(fastify) {
     }
 
     return wrapResponse(healthStatus);
+  });
+
+  /**
+   * GET /api/v2/health/schema
+   * Database schema health check - identifies missing tables
+   */
+  fastify.get('/api/v2/health/schema', async (request, reply) => {
+    try {
+      const { checkSchemaHealth } = await import('../database/connection.js');
+      const health = await checkSchemaHealth();
+
+      return wrapResponse({
+        healthy: health.healthy,
+        missing_tables: health.missing,
+        issues: health.issues,
+        message: health.healthy
+          ? 'All required tables exist'
+          : `Missing ${health.missing.length} table(s) - migrations may need to re-run`,
+      });
+    } catch (error) {
+      httpLogger.error('[API] GET /health/schema error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/health/schema/repair
+   * Reset failed migrations to allow re-running
+   * Then triggers migration re-run
+   */
+  fastify.post('/api/v2/health/schema/repair', async (request, reply) => {
+    try {
+      const { checkSchemaHealth, resetFailedMigrations } = await import('../database/connection.js');
+      const { runMigrations } = await import('../database/migrate.js');
+
+      // Check current health
+      const beforeHealth = await checkSchemaHealth();
+      if (beforeHealth.healthy) {
+        return wrapResponse({
+          message: 'Schema is already healthy, no repair needed',
+          status: 'healthy',
+        });
+      }
+
+      // Reset failed migrations
+      const resetResult = await resetFailedMigrations();
+
+      // Re-run migrations
+      const migrationResult = await runMigrations();
+
+      // Check health again
+      const afterHealth = await checkSchemaHealth();
+
+      return wrapResponse({
+        message: afterHealth.healthy
+          ? 'Schema repair completed successfully'
+          : 'Schema repair attempted but some tables still missing',
+        status: afterHealth.healthy ? 'repaired' : 'partial',
+        reset_migrations: resetResult.reset,
+        migrations_run: migrationResult.migrationsRun,
+        remaining_issues: afterHealth.missing,
+      });
+    } catch (error) {
+      httpLogger.error('[API] POST /health/schema/repair error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**
