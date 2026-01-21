@@ -17,12 +17,14 @@ dotenv.config({ path: join(__dirname, '../../../.env') });
 const { Pool } = pg;
 
 // SSL Configuration
-// Default: verify SSL certificates (secure)
-// Set DB_SSL_REJECT_UNAUTHORIZED=false only if your provider requires it (e.g., some PaaS with self-signed certs)
+// Railway and most PaaS providers use self-signed certificates
+// Default: accept self-signed certs when using DATABASE_URL (cloud deployment)
+// Set DB_SSL_REJECT_UNAUTHORIZED=true to enforce strict certificate verification
 const sslConfig = process.env.DATABASE_URL
   ? {
-      // Only disable cert verification if explicitly set to 'false'
-      rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+      // Accept self-signed certs by default for cloud providers (Railway, Render, etc.)
+      // Can be overridden by setting DB_SSL_REJECT_UNAUTHORIZED=true
+      rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED === 'true',
     }
   : false; // Local dev typically doesn't use SSL
 
