@@ -189,15 +189,25 @@ export async function create(data) {
 
     const listing = listingResult.rows[0];
 
-    // Insert images if provided
+    // Batch insert images if provided (avoids N+1)
     if (data.images && data.images.length > 0) {
+      const listingIds = [];
+      const urls = [];
+      const positions = [];
+      const variants = [];
+
       for (const image of data.images) {
-        await client.query(
-          `INSERT INTO listing_images ("listingId", url, position, variant)
-           VALUES ($1, $2, $3, $4)`,
-          [listing.id, image.url, image.position || 0, image.variant || null]
-        );
+        listingIds.push(listing.id);
+        urls.push(image.url);
+        positions.push(image.position || 0);
+        variants.push(image.variant || null);
       }
+
+      await client.query(
+        `INSERT INTO listing_images ("listingId", url, position, variant)
+         SELECT * FROM UNNEST($1::integer[], $2::text[], $3::integer[], $4::text[])`,
+        [listingIds, urls, positions, variants]
+      );
     }
 
     return getById(listing.id);
@@ -261,12 +271,25 @@ export async function update(id, data) {
       // Delete existing images
       await client.query('DELETE FROM listing_images WHERE "listingId" = $1', [id]);
 
-      // Insert new images
-      for (const image of data.images || []) {
+      // Batch insert new images (avoids N+1)
+      const images = data.images || [];
+      if (images.length > 0) {
+        const listingIds = [];
+        const urls = [];
+        const positions = [];
+        const variants = [];
+
+        for (const image of images) {
+          listingIds.push(id);
+          urls.push(image.url);
+          positions.push(image.position || 0);
+          variants.push(image.variant || null);
+        }
+
         await client.query(
           `INSERT INTO listing_images ("listingId", url, position, variant)
-           VALUES ($1, $2, $3, $4)`,
-          [id, image.url, image.position || 0, image.variant || null]
+           SELECT * FROM UNNEST($1::integer[], $2::text[], $3::integer[], $4::text[])`,
+          [listingIds, urls, positions, variants]
         );
       }
     }

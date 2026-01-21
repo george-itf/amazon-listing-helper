@@ -136,15 +136,28 @@ export async function createVersion(listingId, data) {
 
     const bom = bomResult.rows[0];
 
-    // Insert lines
+    // Insert lines (batch validation + batch insert to avoid N+1)
     if (data.lines && data.lines.length > 0) {
+      // Extract all component IDs for batch validation
+      const componentIds = data.lines.map(l => l.component_id);
+
+      // Batch validate: get all valid component IDs in one query
+      const validComponentsResult = await client.query(
+        'SELECT id FROM components WHERE id = ANY($1)',
+        [componentIds]
+      );
+      const validComponentIds = new Set(validComponentsResult.rows.map(r => r.id));
+
+      // Validate all lines before inserting
+      const bomIds = [];
+      const lineComponentIds = [];
+      const quantities = [];
+      const wastageRates = [];
+      const notes = [];
+
       for (const line of data.lines) {
         // Validate component exists
-        const componentCheck = await client.query(
-          'SELECT id FROM components WHERE id = $1',
-          [line.component_id]
-        );
-        if (componentCheck.rows.length === 0) {
+        if (!validComponentIds.has(line.component_id)) {
           throw new Error(`Component not found: ${line.component_id}`);
         }
 
@@ -159,11 +172,19 @@ export async function createVersion(listingId, data) {
           throw new Error(`Invalid wastage_rate for component ${line.component_id}: must be >= 0 and < 1`);
         }
 
-        await client.query(`
-          INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
-          VALUES ($1, $2, $3, $4, $5)
-        `, [bom.id, line.component_id, line.quantity, wastageRate, line.notes || null]);
+        // Collect data for batch insert
+        bomIds.push(bom.id);
+        lineComponentIds.push(line.component_id);
+        quantities.push(line.quantity);
+        wastageRates.push(wastageRate);
+        notes.push(line.notes || null);
       }
+
+      // Batch insert all lines in single query
+      await client.query(`
+        INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
+        SELECT * FROM UNNEST($1::integer[], $2::integer[], $3::numeric[], $4::numeric[], $5::text[])
+      `, [bomIds, lineComponentIds, quantities, wastageRates, notes]);
     }
 
     // Return the complete BOM with lines
@@ -222,12 +243,26 @@ export async function cloneForAsinScenario(sourceBomId, asinEntityId) {
 
     const bom = bomResult.rows[0];
 
-    // Copy lines
-    for (const line of source.lines) {
+    // Batch copy lines (avoids N+1)
+    if (source.lines && source.lines.length > 0) {
+      const bomIds = [];
+      const componentIds = [];
+      const quantities = [];
+      const wastageRates = [];
+      const notes = [];
+
+      for (const line of source.lines) {
+        bomIds.push(bom.id);
+        componentIds.push(line.component_id);
+        quantities.push(line.quantity);
+        wastageRates.push(line.wastage_rate || 0);
+        notes.push(line.notes || null);
+      }
+
       await client.query(`
         INSERT INTO bom_lines (bom_id, component_id, quantity, wastage_rate, notes)
-        VALUES ($1, $2, $3, $4, $5)
-      `, [bom.id, line.component_id, line.quantity, line.wastage_rate, line.notes]);
+        SELECT * FROM UNNEST($1::integer[], $2::integer[], $3::numeric[], $4::numeric[], $5::text[])
+      `, [bomIds, componentIds, quantities, wastageRates, notes]);
     }
 
     return findById(bom.id);
