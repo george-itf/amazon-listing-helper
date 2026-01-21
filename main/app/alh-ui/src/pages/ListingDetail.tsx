@@ -199,7 +199,7 @@ export function ListingDetailPage() {
             <div className="space-y-3">
               <div className="flex justify-between">
                 <span className="text-gray-600">Price Median (90d)</span>
-                <span>£{f.keepa_price_median_90d.toFixed(2)}</span>
+                <span>£{f.keepa_price_median_90d?.toFixed(2) ?? '-'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-600">Price Range (P25-P75)</span>
@@ -254,9 +254,11 @@ export function ListingDetailPage() {
                       label={rec.severity}
                     />
                   </div>
-                  <p className="text-xs text-gray-400 mt-2">
-                    Evidence computed at: {new Date(rec.evidence_json.computed_at).toLocaleString()}
-                  </p>
+                  {rec.evidence_json?.computed_at && (
+                    <p className="text-xs text-gray-400 mt-2">
+                      Evidence computed at: {new Date(rec.evidence_json.computed_at).toLocaleString()}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
