@@ -19,27 +19,36 @@ import { query, transaction } from '../database/connection.js';
  * @param {Object} [data.input_json]
  * @param {number} [data.priority=5]
  * @param {string} [data.created_by='system']
- * @returns {Promise<Object>}
+ * @returns {Promise<Object|null>}
  */
 export async function create(data) {
-  const result = await query(`
-    INSERT INTO jobs (
-      job_type, scope_type, listing_id, asin_entity_id,
-      input_json, priority, created_by, scheduled_for
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, CURRENT_TIMESTAMP))
-    RETURNING *
-  `, [
-    data.job_type,
-    data.scope_type || 'LISTING',
-    data.listing_id || null,
-    data.asin_entity_id || null,
-    data.input_json ? JSON.stringify(data.input_json) : null,
-    data.priority || 5,
-    data.created_by || 'system',
-    data.scheduled_for || null,
-  ]);
+  try {
+    const result = await query(`
+      INSERT INTO jobs (
+        job_type, scope_type, listing_id, asin_entity_id,
+        input_json, priority, created_by, scheduled_for
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, CURRENT_TIMESTAMP))
+      RETURNING *
+    `, [
+      data.job_type,
+      data.scope_type || 'LISTING',
+      data.listing_id || null,
+      data.asin_entity_id || null,
+      data.input_json ? JSON.stringify(data.input_json) : null,
+      data.priority || 5,
+      data.created_by || 'system',
+      data.scheduled_for || null,
+    ]);
 
-  return result.rows[0];
+    return result.rows[0];
+  } catch (error) {
+    // Handle missing table or enum gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Jobs] jobs table or enum does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -48,14 +57,23 @@ export async function create(data) {
  * @returns {Promise<Object|null>}
  */
 export async function findById(jobId) {
-  const result = await query(`
-    SELECT j.*, l.seller_sku as listing_sku
-    FROM jobs j
-    LEFT JOIN listings l ON l.id = j.listing_id
-    WHERE j.id = $1
-  `, [jobId]);
+  try {
+    const result = await query(`
+      SELECT j.*, l.seller_sku as listing_sku
+      FROM jobs j
+      LEFT JOIN listings l ON l.id = j.listing_id
+      WHERE j.id = $1
+    `, [jobId]);
 
-  return result.rows[0] || null;
+    return result.rows[0] || null;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Jobs] jobs table does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -64,19 +82,28 @@ export async function findById(jobId) {
  * @returns {Promise<Object[]>}
  */
 export async function getPendingJobs(limit = 10) {
-  const result = await query(`
-    SELECT j.*, l.seller_sku as listing_sku
-    FROM jobs j
-    LEFT JOIN listings l ON l.id = j.listing_id
-    WHERE j.status = 'PENDING'
-      AND j.scheduled_for <= CURRENT_TIMESTAMP
-      AND j.attempts < j.max_attempts
-    ORDER BY j.priority DESC, j.scheduled_for ASC
-    LIMIT $1
-    FOR UPDATE OF j SKIP LOCKED
-  `, [limit]);
+  try {
+    const result = await query(`
+      SELECT j.*, l.seller_sku as listing_sku
+      FROM jobs j
+      LEFT JOIN listings l ON l.id = j.listing_id
+      WHERE j.status = 'PENDING'
+        AND j.scheduled_for <= CURRENT_TIMESTAMP
+        AND j.attempts < j.max_attempts
+      ORDER BY j.priority DESC, j.scheduled_for ASC
+      LIMIT $1
+      FOR UPDATE OF j SKIP LOCKED
+    `, [limit]);
 
-  return result.rows;
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Jobs] jobs table does not exist');
+      return [];
+    }
+    throw error;
+  }
 }
 
 /**
@@ -255,37 +282,46 @@ export async function findByListing(listingId, options = {}) {
  * @returns {Promise<Object[]>}
  */
 export async function findRecent(options = {}) {
-  const { types, statuses, limit = 50, offset = 0 } = options;
-  const params = [];
-  const conditions = [];
-  let paramIndex = 1;
+  try {
+    const { types, statuses, limit = 50, offset = 0 } = options;
+    const params = [];
+    const conditions = [];
+    let paramIndex = 1;
 
-  if (types && types.length > 0) {
-    conditions.push(`j.job_type = ANY($${paramIndex}::job_type[])`);
-    params.push(types);
-    paramIndex++;
+    if (types && types.length > 0) {
+      conditions.push(`j.job_type = ANY($${paramIndex}::job_type[])`);
+      params.push(types);
+      paramIndex++;
+    }
+
+    if (statuses && statuses.length > 0) {
+      conditions.push(`j.status = ANY($${paramIndex}::job_status[])`);
+      params.push(statuses);
+      paramIndex++;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    params.push(limit, offset);
+
+    const result = await query(`
+      SELECT j.*, l.seller_sku as listing_sku
+      FROM jobs j
+      LEFT JOIN listings l ON l.id = j.listing_id
+      ${whereClause}
+      ORDER BY j.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `, params);
+
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Jobs] jobs table does not exist');
+      return [];
+    }
+    throw error;
   }
-
-  if (statuses && statuses.length > 0) {
-    conditions.push(`j.status = ANY($${paramIndex}::job_status[])`);
-    params.push(statuses);
-    paramIndex++;
-  }
-
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  params.push(limit, offset);
-
-  const result = await query(`
-    SELECT j.*, l.seller_sku as listing_sku
-    FROM jobs j
-    LEFT JOIN listings l ON l.id = j.listing_id
-    ${whereClause}
-    ORDER BY j.created_at DESC
-    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-  `, params);
-
-  return result.rows;
 }
 
 /**
@@ -293,13 +329,7 @@ export async function findRecent(options = {}) {
  * @returns {Promise<Object>}
  */
 export async function countByStatus() {
-  const result = await query(`
-    SELECT status, COUNT(*) as count
-    FROM jobs
-    GROUP BY status
-  `);
-
-  const counts = {
+  const defaultCounts = {
     PENDING: 0,
     RUNNING: 0,
     SUCCEEDED: 0,
@@ -307,11 +337,28 @@ export async function countByStatus() {
     CANCELLED: 0,
   };
 
-  for (const row of result.rows) {
-    counts[row.status] = parseInt(row.count, 10);
-  }
+  try {
+    const result = await query(`
+      SELECT status, COUNT(*) as count
+      FROM jobs
+      GROUP BY status
+    `);
 
-  return counts;
+    const counts = { ...defaultCounts };
+
+    for (const row of result.rows) {
+      counts[row.status] = parseInt(row.count, 10);
+    }
+
+    return counts;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Jobs] jobs table does not exist');
+      return defaultCounts;
+    }
+    throw error;
+  }
 }
 
 export default {
