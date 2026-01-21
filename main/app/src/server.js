@@ -24,6 +24,7 @@ import { startWorker, stopWorker } from './workers/job-worker.js';
 import { logger, httpLogger } from './lib/logger.js';
 import { initSentry, captureException, flush as sentryFlush } from './lib/sentry.js';
 import { getMetrics, getContentType } from './lib/metrics.js';
+import { getSafeErrorMessage } from './lib/error-handler.js';
 
 // Initialize Sentry early
 initSentry();
@@ -221,10 +222,8 @@ fastify.setErrorHandler((error, request, reply) => {
     });
   }
 
-  // For all other errors, send generic message in production
-  const safeMessage = process.env.NODE_ENV === 'production'
-    ? 'An unexpected error occurred'
-    : error.message;
+  // For all other errors, use safe message filtering (allows informative messages through, filters sensitive data)
+  const safeMessage = getSafeErrorMessage(error, 'An unexpected error occurred');
 
   return reply.status(statusCode).send({
     success: false,

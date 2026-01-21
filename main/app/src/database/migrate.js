@@ -13,6 +13,37 @@ import { query, getClient } from './connection.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
+ * Ensure base schema exists before running migrations
+ * Runs schema.sql if listings table doesn't exist
+ */
+async function ensureBaseSchema() {
+  // Check if listings table exists
+  const { rows } = await query(`
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'listings'
+    ) as exists
+  `);
+
+  if (rows[0].exists) {
+    console.log('[Migrations] Base schema already exists');
+    return;
+  }
+
+  // Run schema.sql to create base tables
+  const schemaPath = join(__dirname, '../../schema.sql');
+  if (!existsSync(schemaPath)) {
+    console.warn('[Migrations] No schema.sql found, migrations may fail if tables do not exist');
+    return;
+  }
+
+  console.log('[Migrations] Creating base schema from schema.sql...');
+  const schemaSql = readFileSync(schemaPath, 'utf8');
+  await query(schemaSql);
+  console.log('[Migrations] Base schema created');
+}
+
+/**
  * Run all pending database migrations
  * @returns {Promise<{success: boolean, migrationsRun: number, error?: string}>}
  */
@@ -20,6 +51,9 @@ export async function runMigrations() {
   console.log('[Migrations] Starting migration check...');
 
   try {
+    // Ensure base schema exists first (listings table, etc.)
+    await ensureBaseSchema();
+
     // Create migrations tracking table if it doesn't exist
     await query(`
       CREATE TABLE IF NOT EXISTS _migrations (
