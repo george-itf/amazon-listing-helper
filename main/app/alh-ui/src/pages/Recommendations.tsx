@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { PageHeader } from '../layouts/PageHeader';
 import { RiskBadge } from '../components/badges';
-import { getRecommendations, acceptRecommendation, rejectRecommendation } from '../api/recommendations';
+import { getRecommendations, acceptRecommendation, rejectRecommendation, snoozeRecommendation } from '../api/recommendations';
 import type { Recommendation } from '../types';
 
 export function RecommendationsPage() {
@@ -9,6 +9,7 @@ export function RecommendationsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'PENDING' | 'all'>('PENDING');
+  const [snoozeTarget, setSnoozeTarget] = useState<Recommendation | null>(null);
 
   const loadRecommendations = async () => {
     setIsLoading(true);
@@ -44,6 +45,16 @@ export function RecommendationsPage() {
       loadRecommendations();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to reject recommendation');
+    }
+  };
+
+  const handleSnooze = async (rec: Recommendation, hours: number) => {
+    try {
+      await snoozeRecommendation(rec.id, { snooze_until: new Date(Date.now() + hours * 60 * 60 * 1000).toISOString() });
+      setSnoozeTarget(null);
+      loadRecommendations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to snooze recommendation');
     }
   };
 
@@ -162,7 +173,10 @@ export function RecommendationsPage() {
                     >
                       Reject
                     </button>
-                    <button className="btn btn-secondary btn-sm">
+                    <button
+                      onClick={() => setSnoozeTarget(rec)}
+                      className="btn btn-secondary btn-sm"
+                    >
                       Snooze
                     </button>
                   </div>
@@ -172,6 +186,45 @@ export function RecommendationsPage() {
           </div>
         )}
       </div>
+
+      {/* Snooze Modal */}
+      {snoozeTarget && (
+        <div className="fixed inset-0 z-50 overflow-y-auto">
+          <div className="flex min-h-full items-center justify-center p-4">
+            <div className="fixed inset-0 bg-black/30" onClick={() => setSnoozeTarget(null)} />
+            <div className="relative bg-white rounded-lg shadow-xl max-w-sm w-full p-6">
+              <h2 className="text-lg font-semibold mb-4">Snooze Recommendation</h2>
+              <p className="text-sm text-gray-600 mb-4">{snoozeTarget.title}</p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => handleSnooze(snoozeTarget, 24)}
+                  className="btn btn-secondary w-full"
+                >
+                  Snooze for 24 hours
+                </button>
+                <button
+                  onClick={() => handleSnooze(snoozeTarget, 72)}
+                  className="btn btn-secondary w-full"
+                >
+                  Snooze for 3 days
+                </button>
+                <button
+                  onClick={() => handleSnooze(snoozeTarget, 168)}
+                  className="btn btn-secondary w-full"
+                >
+                  Snooze for 1 week
+                </button>
+              </div>
+              <button
+                onClick={() => setSnoozeTarget(null)}
+                className="btn btn-secondary w-full mt-4"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

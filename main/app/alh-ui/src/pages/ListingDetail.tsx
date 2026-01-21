@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { PageHeader } from '../layouts/PageHeader';
 import { BuyBoxBadge, RiskBadge } from '../components/badges';
+import { PriceEditModal } from '../components/modals/PriceEditModal';
+import { StockEditModal } from '../components/modals/StockEditModal';
 import { getListingWithFeatures, getListingEconomics } from '../api/listings';
 import { getListingRecommendations } from '../api/recommendations';
 import type { ListingWithFeatures, EconomicsResponse, Recommendation } from '../types';
@@ -13,6 +15,8 @@ export function ListingDetailPage() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isPriceModalOpen, setIsPriceModalOpen] = useState(false);
+  const [isStockModalOpen, setIsStockModalOpen] = useState(false);
 
   useEffect(() => {
     const loadData = async () => {
@@ -41,6 +45,20 @@ export function ListingDetailPage() {
 
     loadData();
   }, [listingId]);
+
+  const reloadData = () => {
+    if (!listingId) return;
+    const id = parseInt(listingId);
+    Promise.all([
+      getListingWithFeatures(id),
+      getListingEconomics(id).catch(() => null),
+      getListingRecommendations(id).catch(() => []),
+    ]).then(([listingData, economicsData, recsData]) => {
+      setListing(listingData);
+      setEconomics(economicsData);
+      setRecommendations(recsData);
+    });
+  };
 
   if (isLoading) {
     return (
@@ -99,7 +117,12 @@ export function ListingDetailPage() {
               {f?.buy_box_risk ? <RiskBadge level={f.buy_box_risk} /> : '-'}
             </div>
           </div>
-          <button className="btn btn-primary btn-sm mt-4 w-full">Edit Price</button>
+          <button
+            onClick={() => setIsPriceModalOpen(true)}
+            className="btn btn-primary btn-sm mt-4 w-full"
+          >
+            Edit Price
+          </button>
         </div>
 
         {/* Stock */}
@@ -123,7 +146,12 @@ export function ListingDetailPage() {
               {f?.stockout_risk ? <RiskBadge level={f.stockout_risk} /> : '-'}
             </div>
           </div>
-          <button className="btn btn-primary btn-sm mt-4 w-full">Edit Stock</button>
+          <button
+            onClick={() => setIsStockModalOpen(true)}
+            className="btn btn-primary btn-sm mt-4 w-full"
+          >
+            Edit Stock
+          </button>
         </div>
 
         {/* Economics */}
@@ -237,6 +265,24 @@ export function ListingDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Modals */}
+      {listing && (
+        <>
+          <PriceEditModal
+            listing={listing}
+            isOpen={isPriceModalOpen}
+            onClose={() => setIsPriceModalOpen(false)}
+            onSuccess={reloadData}
+          />
+          <StockEditModal
+            listing={listing}
+            isOpen={isStockModalOpen}
+            onClose={() => setIsStockModalOpen(false)}
+            onSuccess={reloadData}
+          />
+        </>
+      )}
     </div>
   );
 }
