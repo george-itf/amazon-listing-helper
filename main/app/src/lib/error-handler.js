@@ -22,6 +22,16 @@ const SAFE_ERROR_MESSAGES = {
   'rate limit': 'Rate limit exceeded',
   'timeout': 'Request timed out',
   'guardrails': 'Operation blocked by guardrails',
+  // SP-API errors - allow through with their messages
+  'sp-api': null, // null means pass through original message
+  'sp_api': null,
+  'refresh_token': null,
+  'invalid_grant': null,
+  'credentials not configured': null,
+  'marketplace': null,
+  'seller central': null,
+  'report failed': null,
+  'report timed out': null,
 };
 
 /**
@@ -78,7 +88,8 @@ export function getSafeErrorMessage(error, fallback = 'An error occurred') {
   const lowerMessage = message.toLowerCase();
   for (const [pattern, safeMessage] of Object.entries(SAFE_ERROR_MESSAGES)) {
     if (lowerMessage.includes(pattern)) {
-      return safeMessage;
+      // If safeMessage is null, pass through the original message (for SP-API errors etc.)
+      return safeMessage === null ? message : safeMessage;
     }
   }
 
