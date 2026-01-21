@@ -9,6 +9,9 @@
 --
 -- NOTE: PostgreSQL doesn't support FULL OUTER JOIN with OR conditions,
 -- so we use UNION ALL to combine matched and unmatched rows.
+--
+-- NOTE: Uses asin for keepa_snapshots join (more reliable than asin_entity_id)
+-- NOTE: Uses entity_type/entity_id pattern for recommendations/feature_store
 -- ============================================================================
 
 -- Drop existing view if it exists
@@ -49,17 +52,17 @@ SELECT
     l.price_inc_vat as current_price,
     l.available_quantity as current_quantity,
 
-    -- Keepa market data (latest snapshot)
-    (SELECT parsed_json->'metrics'->>'price_current' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_current,
-    (SELECT parsed_json->'metrics'->>'price_median_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_median_90d,
-    (SELECT parsed_json->'metrics'->>'price_p25_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p25_90d,
-    (SELECT parsed_json->'metrics'->>'price_p75_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p75_90d,
-    (SELECT parsed_json->'metrics'->>'volatility_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_volatility_90d,
-    (SELECT parsed_json->'metrics'->>'offers_count_current' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::int as keepa_offers_count,
-    (SELECT parsed_json->'metrics'->>'sales_rank_current' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::int as keepa_sales_rank,
-    (SELECT parsed_json->'metrics'->>'rank_trend_90d' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_rank_trend_90d,
-    (SELECT parsed_json->'metrics'->>'buy_box_is_amazon' FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1)::boolean as keepa_buybox_is_amazon,
-    (SELECT captured_at FROM keepa_snapshots WHERE asin_entity_id = ae.id ORDER BY captured_at DESC LIMIT 1) as keepa_captured_at,
+    -- Keepa market data (latest snapshot) - use asin for join, not asin_entity_id
+    (SELECT parsed_json->'metrics'->>'price_current' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_current,
+    (SELECT parsed_json->'metrics'->>'price_median_90d' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_median_90d,
+    (SELECT parsed_json->'metrics'->>'price_p25_90d' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p25_90d,
+    (SELECT parsed_json->'metrics'->>'price_p75_90d' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p75_90d,
+    (SELECT parsed_json->'metrics'->>'volatility_90d' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_volatility_90d,
+    (SELECT parsed_json->'metrics'->>'offers_count_current' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::int as keepa_offers_count,
+    (SELECT parsed_json->'metrics'->>'sales_rank_current' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::int as keepa_sales_rank,
+    (SELECT parsed_json->'metrics'->>'rank_trend_90d' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_rank_trend_90d,
+    (SELECT parsed_json->'metrics'->>'buy_box_is_amazon' FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1)::boolean as keepa_buybox_is_amazon,
+    (SELECT captured_at FROM keepa_snapshots ks WHERE ks.asin = ae.asin ORDER BY captured_at DESC LIMIT 1) as keepa_captured_at,
 
     -- BOM/Cost data (active BOM)
     (SELECT id FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_id,
@@ -70,7 +73,7 @@ SELECT
      FROM boms b WHERE b.listing_id = l.id AND b.is_active = true AND b.scope_type = 'LISTING' ORDER BY b.effective_from DESC LIMIT 1) as bom_cost_ex_vat,
     (SELECT effective_from FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_effective_from,
 
-    -- Feature store data (latest features)
+    -- Feature store data (latest features) - uses entity_type/entity_id pattern
     (SELECT features_json->>'margin' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as computed_margin,
     (SELECT features_json->>'profit_ex_vat' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as computed_profit,
     (SELECT features_json->>'break_even_price_inc_vat' FROM feature_store WHERE (entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id) ORDER BY computed_at DESC LIMIT 1)::numeric as break_even_price,
@@ -87,8 +90,10 @@ SELECT
     COALESCE((SELECT SUM(units) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_units,
     COALESCE((SELECT SUM(revenue_inc_vat) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_revenue,
 
-    -- Recommendations pending
-    COALESCE((SELECT COUNT(*) FROM recommendations WHERE (listing_id = l.id OR asin_entity_id = ae.id) AND status = 'PENDING'), 0) as pending_recommendations,
+    -- Recommendations pending - uses entity_type/entity_id pattern
+    COALESCE((SELECT COUNT(*) FROM recommendations WHERE
+        ((entity_type = 'LISTING' AND entity_id = l.id) OR (entity_type = 'ASIN' AND entity_id = ae.id))
+        AND status = 'PENDING'), 0) as pending_recommendations,
 
     -- Timestamps
     l."createdAt" as listing_created_at,
@@ -118,17 +123,17 @@ SELECT
     NULL::boolean as is_tracked,
     l.price_inc_vat as current_price,
     l.available_quantity as current_quantity,
-    -- Keepa data (NULL for listings without ASIN entity)
-    NULL::numeric as keepa_price_current,
-    NULL::numeric as keepa_price_median_90d,
-    NULL::numeric as keepa_price_p25_90d,
-    NULL::numeric as keepa_price_p75_90d,
-    NULL::numeric as keepa_volatility_90d,
-    NULL::int as keepa_offers_count,
-    NULL::int as keepa_sales_rank,
-    NULL::numeric as keepa_rank_trend_90d,
-    NULL::boolean as keepa_buybox_is_amazon,
-    NULL::timestamp as keepa_captured_at,
+    -- Keepa data - use listing's asin to lookup
+    (SELECT parsed_json->'metrics'->>'price_current' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_current,
+    (SELECT parsed_json->'metrics'->>'price_median_90d' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_median_90d,
+    (SELECT parsed_json->'metrics'->>'price_p25_90d' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p25_90d,
+    (SELECT parsed_json->'metrics'->>'price_p75_90d' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_price_p75_90d,
+    (SELECT parsed_json->'metrics'->>'volatility_90d' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_volatility_90d,
+    (SELECT parsed_json->'metrics'->>'offers_count_current' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::int as keepa_offers_count,
+    (SELECT parsed_json->'metrics'->>'sales_rank_current' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::int as keepa_sales_rank,
+    (SELECT parsed_json->'metrics'->>'rank_trend_90d' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::numeric as keepa_rank_trend_90d,
+    (SELECT parsed_json->'metrics'->>'buy_box_is_amazon' FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1)::boolean as keepa_buybox_is_amazon,
+    (SELECT captured_at FROM keepa_snapshots ks WHERE ks.asin = l.asin ORDER BY captured_at DESC LIMIT 1) as keepa_captured_at,
     -- BOM data
     (SELECT id FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_id,
     (SELECT notes FROM boms WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING' ORDER BY effective_from DESC LIMIT 1) as bom_notes,
@@ -153,7 +158,7 @@ SELECT
     COALESCE((SELECT SUM(units) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_units,
     COALESCE((SELECT SUM(revenue_inc_vat) FROM listing_sales_daily WHERE listing_id = l.id AND date >= CURRENT_DATE - INTERVAL '30 days'), 0) as sales_30d_revenue,
     -- Recommendations
-    COALESCE((SELECT COUNT(*) FROM recommendations WHERE listing_id = l.id AND status = 'PENDING'), 0) as pending_recommendations,
+    COALESCE((SELECT COUNT(*) FROM recommendations WHERE entity_type = 'LISTING' AND entity_id = l.id AND status = 'PENDING'), 0) as pending_recommendations,
     -- Timestamps
     l."createdAt" as listing_created_at,
     l."updatedAt" as listing_updated_at,
