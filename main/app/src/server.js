@@ -19,6 +19,14 @@ import { registerV2Routes } from './routes/v2.routes.js';
 // Job worker
 import { startWorker, stopWorker } from './workers/job-worker.js';
 
+// Observability
+import { logger, httpLogger } from './lib/logger.js';
+import { initSentry, captureException, flush as sentryFlush } from './lib/sentry.js';
+import { getMetrics, getContentType } from './lib/metrics.js';
+
+// Initialize Sentry early
+initSentry();
+
 // ============================================================================
 // SECURITY: API Key Authentication
 // ============================================================================
@@ -115,7 +123,7 @@ function getCorsOrigin() {
 }
 
 const fastify = Fastify({
-  logger: true,
+  logger: httpLogger, // Use structured pino logger
   bodyLimit: parseInt(process.env.BODY_LIMIT || '1048576', 10), // 1MB default, configurable
   trustProxy: process.env.TRUST_PROXY === 'true', // Required for rate limiting behind proxy
 });
@@ -174,19 +182,31 @@ fastify.addHook('onRequest', async (request, reply) => {
 
 // Register v2 API routes
 await registerV2Routes(fastify);
-console.log('API v2 routes registered');
-console.log(`Security: Helmet enabled, Rate limit: ${process.env.RATE_LIMIT_MAX || 100}/min, Auth: ${process.env.API_KEY ? 'enabled' : 'disabled (set API_KEY to enable)'}`);
+logger.info('API v2 routes registered');
+logger.info({
+  helmet: true,
+  rateLimit: process.env.RATE_LIMIT_MAX || 100,
+  auth: process.env.API_KEY ? 'enabled' : 'disabled',
+}, 'Security middleware configured');
 
 // 5. Global Error Handler - sanitizes all unhandled errors
 fastify.setErrorHandler((error, request, reply) => {
-  // Log full error internally
-  console.error('[GlobalError]', {
+  // Log full error internally with structured logging
+  httpLogger.error({
+    err: error,
     method: request.method,
     url: request.url,
-    message: error.message,
-    stack: error.stack,
-    timestamp: new Date().toISOString(),
-  });
+    statusCode: error.statusCode || 500,
+  }, 'Request error');
+
+  // Report to Sentry for 5xx errors
+  if (!error.statusCode || error.statusCode >= 500) {
+    captureException(error, {
+      method: request.method,
+      url: request.url,
+      ip: request.ip,
+    });
+  }
 
   // Send sanitized error to client
   const statusCode = error.statusCode || 500;
@@ -227,10 +247,16 @@ if (fs.existsSync(distPath)) {
       reply.sendFile('index.html');
     }
   });
-  console.log('Static frontend serving enabled from:', distPath);
+  logger.info({ distPath }, 'Static frontend serving enabled');
 } else {
-  console.log('No dist folder found - frontend not served. Build alh-ui first.');
+  logger.warn('No dist folder found - frontend not served. Build alh-ui first.');
 }
+
+// Prometheus metrics endpoint
+fastify.get('/metrics', async (request, reply) => {
+  const metrics = await getMetrics();
+  reply.header('Content-Type', getContentType()).send(metrics);
+});
 
 // ============================================
 // START SERVER
@@ -240,35 +266,36 @@ const start = async () => {
     // Test database connection
     const dbOk = await testConnection();
     if (!dbOk) {
-      console.error('Database connection failed - exiting');
+      logger.fatal('Database connection failed - exiting');
       process.exit(1);
     }
 
     // Initialize ML data pool (non-blocking)
-    initMlDataPool().catch(err => console.warn('ML pool init warning:', err.message));
+    initMlDataPool().catch(err => logger.warn({ err }, 'ML pool init warning'));
 
     const port = process.env.PORT || 4000;
     await fastify.listen({ port, host: '0.0.0.0' });
-    console.log(`Server running on http://0.0.0.0:${port}`);
+    logger.info({ port, env: process.env.NODE_ENV || 'development' }, 'Server started');
 
     // Start the job worker
     if (process.env.DISABLE_WORKER !== 'true') {
       startWorker();
-      console.log('Job worker started');
+      logger.info('Job worker started');
     }
   } catch (err) {
-    console.error('Failed to start server:', err);
+    logger.fatal({ err }, 'Failed to start server');
     process.exit(1);
   }
 };
 
 // Graceful shutdown
 const gracefulShutdown = async (signal) => {
-  console.log(`\n${signal} received. Shutting down gracefully...`);
+  logger.info({ signal }, 'Shutting down gracefully...');
   stopWorker();
   await fastify.close();
+  await sentryFlush(); // Flush Sentry events before exit
   await closePool();
-  console.log('Server shutdown complete');
+  logger.info('Server shutdown complete');
   process.exit(0);
 };
 

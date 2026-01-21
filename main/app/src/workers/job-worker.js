@@ -16,6 +16,9 @@ import { query, transaction } from '../database/connection.js';
 import * as jobRepo from '../repositories/job.repository.js';
 import { hasSpApiCredentials, getSpApiClientConfig, getSellerId, getDefaultMarketplaceId } from '../credentials-provider.js';
 import SellingPartner from 'amazon-sp-api';
+import { workerLogger, logJobEvent } from '../lib/logger.js';
+import { recordJobEvent, updateJobQueueLength } from '../lib/metrics.js';
+import { captureException } from '../lib/sentry.js';
 
 // Worker configuration
 const WORKER_POLL_INTERVAL_MS = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '5000', 10);
@@ -30,7 +33,8 @@ let workerInterval = null;
  * @returns {Promise<Object>} Result object
  */
 async function processJob(job) {
-  console.log(`[Worker] Processing job ${job.id}: ${job.job_type}`);
+  const startTime = Date.now();
+  logJobEvent({ jobId: job.id, jobType: job.job_type, status: 'processing' });
 
   switch (job.job_type) {
     case 'PUBLISH_PRICE_CHANGE':
@@ -75,7 +79,7 @@ async function processPriceChange(job) {
   const newPrice = input.price_inc_vat;
   const listingEventId = input.listing_event_id;
 
-  console.log(`[Worker] Publishing price change for listing ${listingId}: £${newPrice}`);
+  workerLogger.info({ listingId, newPrice }, 'Publishing price change');
 
   // Update listing_event to PUBLISHED
   await query(`
@@ -92,7 +96,7 @@ async function processPriceChange(job) {
   // Check if we have SP-API credentials
   if (!hasSpApiCredentials()) {
     // STUB: No credentials, simulate success for development
-    console.log(`[Worker] No SP-API credentials - simulating success`);
+    workerLogger.warn('No SP-API credentials - simulating success');
 
     // Update local database
     await updateListingPrice(listingId, newPrice);
@@ -143,7 +147,7 @@ async function processStockChange(job) {
   const newQuantity = input.available_quantity;
   const listingEventId = input.listing_event_id;
 
-  console.log(`[Worker] Publishing stock change for listing ${listingId}: ${newQuantity} units`);
+  workerLogger.info(` Publishing stock change for listing ${listingId}: ${newQuantity} units`);
 
   // Update listing_event to PUBLISHED
   await query(`
@@ -160,7 +164,7 @@ async function processStockChange(job) {
   // Check if we have SP-API credentials
   if (!hasSpApiCredentials()) {
     // STUB: No credentials, simulate success for development
-    console.log(`[Worker] No SP-API credentials - simulating success`);
+    workerLogger.warn('No SP-API credentials - simulating success');
 
     // Update local database
     await updateListingStock(listingId, newQuantity);
@@ -333,7 +337,7 @@ async function queueFeatureRecompute(listingId, reason) {
     `, [listingId]);
 
     if (existing.rows.length > 0) {
-      console.log(`[Worker] Feature recompute already pending for listing ${listingId}`);
+      workerLogger.info(` Feature recompute already pending for listing ${listingId}`);
       return;
     }
 
@@ -347,10 +351,10 @@ async function queueFeatureRecompute(listingId, reason) {
       JSON.stringify({ trigger: reason, triggered_at: new Date().toISOString() }),
     ]);
 
-    console.log(`[Worker] Queued feature recompute for listing ${listingId} (trigger: ${reason})`);
+    workerLogger.info(` Queued feature recompute for listing ${listingId} (trigger: ${reason})`);
   } catch (error) {
     // Don't fail the main job if feature recompute queuing fails
-    console.error(`[Worker] Failed to queue feature recompute for listing ${listingId}:`, error.message);
+    workerLogger.error(` Failed to queue feature recompute for listing ${listingId}:`, error.message);
   }
 }
 
@@ -396,7 +400,7 @@ async function callSpApiUpdatePrice(listingId, newPrice) {
     throw new Error('SP_API_SELLER_ID not configured');
   }
 
-  console.log(`[Worker] Calling SP-API to update price for SKU ${sellerSku} to £${newPrice}`);
+  workerLogger.info(` Calling SP-API to update price for SKU ${sellerSku} to £${newPrice}`);
 
   const sp = createSpApiClient();
 
@@ -441,7 +445,7 @@ async function callSpApiUpdatePrice(listingId, newPrice) {
       body: patchBody,
     });
 
-    console.log(`[Worker] SP-API price update response:`, JSON.stringify(response));
+    workerLogger.info(` SP-API price update response:`, JSON.stringify(response));
 
     // Check for submission status
     const status = response?.status || 'UNKNOWN';
@@ -471,7 +475,7 @@ async function callSpApiUpdatePrice(listingId, newPrice) {
       };
     }
   } catch (error) {
-    console.error(`[Worker] SP-API price update failed for ${sellerSku}:`, error);
+    workerLogger.error(` SP-API price update failed for ${sellerSku}:`, error);
 
     // Extract error details
     const errorMessage = error.message || 'Unknown SP-API error';
@@ -506,14 +510,14 @@ async function callSpApiUpdateInventory(listingId, newQuantity) {
     throw new Error('SP_API_SELLER_ID not configured');
   }
 
-  console.log(`[Worker] Calling SP-API to update inventory for SKU ${sellerSku} to ${newQuantity} units (${fulfillmentChannel})`);
+  workerLogger.info(` Calling SP-API to update inventory for SKU ${sellerSku} to ${newQuantity} units (${fulfillmentChannel})`);
 
   const sp = createSpApiClient();
 
   // For FBA listings, inventory is managed by Amazon - we can't update it directly
   // For FBM (MFN) listings, we use Listings Items API
   if (fulfillmentChannel === 'FBA') {
-    console.log(`[Worker] FBA listing ${sellerSku} - inventory managed by Amazon, skipping SP-API update`);
+    workerLogger.info(` FBA listing ${sellerSku} - inventory managed by Amazon, skipping SP-API update`);
     return {
       status: 'skipped',
       reason: 'FBA inventory managed by Amazon',
@@ -554,7 +558,7 @@ async function callSpApiUpdateInventory(listingId, newQuantity) {
       body: patchBody,
     });
 
-    console.log(`[Worker] SP-API inventory update response:`, JSON.stringify(response));
+    workerLogger.info(` SP-API inventory update response:`, JSON.stringify(response));
 
     // Check for submission status
     const status = response?.status || 'UNKNOWN';
@@ -584,7 +588,7 @@ async function callSpApiUpdateInventory(listingId, newQuantity) {
       };
     }
   } catch (error) {
-    console.error(`[Worker] SP-API inventory update failed for ${sellerSku}:`, error);
+    workerLogger.error(` SP-API inventory update failed for ${sellerSku}:`, error);
 
     // Extract error details
     const errorMessage = error.message || 'Unknown SP-API error';
@@ -612,7 +616,7 @@ async function processSyncKeepaAsin(job) {
     throw new Error('ASIN is required for SYNC_KEEPA_ASIN job');
   }
 
-  console.log(`[Worker] Syncing Keepa data for ASIN ${asin}`);
+  workerLogger.info(` Syncing Keepa data for ASIN ${asin}`);
 
   // Dynamic import to avoid circular dependencies
   const keepaService = await import('../services/keepa.service.js');
@@ -642,7 +646,7 @@ async function processComputeFeaturesListing(job) {
     throw new Error('listing_id is required for COMPUTE_FEATURES_LISTING job');
   }
 
-  console.log(`[Worker] Computing features for listing ${listingId}`);
+  workerLogger.info(` Computing features for listing ${listingId}`);
 
   const featureStoreService = await import('../services/feature-store.service.js');
 
@@ -670,7 +674,7 @@ async function processComputeFeaturesAsin(job) {
     throw new Error('asin_entity_id is required for COMPUTE_FEATURES_ASIN job');
   }
 
-  console.log(`[Worker] Computing features for ASIN entity ${asinEntityId}`);
+  workerLogger.info(` Computing features for ASIN entity ${asinEntityId}`);
 
   const featureStoreService = await import('../services/feature-store.service.js');
 
@@ -688,11 +692,11 @@ async function processSyncAmazon(job) {
   const listingId = job.listing_id;
   const jobType = job.job_type;
 
-  console.log(`[Worker] Processing ${jobType} for listing ${listingId}`);
+  workerLogger.info(` Processing ${jobType} for listing ${listingId}`);
 
   // Check if we have SP-API credentials
   if (!hasSpApiCredentials()) {
-    console.log(`[Worker] No SP-API credentials - simulating ${jobType}`);
+    workerLogger.info(` No SP-API credentials - simulating ${jobType}`);
     return {
       success: true,
       simulated: true,
@@ -748,7 +752,7 @@ async function processGenerateRecommendationsListing(job) {
     throw new Error('listing_id is required for GENERATE_RECOMMENDATIONS_LISTING job');
   }
 
-  console.log(`[Worker] Generating recommendations for listing ${listingId}`);
+  workerLogger.info(` Generating recommendations for listing ${listingId}`);
 
   const recommendationService = await import('../services/recommendation.service.js');
 
@@ -770,7 +774,7 @@ async function processGenerateRecommendationsAsin(job) {
     throw new Error('asin_entity_id is required for GENERATE_RECOMMENDATIONS_ASIN job');
   }
 
-  console.log(`[Worker] Generating recommendations for ASIN entity ${asinEntityId}`);
+  workerLogger.info(` Generating recommendations for ASIN entity ${asinEntityId}`);
 
   const recommendationService = await import('../services/recommendation.service.js');
 
@@ -805,10 +809,16 @@ async function processJobs() {
 
         // Mark as succeeded
         await jobRepo.markSucceeded(job.id, result);
-        console.log(`[Worker] Job ${job.id} succeeded`);
+        const durationMs = Date.now() - Date.parse(job.created_at || job.createdAt);
+        logJobEvent({ jobId: job.id, jobType: job.job_type, status: 'completed' });
+        recordJobEvent({ type: job.job_type, status: 'success', durationMs });
+        workerLogger.info({ jobId: job.id, jobType: job.job_type, durationMs }, 'Job succeeded');
 
       } catch (error) {
-        console.error(`[Worker] Job ${job.id} failed:`, error.message);
+        logJobEvent({ jobId: job.id, jobType: job.job_type, status: 'failed', error: error.message });
+        recordJobEvent({ type: job.job_type, status: 'failed', isRetry: job.attempt > 1 });
+        captureException(error, { jobId: job.id, jobType: job.job_type });
+        workerLogger.error({ jobId: job.id, err: error }, 'Job failed');
 
         // Mark as failed (will retry if attempts < max_attempts)
         await jobRepo.markFailed(job.id, error.message, {
@@ -819,7 +829,7 @@ async function processJobs() {
     }
 
   } catch (error) {
-    console.error('[Worker] Error in worker loop:', error);
+    workerLogger.error('[Worker] Error in worker loop:', error);
   }
 }
 
@@ -828,11 +838,11 @@ async function processJobs() {
  */
 export function startWorker() {
   if (isRunning) {
-    console.log('[Worker] Already running');
+    workerLogger.info('[Worker] Already running');
     return;
   }
 
-  console.log(`[Worker] Starting (poll interval: ${WORKER_POLL_INTERVAL_MS}ms, batch size: ${WORKER_BATCH_SIZE})`);
+  workerLogger.info(` Starting (poll interval: ${WORKER_POLL_INTERVAL_MS}ms, batch size: ${WORKER_BATCH_SIZE})`);
   isRunning = true;
 
   // Process immediately, then set interval
@@ -845,11 +855,11 @@ export function startWorker() {
  */
 export function stopWorker() {
   if (!isRunning) {
-    console.log('[Worker] Not running');
+    workerLogger.info('[Worker] Not running');
     return;
   }
 
-  console.log('[Worker] Stopping');
+  workerLogger.info('[Worker] Stopping');
   isRunning = false;
 
   if (workerInterval) {
