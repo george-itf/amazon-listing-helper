@@ -44,8 +44,10 @@ export async function testConnection() {
 
   try {
     // Try to get marketplace participations - simple API that should work
+    // Note: amazon-sp-api requires specifying the endpoint for the operation
     const response = await sp.callAPI({
       operation: 'getMarketplaceParticipations',
+      endpoint: 'sellers',
     });
 
     return {
@@ -74,6 +76,7 @@ async function requestListingsReport(sp) {
 
   const response = await sp.callAPI({
     operation: 'createReport',
+    endpoint: 'reports',
     body: {
       reportType: 'GET_MERCHANT_LISTINGS_ALL_DATA',
       marketplaceIds: [marketplaceId],
@@ -100,6 +103,7 @@ async function waitForReport(sp, reportId, maxWaitMs = 300000, onProgress = null
     attempts++;
     const report = await sp.callAPI({
       operation: 'getReport',
+      endpoint: 'reports',
       path: { reportId },
     });
 
@@ -117,6 +121,7 @@ async function waitForReport(sp, reportId, maxWaitMs = 300000, onProgress = null
 
       const document = await sp.callAPI({
         operation: 'getReportDocument',
+        endpoint: 'reports',
         path: { reportDocumentId: documentId },
       });
 

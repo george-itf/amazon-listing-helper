@@ -163,20 +163,21 @@ export async function initMlDataPool() {
     console.log('📊 Creating ML data pool...');
 
     // Create the materialized view
+    // Note: Column names updated per migration 001_slice_a_schema.sql
     await query(`
       CREATE MATERIALIZED VIEW ml_data_pool AS
       SELECT
         COALESCE(l.id, ae.listing_id) as listing_id,
         ae.id as asin_entity_id,
-        COALESCE(l.sku, 'ASIN_' || ae.asin) as sku,
+        COALESCE(l.seller_sku, 'ASIN_' || ae.asin) as sku,
         COALESCE(l.asin, ae.asin) as asin,
         CASE WHEN l.id IS NOT NULL THEN 'LISTING' ELSE 'ASIN' END as entity_type,
         COALESCE(l.title, ae.title) as title,
         ae.brand,
         ae.category,
         l.status as listing_status,
-        l.price as current_price,
-        l.quantity as current_quantity,
+        l.price_inc_vat as current_price,
+        l.available_quantity as current_quantity,
         (fs.features_json->>'margin')::numeric as computed_margin,
         (fs.features_json->>'opportunity_score')::numeric as opportunity_score,
         fs.features_json as all_features,

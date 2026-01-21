@@ -100,6 +100,9 @@ export interface PricePreviewResponse {
     price_ex_vat: number;
     profit_ex_vat: number;
     margin: number;
+    break_even_price_inc_vat?: number;
+    bom_cost_ex_vat?: number;
+    total_cost_ex_vat?: number;
   };
   guardrails: {
     passed: boolean;
