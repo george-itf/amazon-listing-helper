@@ -3605,23 +3605,112 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
-  // HEALTH CHECK
+  // HEALTH CHECK & METRICS
   // ============================================================================
 
+  /**
+   * GET /api/v2/health
+   * Comprehensive health check endpoint
+   * Returns non-200 if any critical service is unhealthy
+   */
   fastify.get('/api/v2/health', async (request, reply) => {
     const { testConnection } = await import('../database/connection.js');
     const { getCredentialsStatus } = await import('../credentials-provider.js');
 
-    const dbHealthy = await testConnection();
+    let dbHealthy = false;
+    let keepaRateLimit = null;
+
+    // Check database
+    try {
+      dbHealthy = await testConnection();
+    } catch (error) {
+      console.error('[Health] Database check failed:', error.message);
+    }
+
+    // Check Keepa rate limit status
+    try {
+      const { getRateLimitStatus } = await import('../services/keepa.service.js');
+      keepaRateLimit = getRateLimitStatus();
+    } catch (error) {
+      // Keepa service might not be available
+    }
+
+    // Get credentials status
     const credentials = getCredentialsStatus();
 
-    return wrapResponse({
-      status: dbHealthy ? 'healthy' : 'unhealthy',
+    // Determine overall health
+    const isHealthy = dbHealthy && credentials.spApi;
+
+    const healthStatus = {
+      status: isHealthy ? 'healthy' : 'unhealthy',
       version: 'v2',
       timestamp: new Date().toISOString(),
-      database: dbHealthy,
-      credentials,
-    });
+      checks: {
+        database: {
+          status: dbHealthy ? 'ok' : 'error',
+          message: dbHealthy ? 'Connected' : 'Connection failed',
+        },
+        sp_api: {
+          status: credentials.spApi ? 'ok' : 'not_configured',
+          message: credentials.spApi ? 'Credentials configured' : 'Missing credentials',
+        },
+        keepa: {
+          status: credentials.keepa ? 'ok' : 'not_configured',
+          message: credentials.keepa ? 'API key configured' : 'Missing API key',
+          rate_limit: keepaRateLimit,
+        },
+      },
+    };
+
+    // Return appropriate status code
+    if (!isHealthy) {
+      return reply.status(503).send(wrapResponse(healthStatus));
+    }
+
+    return wrapResponse(healthStatus);
+  });
+
+  /**
+   * GET /api/v2/metrics
+   * Prometheus metrics endpoint
+   */
+  fastify.get('/api/v2/metrics', async (request, reply) => {
+    try {
+      const { getMetrics, getContentType } = await import('../lib/metrics.js');
+      const metrics = await getMetrics();
+
+      reply.header('Content-Type', getContentType());
+      return reply.send(metrics);
+    } catch (error) {
+      console.error('[Metrics] Error generating metrics:', error.message);
+      return reply.status(500).send('Error generating metrics');
+    }
+  });
+
+  /**
+   * GET /api/v2/ready
+   * Kubernetes-style readiness probe
+   */
+  fastify.get('/api/v2/ready', async (request, reply) => {
+    const { testConnection } = await import('../database/connection.js');
+
+    try {
+      const dbOk = await testConnection();
+      if (dbOk) {
+        return reply.send({ ready: true });
+      }
+      return reply.status(503).send({ ready: false, reason: 'database_unavailable' });
+    } catch (error) {
+      return reply.status(503).send({ ready: false, reason: error.message });
+    }
+  });
+
+  /**
+   * GET /api/v2/live
+   * Kubernetes-style liveness probe
+   */
+  fastify.get('/api/v2/live', async (request, reply) => {
+    return reply.send({ alive: true, timestamp: new Date().toISOString() });
   });
 }
 
