@@ -4,9 +4,11 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "worker": "node src/workers/job-worker.js",
     "test:db": "node test-repositories.js",
     "db:schema": "psql $DATABASE_URL -f schema.sql",
-    "db:migrate": "node migrate-data.js"
+    "db:migrate": "node migrate-data.js",
+    "db:migrate:railway": "node scripts/migrate.js"
   },
   "dependencies": {
     "@fastify/cors": "^8.4.0",
