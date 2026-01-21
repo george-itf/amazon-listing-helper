@@ -16,16 +16,21 @@ function getSpClient() {
     return null;
   }
 
-  const config = getSpApiClientConfig();
-  return new SellingPartner({
-    region: config.region,
-    refresh_token: config.refresh_token,
-    credentials: config.credentials,
-    options: {
-      ...config.options,
-      debug_log: process.env.DEBUG === 'true',
-    },
-  });
+  try {
+    const config = getSpApiClientConfig();
+    return new SellingPartner({
+      region: config.region,
+      refresh_token: config.refresh_token,
+      credentials: config.credentials,
+      options: {
+        ...config.options,
+        debug_log: process.env.DEBUG === 'true',
+      },
+    });
+  } catch (error) {
+    console.error('[ListingsSync] Failed to create SP-API client:', error.message);
+    return null;
+  }
 }
 
 /**
