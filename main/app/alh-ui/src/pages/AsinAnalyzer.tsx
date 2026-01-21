@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../layouts/PageHeader';
 import { analyzeAsin, trackAsin, getTrackedAsins, convertAsinToListing } from '../api/asins';
@@ -11,6 +11,7 @@ export function AsinAnalyzerPage() {
   const [trackedAsins, setTrackedAsins] = useState<AsinEntity[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isConverting, setIsConverting] = useState(false);
+  const [isLoadingTracked, setIsLoadingTracked] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // Convert form state
@@ -18,6 +19,23 @@ export function AsinAnalyzerPage() {
   const [convertSku, setConvertSku] = useState('');
   const [convertPrice, setConvertPrice] = useState('');
   const [convertQuantity, setConvertQuantity] = useState('100');
+
+  // Load tracked ASINs on mount
+  useEffect(() => {
+    loadTrackedAsins();
+  }, []);
+
+  const loadTrackedAsins = async () => {
+    setIsLoadingTracked(true);
+    try {
+      const tracked = await getTrackedAsins();
+      setTrackedAsins(tracked);
+    } catch (err) {
+      console.error('Failed to load tracked ASINs:', err);
+    } finally {
+      setIsLoadingTracked(false);
+    }
+  };
 
   const handleAnalyze = async () => {
     const asin = asinInput.trim().toUpperCase();
@@ -45,8 +63,7 @@ export function AsinAnalyzerPage() {
 
     try {
       await trackAsin(analysis.asin);
-      const tracked = await getTrackedAsins();
-      setTrackedAsins(tracked);
+      await loadTrackedAsins();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to track ASIN');
     }
@@ -75,11 +92,26 @@ export function AsinAnalyzerPage() {
     }
   };
 
+  const handleAnalyzeTracked = (asin: string) => {
+    setAsinInput(asin);
+    setAnalysis(null);
+    // Auto-analyze
+    setTimeout(() => {
+      const btn = document.querySelector('[data-analyze-btn]') as HTMLButtonElement;
+      btn?.click();
+    }, 100);
+  };
+
   return (
     <div>
       <PageHeader
         title="ASIN Analyzer"
         subtitle="Research new products and convert to listings"
+        actions={
+          <button onClick={loadTrackedAsins} className="btn btn-secondary btn-sm">
+            Refresh
+          </button>
+        }
       />
 
       {/* Search */}
@@ -98,6 +130,7 @@ export function AsinAnalyzerPage() {
             onClick={handleAnalyze}
             disabled={isAnalyzing}
             className="btn btn-primary"
+            data-analyze-btn
           >
             {isAnalyzing ? 'Analyzing...' : 'Analyze'}
           </button>
@@ -110,7 +143,7 @@ export function AsinAnalyzerPage() {
 
       {/* Analysis Results */}
       {analysis && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
           {/* Market Data */}
           <div className="card">
             <h3 className="font-semibold mb-4">Market Reality (Keepa)</h3>
@@ -288,26 +321,61 @@ export function AsinAnalyzerPage() {
         </div>
       )}
 
-      {/* Tracked ASINs */}
-      {trackedAsins.length > 0 && (
-        <div className="card mt-6">
-          <h3 className="font-semibold mb-4">Tracked ASINs</h3>
-          <div className="space-y-2">
-            {trackedAsins.map((asin) => (
-              <div key={asin.id} className="flex justify-between items-center p-2 bg-gray-50 rounded">
-                <span className="font-mono">{asin.asin}</span>
-                <span className={`badge ${
-                  asin.status === 'READY' ? 'badge-success' :
-                  asin.status === 'ANALYZING' ? 'badge-warning' :
-                  'badge-neutral'
-                }`}>
-                  {asin.status}
-                </span>
-              </div>
-            ))}
-          </div>
+      {/* Research Pool - Tracked ASINs */}
+      <div className="card">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="font-semibold">Research Pool ({trackedAsins.length} tracked)</h3>
         </div>
-      )}
+
+        {isLoadingTracked ? (
+          <p className="text-gray-500 text-center py-8">Loading tracked ASINs...</p>
+        ) : trackedAsins.length === 0 ? (
+          <p className="text-gray-500 text-center py-8">
+            No ASINs tracked yet. Analyze an ASIN above and click "Track ASIN" to add it to your research pool.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="table w-full">
+              <thead>
+                <tr>
+                  <th>ASIN</th>
+                  <th>Title</th>
+                  <th>Category</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trackedAsins.map((asin) => (
+                  <tr key={asin.id}>
+                    <td className="font-mono">{asin.asin}</td>
+                    <td className="max-w-xs truncate">{asin.title || '-'}</td>
+                    <td>{asin.category || '-'}</td>
+                    <td>
+                      <span className={`badge ${
+                        asin.status === 'READY' ? 'badge-success' :
+                        asin.status === 'CONVERTED' ? 'badge-info' :
+                        asin.status === 'ANALYZING' ? 'badge-warning' :
+                        'badge-neutral'
+                      }`}>
+                        {asin.status}
+                      </span>
+                    </td>
+                    <td>
+                      <button
+                        onClick={() => handleAnalyzeTracked(asin.asin)}
+                        className="btn btn-ghost btn-xs"
+                      >
+                        Analyze
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
