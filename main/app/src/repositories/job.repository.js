@@ -73,7 +73,7 @@ export async function getPendingJobs(limit = 10) {
       AND j.attempts < j.max_attempts
     ORDER BY j.priority DESC, j.scheduled_for ASC
     LIMIT $1
-    FOR UPDATE SKIP LOCKED
+    FOR UPDATE OF j SKIP LOCKED
   `, [limit]);
 
   return result.rows;
