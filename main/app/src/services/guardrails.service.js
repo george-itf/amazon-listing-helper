@@ -12,6 +12,22 @@
 import { query } from '../database/connection.js';
 
 /**
+ * Safe parseFloat - returns default on NaN
+ */
+function safeParseFloat(value, defaultValue = 0) {
+  const parsed = parseFloat(value);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+/**
+ * Safe parseInt - returns default on NaN
+ */
+function safeParseInt(value, defaultValue = 0) {
+  const parsed = parseInt(value, 10);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+/**
  * @typedef {Object} GuardrailViolation
  * @property {string} rule - e.g., "min_margin"
  * @property {number} threshold - e.g., 0.15
@@ -55,16 +71,16 @@ export async function loadGuardrails() {
 
     switch (key) {
       case 'min_margin':
-        guardrails.minMargin = parseFloat(value);
+        guardrails.minMargin = safeParseFloat(value, 0.15);
         break;
       case 'max_price_change_pct_per_day':
-        guardrails.maxPriceChangePctPerDay = parseFloat(value);
+        guardrails.maxPriceChangePctPerDay = safeParseFloat(value, 0.05);
         break;
       case 'min_days_of_cover_before_price_change':
-        guardrails.minDaysOfCoverBeforePriceChange = parseInt(value, 10);
+        guardrails.minDaysOfCoverBeforePriceChange = safeParseInt(value, 7);
         break;
       case 'min_stock_threshold':
-        guardrails.minStockThreshold = parseInt(value, 10);
+        guardrails.minStockThreshold = safeParseInt(value, 5);
         break;
       case 'allow_price_below_break_even':
         guardrails.allowPriceBelowBreakEven = value === 'true' || value === true;
@@ -266,7 +282,7 @@ export async function getGuardrailsSummary(listingId) {
       AND date >= CURRENT_DATE - INTERVAL '30 days'
   `, [listingId]);
 
-  const totalUnits30d = parseInt(salesResult.rows[0]?.total_units || 0, 10);
+  const totalUnits30d = safeParseInt(salesResult.rows[0]?.total_units || 0, 0);
   const salesVelocity = totalUnits30d / 30;
   const daysOfCover = calculateDaysOfCover(listing.available_quantity || 0, salesVelocity);
   const stockoutRisk = calculateStockoutRisk(daysOfCover);
@@ -275,7 +291,7 @@ export async function getGuardrailsSummary(listingId) {
     listing_id: listingId,
     guardrails,
     current_state: {
-      price_inc_vat: parseFloat(listing.price_inc_vat) || 0,
+      price_inc_vat: safeParseFloat(listing.price_inc_vat, 0),
       available_quantity: listing.available_quantity || 0,
       sales_velocity_30d: Math.round(salesVelocity * 100) / 100,
       days_of_cover: daysOfCover !== null ? Math.round(daysOfCover * 10) / 10 : null,

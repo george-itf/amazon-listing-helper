@@ -49,7 +49,7 @@ export async function testConnection() {
       operation: 'getReports',
       endpoint: 'reports',
       query: {
-        reportTypes: 'GET_MERCHANT_LISTINGS_ALL_DATA',
+        reportTypes: ['GET_MERCHANT_LISTINGS_ALL_DATA'],  // Must be array per SP-API spec
         pageSize: 1,
       },
     });

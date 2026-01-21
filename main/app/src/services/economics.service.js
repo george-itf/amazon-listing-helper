@@ -13,11 +13,22 @@
 import { query } from '../database/connection.js';
 
 /**
+ * Safely parse a numeric value, returning 0 for invalid/NaN inputs
+ * @param {unknown} value
+ * @returns {number}
+ */
+function safeParseFloat(value) {
+  const parsed = parseFloat(value);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+/**
  * Round money to 2 decimal places using HALF_UP
  * @param {number} value
  * @returns {number}
  */
 function roundMoney(value) {
+  if (isNaN(value)) return 0;  // Guard against NaN propagation
   const result = Math.round(value * 100) / 100;
   return result === 0 ? 0 : result;  // Normalize -0 to 0
 }
@@ -62,7 +73,7 @@ async function getBomCostExVat(listingId) {
       AND b.scope_type = 'LISTING'
   `, [listingId]);
 
-  return roundMoney(parseFloat(result.rows[0]?.bom_cost || 0));
+  return roundMoney(safeParseFloat(result.rows[0]?.bom_cost));
 }
 
 /**

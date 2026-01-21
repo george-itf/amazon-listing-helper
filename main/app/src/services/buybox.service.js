@@ -18,6 +18,14 @@ import { query } from '../database/connection.js';
 import { getSellerId } from '../credentials-provider.js';
 
 /**
+ * Safe parseFloat - returns defaultValue on NaN
+ */
+function safeParseFloat(value, defaultValue = null) {
+  const parsed = parseFloat(value);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+/**
  * Buy Box status values
  * @readonly
  * @enum {string}
@@ -67,7 +75,7 @@ export async function getBuyBoxStatusByListing(listingId) {
     listing_id: listingId,
     status: row.buy_box_status || BUY_BOX_STATUS.UNKNOWN,
     owner: row.buy_box_seller,
-    price_inc_vat: row.buy_box_price_inc_vat ? parseFloat(row.buy_box_price_inc_vat) : null,
+    price_inc_vat: safeParseFloat(row.buy_box_price_inc_vat, null),
     is_ours: row.is_our_offer,
     captured_at: row.captured_at,
     source: 'listing_offer_current',
@@ -130,9 +138,7 @@ export async function getBuyBoxStatusByAsin(asinEntityId) {
       'SELECT price_inc_vat FROM listings WHERE id = $1',
       [row.listing_id]
     );
-    ourPrice = listingResult.rows[0]?.price_inc_vat
-      ? parseFloat(listingResult.rows[0].price_inc_vat)
-      : null;
+    ourPrice = safeParseFloat(listingResult.rows[0]?.price_inc_vat, null);
   }
 
   // Determine status using the determineBuyBoxStatus function
@@ -259,9 +265,7 @@ export async function getBuyBoxCompetitiveMetrics(listingId) {
     [listingId]
   );
 
-  const ourPrice = listingResult.rows[0]?.price_inc_vat
-    ? parseFloat(listingResult.rows[0].price_inc_vat)
-    : null;
+  const ourPrice = safeParseFloat(listingResult.rows[0]?.price_inc_vat, null);
 
   const buyBoxPrice = status.price_inc_vat;
   let priceDelta = null;

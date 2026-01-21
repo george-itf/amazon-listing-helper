@@ -17,6 +17,22 @@ import { query, transaction } from '../database/connection.js';
 import * as economicsService from './economics.service.js';
 import { calculateDaysOfCover, calculateStockoutRisk } from './guardrails.service.js';
 
+/**
+ * Safe parseFloat - returns defaultValue on NaN
+ */
+function safeParseFloat(value, defaultValue = 0) {
+  const parsed = parseFloat(value);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+/**
+ * Safe parseInt - returns defaultValue on NaN
+ */
+function safeParseInt(value, defaultValue = 0) {
+  const parsed = parseInt(value, 10);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
 const FEATURE_VERSION = 1;
 
 /**
@@ -49,7 +65,7 @@ export async function computeListingFeatures(listingId) {
     economics = await economicsService.calculateEconomics(listingId);
   } catch (e) {
     economics = {
-      price_inc_vat: parseFloat(listing.price_inc_vat) || 0,
+      price_inc_vat: safeParseFloat(listing.price_inc_vat, 0),
       price_ex_vat: 0,
       bom_cost_ex_vat: 0,
       shipping_cost_ex_vat: 0,
@@ -76,7 +92,7 @@ export async function computeListingFeatures(listingId) {
   `, [listingId]);
 
   const sales = salesResult.rows[0];
-  const salesVelocity = parseFloat(sales.units_30d) / 30;
+  const salesVelocity = safeParseFloat(sales.units_30d, 0) / 30;
   const availableQuantity = listing.available_quantity || 0;
   const daysOfCover = calculateDaysOfCover(availableQuantity, salesVelocity);
 
@@ -153,7 +169,7 @@ export async function computeListingFeatures(listingId) {
   // Build features object per DATA_CONTRACTS.md §9.3
   const features = {
     // Economics
-    vat_rate: parseFloat(listing.vat_rate),
+    vat_rate: safeParseFloat(listing.vat_rate, 0.2),
     price_inc_vat: economics.price_inc_vat,
     price_ex_vat: economics.price_ex_vat,
     bom_cost_ex_vat: economics.bom_cost_ex_vat,
@@ -165,12 +181,12 @@ export async function computeListingFeatures(listingId) {
     break_even_price_inc_vat: economics.break_even_price_inc_vat,
 
     // Sales/Performance
-    units_7d: parseInt(sales.units_7d, 10),
-    units_30d: parseInt(sales.units_30d, 10),
-    revenue_inc_vat_7d: parseFloat(sales.revenue_7d),
-    revenue_inc_vat_30d: parseFloat(sales.revenue_30d),
-    sessions_30d: parseInt(sales.sessions_30d, 10) || null,
-    conversion_rate_30d: parseFloat(sales.avg_conversion_rate_30d) || null,
+    units_7d: safeParseInt(sales.units_7d, 0),
+    units_30d: safeParseInt(sales.units_30d, 0),
+    revenue_inc_vat_7d: safeParseFloat(sales.revenue_7d, 0),
+    revenue_inc_vat_30d: safeParseFloat(sales.revenue_30d, 0),
+    sessions_30d: safeParseInt(sales.sessions_30d, 0) || null,
+    conversion_rate_30d: safeParseFloat(sales.avg_conversion_rate_30d, 0) || null,
     sales_velocity_units_per_day_30d: Math.round(salesVelocity * 100) / 100,
 
     // Inventory
@@ -181,7 +197,7 @@ export async function computeListingFeatures(listingId) {
 
     // Buy Box
     buy_box_status: buyBoxStatus,
-    buy_box_percentage_30d: offer.buy_box_percentage_30d ? parseFloat(offer.buy_box_percentage_30d) : null,
+    buy_box_percentage_30d: safeParseFloat(offer.buy_box_percentage_30d, null),
     buy_box_risk: buyBoxRisk,
     competitor_price_position: competitorPricePosition,
 
@@ -256,7 +272,7 @@ export async function computeAsinFeatures(asinEntityId) {
     GROUP BY b.id
   `, [asinEntityId]);
 
-  const scenarioBomCost = bomResult.rows.length > 0 ? parseFloat(bomResult.rows[0].total_cost) : null;
+  const scenarioBomCost = bomResult.rows.length > 0 ? safeParseFloat(bomResult.rows[0].total_cost, null) : null;
 
   // Build ASIN features
   const features = {
@@ -290,7 +306,8 @@ export async function computeAsinFeatures(asinEntityId) {
   // Calculate opportunity metrics if we have scenario BOM and price data
   if (scenarioBomCost !== null && keepaMetrics?.price_current) {
     const priceIncVat = keepaMetrics.price_current;
-    const priceExVat = priceIncVat / (1 + parseFloat(entity.vat_rate));
+    const vatRate = safeParseFloat(entity.vat_rate, 0.2);
+    const priceExVat = priceIncVat / (1 + vatRate);
     const estimatedFees = priceExVat * 0.15; // Rough estimate
     const estimatedProfit = priceExVat - scenarioBomCost - estimatedFees;
     const estimatedMargin = priceExVat > 0 ? estimatedProfit / priceExVat : 0;
@@ -401,9 +418,9 @@ async function calculateSalesAnomalyScore(currentVelocity, listingId) {
     `, [listingId]);
 
     const stats = result.rows[0];
-    const avgUnits = parseFloat(stats.avg_units) || 0;
-    const stddevUnits = parseFloat(stats.stddev_units) || 0;
-    const daysCount = parseInt(stats.days_count, 10) || 0;
+    const avgUnits = safeParseFloat(stats.avg_units, 0);
+    const stddevUnits = safeParseFloat(stats.stddev_units, 0);
+    const daysCount = safeParseInt(stats.days_count, 0);
 
     // Need at least 14 days of history for meaningful stats
     if (daysCount < 14 || stddevUnits === 0) {

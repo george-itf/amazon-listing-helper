@@ -216,9 +216,10 @@ async function generatePriceDecreaseBuyBoxRec(listingId, features, guardrails) {
   }
 
   // Calculate new margin at suggested price
-  const priceExVat = suggestedPrice / (1 + features.vat_rate);
-  const totalCost = features.bom_cost_ex_vat + features.shipping_cost_ex_vat +
-                    features.packaging_cost_ex_vat + features.amazon_fees_ex_vat;
+  const vatRate = features.vat_rate || 0.2;
+  const priceExVat = suggestedPrice / (1 + vatRate);
+  const totalCost = (features.bom_cost_ex_vat || 0) + (features.shipping_cost_ex_vat || 0) +
+                    (features.packaging_cost_ex_vat || 0) + (features.amazon_fees_ex_vat || 0);
   const newProfit = priceExVat - totalCost;
   const newMargin = priceExVat > 0 ? newProfit / priceExVat : 0;
 
@@ -283,9 +284,10 @@ async function generatePriceIncreaseRec(listingId, features, guardrails) {
     return null; // Less than 1% increase not worth it
   }
 
-  const priceExVat = actualSuggested / (1 + features.vat_rate);
-  const totalCost = features.bom_cost_ex_vat + features.shipping_cost_ex_vat +
-                    features.packaging_cost_ex_vat + features.amazon_fees_ex_vat;
+  const vatRate = features.vat_rate || 0.2;
+  const priceExVat = actualSuggested / (1 + vatRate);
+  const totalCost = (features.bom_cost_ex_vat || 0) + (features.shipping_cost_ex_vat || 0) +
+                    (features.packaging_cost_ex_vat || 0) + (features.amazon_fees_ex_vat || 0);
   const newProfit = priceExVat - totalCost;
   const newMargin = priceExVat > 0 ? newProfit / priceExVat : 0;
 
@@ -702,9 +704,12 @@ export async function getPendingRecommendations(options = {}) {
 
 /**
  * Round money to 2 decimal places
+ * Includes NaN guard to prevent propagation
  */
 function roundMoney(value) {
-  return Math.round(value * 100) / 100;
+  if (typeof value !== 'number' || isNaN(value)) return 0;
+  const result = Math.round(value * 100) / 100;
+  return result === 0 ? 0 : result; // Avoid -0
 }
 
 export default {
