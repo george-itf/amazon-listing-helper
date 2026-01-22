@@ -838,6 +838,15 @@ export async function registerV2Routes(fastify) {
     const listingId = parseInt(request.params.listingId, 10);
     try {
       const bom = await bomRepo.createVersion(listingId, request.body);
+
+      // Auto-recompute features so listings page shows updated profit/margin
+      try {
+        const featureStoreService = await import('../services/feature-store.service.js');
+        await featureStoreService.computeListingFeatures(listingId);
+      } catch (featureError) {
+        console.warn(`[BOM] Failed to recompute features for listing ${listingId}:`, featureError.message);
+      }
+
       return reply.status(201).send(wrapResponse(bom));
     } catch (error) {
       return reply.status(400).send({ success: false, error: error.message });
@@ -877,6 +886,17 @@ export async function registerV2Routes(fastify) {
 
     try {
       const bom = await bomRepo.updateLines(bomId, lines);
+
+      // Auto-recompute features so listings page shows updated profit/margin
+      if (bom.listing_id) {
+        try {
+          const featureStoreService = await import('../services/feature-store.service.js');
+          await featureStoreService.computeListingFeatures(bom.listing_id);
+        } catch (featureError) {
+          console.warn(`[BOM] Failed to recompute features for listing ${bom.listing_id}:`, featureError.message);
+        }
+      }
+
       return wrapResponse(bom);
     } catch (error) {
       return reply.status(400).send({ success: false, error: error.message });

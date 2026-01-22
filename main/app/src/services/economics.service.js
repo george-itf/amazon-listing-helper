@@ -57,18 +57,11 @@ function calculateBreakEvenPriceIncVat(totalCostExVat, vatRate) {
 
 /**
  * Get BOM cost for a listing
- * Uses ASIN-level BOM as source of truth (all listings with same ASIN share BOM)
  * @param {number} listingId
  * @returns {Promise<number>} Total BOM cost ex VAT
  */
 async function getBomCostExVat(listingId) {
   try {
-    // First get the listing's ASIN
-    const listingResult = await query('SELECT asin FROM listings WHERE id = $1', [listingId]);
-    const asin = listingResult.rows[0]?.asin;
-
-    // Query that checks for ASIN-level BOM (any listing with same ASIN)
-    // If no ASIN, falls back to direct listing_id match
     const result = await query(`
       SELECT COALESCE(SUM(
         bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat
@@ -76,18 +69,10 @@ async function getBomCostExVat(listingId) {
       FROM boms b
       JOIN bom_lines bl ON bl.bom_id = b.id
       JOIN components c ON c.id = bl.component_id
-      WHERE b.is_active = true
+      WHERE b.listing_id = $1
+        AND b.is_active = true
         AND b.scope_type = 'LISTING'
-        AND (
-          -- ASIN-level: any listing with this ASIN
-          (b.listing_id IN (SELECT id FROM listings WHERE asin = $2 AND $2 IS NOT NULL))
-          OR
-          -- Listing-level fallback: direct match if no ASIN
-          (b.listing_id = $1 AND $2 IS NULL)
-        )
-      ORDER BY b.created_at DESC
-      LIMIT 1
-    `, [listingId, asin]);
+    `, [listingId]);
 
     return roundMoney(safeParseFloat(result.rows[0]?.bom_cost));
   } catch (error) {
@@ -193,27 +178,14 @@ async function getVatRate(marketplaceId) {
 
 /**
  * Get active BOM version for a listing
- * Uses ASIN-level BOM as source of truth
  * @param {number} listingId
  * @returns {Promise<number|null>}
  */
 async function getActiveBomVersion(listingId) {
-  // Get listing's ASIN for ASIN-level BOM lookup
-  const listingResult = await query('SELECT asin FROM listings WHERE id = $1', [listingId]);
-  const asin = listingResult.rows[0]?.asin;
-
   const result = await query(`
-    SELECT b.version FROM boms b
-    JOIN listings l ON l.id = b.listing_id
-    WHERE b.is_active = true AND b.scope_type = 'LISTING'
-      AND (
-        (l.asin = $2 AND $2 IS NOT NULL)
-        OR
-        (b.listing_id = $1 AND $2 IS NULL)
-      )
-    ORDER BY b.created_at DESC
-    LIMIT 1
-  `, [listingId, asin]);
+    SELECT version FROM boms
+    WHERE listing_id = $1 AND is_active = true AND scope_type = 'LISTING'
+  `, [listingId]);
 
   return result.rows[0]?.version || null;
 }

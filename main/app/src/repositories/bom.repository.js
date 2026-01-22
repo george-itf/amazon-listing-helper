@@ -4,14 +4,10 @@
  * CRUD operations for boms and bom_lines tables.
  * Implements BOM invariants per DEPRECATION_PLAN.md §12 and DATA_CONTRACTS.md §7.
  *
- * IMPORTANT: BOMs are now ASIN-centric (single source of truth per ASIN).
- * When a listing has an ASIN, its BOM is stored at the ASIN level.
- * All listings sharing the same ASIN use the same BOM.
- *
  * Invariants:
  * 1. BOMs are versioned - each BOM has a version integer starting at 1
  * 2. Versions are immutable - once created, a BOM version's lines cannot be modified
- * 3. One active BOM per ASIN (or per listing if no ASIN) - enforced by partial unique index
+ * 3. One active BOM per listing - enforced by partial unique index
  * 4. Atomic line updates - PUT replaces ALL lines
  *
  * @module BomRepository
@@ -20,78 +16,12 @@
 import { query, transaction } from '../database/connection.js';
 
 /**
- * Get active BOM by ASIN (source of truth)
- * Finds the BOM through any listing that shares this ASIN
- * @param {string} asin
- * @returns {Promise<Object|null>}
- */
-export async function getActiveBomByAsin(asin) {
-  if (!asin) return null;
-
-  try {
-    // Find active BOM for ANY listing with this ASIN
-    // This makes the BOM effectively ASIN-level (all listings with same ASIN share BOM)
-    const result = await query(`
-      SELECT b.*,
-        l.asin,
-        COALESCE(json_agg(
-          json_build_object(
-            'id', bl.id,
-            'component_id', bl.component_id,
-            'component_sku', c.component_sku,
-            'component_name', c.name,
-            'quantity', bl.quantity,
-            'wastage_rate', bl.wastage_rate,
-            'unit_cost_ex_vat', c.unit_cost_ex_vat,
-            'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat,
-            'notes', bl.notes
-          ) ORDER BY c.name
-        ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines,
-        COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost_ex_vat
-      FROM boms b
-      INNER JOIN listings l ON l.id = b.listing_id
-      LEFT JOIN bom_lines bl ON bl.bom_id = b.id
-      LEFT JOIN components c ON c.id = bl.component_id
-      WHERE l.asin = $1
-        AND b.is_active = true
-        AND b.scope_type = 'LISTING'
-      GROUP BY b.id, l.asin
-      ORDER BY b.created_at DESC
-      LIMIT 1
-    `, [asin]);
-
-    return result.rows[0] || null;
-  } catch (error) {
-    if (error.message?.includes('does not exist')) {
-      console.warn('[BOM] boms/bom_lines/components table does not exist');
-      return null;
-    }
-    throw error;
-  }
-}
-
-/**
  * Get active BOM for a listing
- * First checks for ASIN-level BOM (source of truth), then falls back to listing-level
  * @param {number} listingId
  * @returns {Promise<Object|null>}
  */
 export async function getActiveBom(listingId) {
   try {
-    // First, get the listing's ASIN
-    const listingResult = await query('SELECT asin FROM listings WHERE id = $1', [listingId]);
-    const asin = listingResult.rows[0]?.asin;
-
-    // Try ASIN-level BOM first (source of truth)
-    if (asin) {
-      const asinBom = await getActiveBomByAsin(asin);
-      if (asinBom) {
-        // Add listing_id reference for context
-        return { ...asinBom, listing_id: listingId, source: 'asin' };
-      }
-    }
-
-    // Fall back to listing-level BOM (legacy or no ASIN)
     const result = await query(`
       SELECT b.*,
         COALESCE(json_agg(
@@ -117,8 +47,7 @@ export async function getActiveBom(listingId) {
       GROUP BY b.id
     `, [listingId]);
 
-    const bom = result.rows[0] || null;
-    return bom ? { ...bom, source: 'listing' } : null;
+    return result.rows[0] || null;
   } catch (error) {
     // Handle missing table gracefully
     if (error.message?.includes('does not exist')) {
