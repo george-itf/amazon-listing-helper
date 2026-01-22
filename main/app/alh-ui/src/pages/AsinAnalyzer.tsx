@@ -143,114 +143,275 @@ export function AsinAnalyzerPage() {
 
       {/* Analysis Results */}
       {analysis && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          {/* Market Data */}
-          <div className="card">
-            <h3 className="font-semibold mb-4">Market Reality (Keepa)</h3>
-            <div className="space-y-3">
-              <div className="flex justify-between">
-                <span className="text-gray-600">ASIN</span>
-                <span className="font-mono">{analysis.asin}</span>
-              </div>
-              {analysis.market_data?.keepa_price_median_90d != null && (
-                <>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Price Median (90d)</span>
-                    <span>£{analysis.market_data.keepa_price_median_90d.toFixed(2)}</span>
+        <div className="space-y-6 mb-6">
+          {/* Product Info Header */}
+          {analysis.market_data && (
+            <div className="card">
+              <div className="flex gap-4">
+                {analysis.market_data.main_image_url && (
+                  <img
+                    src={analysis.market_data.main_image_url}
+                    alt={analysis.market_data.title || analysis.asin}
+                    className="w-24 h-24 object-contain rounded border"
+                  />
+                )}
+                <div className="flex-1">
+                  <h3 className="font-semibold text-lg">
+                    {analysis.market_data.title || analysis.asin}
+                  </h3>
+                  <div className="flex flex-wrap gap-4 text-sm text-gray-600 mt-1">
+                    {analysis.market_data.brand && (
+                      <span>Brand: <strong>{analysis.market_data.brand}</strong></span>
+                    )}
+                    {analysis.market_data.category && (
+                      <span>Category: <strong>{analysis.market_data.category}</strong></span>
+                    )}
                   </div>
+                  <div className="flex flex-wrap gap-4 text-sm mt-2">
+                    <span className="font-mono bg-gray-100 px-2 py-0.5 rounded">{analysis.asin}</span>
+                    {analysis.market_data.rating != null && (
+                      <span className="flex items-center gap-1">
+                        <span className="text-yellow-500">★</span>
+                        {analysis.market_data.rating.toFixed(1)}
+                        {analysis.market_data.rating_count != null && (
+                          <span className="text-gray-500">({analysis.market_data.rating_count.toLocaleString()} reviews)</span>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {/* Current Prices */}
+            <div className="card">
+              <h3 className="font-semibold mb-4">Current Prices</h3>
+              <div className="space-y-3">
+                {analysis.market_data?.buy_box_price != null && (
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Price Range</span>
-                    <span>
-                      £{analysis.market_data?.keepa_price_p25_90d?.toFixed(2) ?? '-'} - £
-                      {analysis.market_data?.keepa_price_p75_90d?.toFixed(2) ?? '-'}
+                    <span className="text-gray-600">Buy Box Price</span>
+                    <span className="font-semibold text-lg">£{analysis.market_data.buy_box_price.toFixed(2)}</span>
+                  </div>
+                )}
+                {analysis.market_data?.price_current != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">New Price</span>
+                    <span>£{analysis.market_data.price_current.toFixed(2)}</span>
+                  </div>
+                )}
+                {analysis.market_data?.price_amazon != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Amazon Price</span>
+                    <span>£{analysis.market_data.price_amazon.toFixed(2)}</span>
+                  </div>
+                )}
+                {analysis.market_data?.buy_box_is_amazon != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Buy Box Owner</span>
+                    <span className={analysis.market_data.buy_box_is_amazon ? 'text-orange-600' : 'text-blue-600'}>
+                      {analysis.market_data.buy_box_is_amazon ? 'Amazon' : '3rd Party'}
                     </span>
                   </div>
-                </>
-              )}
-              {analysis.market_data?.keepa_offers_count_current != null && (
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Current Offers</span>
-                  <span>{analysis.market_data.keepa_offers_count_current}</span>
+                )}
+                {analysis.market_data?.last_price_change && (
+                  <div className="text-xs text-gray-400 pt-2 border-t">
+                    Last change: {new Date(analysis.market_data.last_price_change).toLocaleDateString()}
+                  </div>
+                )}
+                {!analysis.market_data?.buy_box_price && !analysis.market_data?.price_current && (
+                  <p className="text-gray-500 text-sm">No price data available yet</p>
+                )}
+              </div>
+            </div>
+
+            {/* Price History (90d) */}
+            <div className="card">
+              <h3 className="font-semibold mb-4">Price History (90 days)</h3>
+              <div className="space-y-3">
+                {analysis.market_data?.keepa_price_median_90d != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Median</span>
+                    <span className="font-semibold">£{analysis.market_data.keepa_price_median_90d.toFixed(2)}</span>
+                  </div>
+                )}
+                {(analysis.market_data?.keepa_price_min_90d != null || analysis.market_data?.keepa_price_max_90d != null) && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Min / Max</span>
+                    <span>
+                      £{analysis.market_data?.keepa_price_min_90d?.toFixed(2) ?? '-'} / £{analysis.market_data?.keepa_price_max_90d?.toFixed(2) ?? '-'}
+                    </span>
+                  </div>
+                )}
+                {(analysis.market_data?.keepa_price_p25_90d != null || analysis.market_data?.keepa_price_p75_90d != null) && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">25th-75th %ile</span>
+                    <span>
+                      £{analysis.market_data?.keepa_price_p25_90d?.toFixed(2) ?? '-'} - £{analysis.market_data?.keepa_price_p75_90d?.toFixed(2) ?? '-'}
+                    </span>
+                  </div>
+                )}
+                {analysis.market_data?.keepa_volatility_90d != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Volatility</span>
+                    <span className={
+                      analysis.market_data.keepa_volatility_90d > 0.15 ? 'text-red-600' :
+                      analysis.market_data.keepa_volatility_90d > 0.08 ? 'text-yellow-600' :
+                      'text-green-600'
+                    }>
+                      {(analysis.market_data.keepa_volatility_90d * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+                {!analysis.market_data?.keepa_price_median_90d && (
+                  <p className="text-gray-500 text-sm">No price history available yet</p>
+                )}
+              </div>
+            </div>
+
+            {/* Sales Rank */}
+            <div className="card">
+              <h3 className="font-semibold mb-4">Sales Rank</h3>
+              <div className="space-y-3">
+                {analysis.market_data?.sales_rank_current != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Current Rank</span>
+                    <span className="font-semibold">#{analysis.market_data.sales_rank_current.toLocaleString()}</span>
+                  </div>
+                )}
+                {analysis.market_data?.sales_rank_avg_90d != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Avg Rank (90d)</span>
+                    <span>#{Math.round(analysis.market_data.sales_rank_avg_90d).toLocaleString()}</span>
+                  </div>
+                )}
+                {analysis.market_data?.keepa_rank_trend_90d != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Rank Trend</span>
+                    <span className={
+                      analysis.market_data.keepa_rank_trend_90d < 0 ? 'text-green-600' :
+                      analysis.market_data.keepa_rank_trend_90d > 0 ? 'text-red-600' :
+                      ''
+                    }>
+                      {analysis.market_data.keepa_rank_trend_90d > 0 ? '+' : ''}
+                      {(analysis.market_data.keepa_rank_trend_90d * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+                {analysis.market_data?.out_of_stock_percentage_90d != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Out of Stock %</span>
+                    <span className={analysis.market_data.out_of_stock_percentage_90d > 10 ? 'text-yellow-600' : ''}>
+                      {analysis.market_data.out_of_stock_percentage_90d.toFixed(0)}%
+                    </span>
+                  </div>
+                )}
+                {!analysis.market_data?.sales_rank_current && (
+                  <p className="text-gray-500 text-sm">No sales rank data available yet</p>
+                )}
+              </div>
+            </div>
+
+            {/* Competition */}
+            <div className="card">
+              <h3 className="font-semibold mb-4">Competition</h3>
+              <div className="space-y-3">
+                {analysis.market_data?.keepa_offers_count_current != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Total Offers</span>
+                    <span className="font-semibold">{analysis.market_data.keepa_offers_count_current}</span>
+                  </div>
+                )}
+                {analysis.market_data?.offers_fba_count != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">FBA Offers</span>
+                    <span>{analysis.market_data.offers_fba_count}</span>
+                  </div>
+                )}
+                {analysis.market_data?.offers_fbm_count != null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">FBM Offers</span>
+                    <span>{analysis.market_data.offers_fbm_count}</span>
+                  </div>
+                )}
+                {!analysis.market_data?.keepa_offers_count_current && (
+                  <p className="text-gray-500 text-sm">No offer data available yet</p>
+                )}
+              </div>
+            </div>
+
+            {/* Economics Scenario */}
+            <div className="card">
+              <h3 className="font-semibold mb-4">Your Economics (Scenario)</h3>
+              {analysis.economics_scenario ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Suggested Price</span>
+                    <span className="font-semibold">
+                      £{analysis.economics_scenario.suggested_price_inc_vat.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">BOM Cost</span>
+                    <span>£{analysis.economics_scenario.bom_cost_ex_vat.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Est. Fees</span>
+                    <span>£{analysis.economics_scenario.estimated_fees_ex_vat.toFixed(2)}</span>
+                  </div>
+                  <div className="border-t pt-3">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Est. Profit</span>
+                      <span className={
+                        analysis.economics_scenario.estimated_profit_ex_vat < 0
+                          ? 'text-red-600 font-semibold'
+                          : 'text-green-600 font-semibold'
+                      }>
+                        £{analysis.economics_scenario.estimated_profit_ex_vat.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Est. Margin</span>
+                      <span className="font-semibold">
+                        {(analysis.economics_scenario.estimated_margin * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
                 </div>
+              ) : (
+                <p className="text-gray-500 text-sm">Create a scenario BOM to see profit estimates</p>
               )}
-              {analysis.market_data?.keepa_volatility_90d != null && (
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Price Volatility</span>
-                  <span>{(analysis.market_data.keepa_volatility_90d * 100).toFixed(1)}%</span>
+            </div>
+
+            {/* Opportunity Assessment */}
+            <div className="card">
+              <h3 className="font-semibold mb-4">Opportunity Assessment</h3>
+              {analysis.opportunity_score != null ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-600">Score</span>
+                    <span className={`text-2xl font-bold ${
+                      analysis.opportunity_score >= 0.7 ? 'text-green-600' :
+                      analysis.opportunity_score >= 0.4 ? 'text-yellow-600' :
+                      'text-red-600'
+                    }`}>
+                      {(analysis.opportunity_score * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  {analysis.recommendation && (
+                    <p className="text-sm text-gray-700">{analysis.recommendation}</p>
+                  )}
                 </div>
+              ) : (
+                <p className="text-gray-500 text-sm">Score will be calculated after Keepa data sync</p>
               )}
-              <p className="text-xs text-gray-400 mt-2">
-                Analyzed at: {new Date(analysis.analyzed_at).toLocaleString()}
-              </p>
             </div>
           </div>
 
-          {/* Economics Scenario */}
+          {/* Actions */}
           <div className="card">
-            <h3 className="font-semibold mb-4">Your Economics (Scenario)</h3>
-            {analysis.economics_scenario ? (
-              <div className="space-y-3">
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Suggested Price (inc VAT)</span>
-                  <span className="font-semibold">
-                    £{analysis.economics_scenario.suggested_price_inc_vat.toFixed(2)}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">BOM Cost (ex VAT)</span>
-                  <span>£{analysis.economics_scenario.bom_cost_ex_vat.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Est. Fees (ex VAT)</span>
-                  <span>£{analysis.economics_scenario.estimated_fees_ex_vat.toFixed(2)}</span>
-                </div>
-                <div className="border-t pt-3">
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Est. Profit (ex VAT)</span>
-                    <span className={
-                      analysis.economics_scenario.estimated_profit_ex_vat < 0
-                        ? 'text-red-600 font-semibold'
-                        : 'text-green-600 font-semibold'
-                    }>
-                      £{analysis.economics_scenario.estimated_profit_ex_vat.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Est. Margin</span>
-                    <span className="font-semibold">
-                      {(analysis.economics_scenario.estimated_margin * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <p className="text-gray-500">No BOM scenario available. Create a scenario BOM first.</p>
-            )}
-          </div>
-
-          {/* Recommendation */}
-          <div className="card lg:col-span-2">
-            <h3 className="font-semibold mb-4">Opportunity Assessment</h3>
-            {analysis.opportunity_score != null && (
-              <div className="mb-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-600">Opportunity Score:</span>
-                  <span className={`text-xl font-bold ${
-                    analysis.opportunity_score >= 0.7 ? 'text-green-600' :
-                    analysis.opportunity_score >= 0.4 ? 'text-yellow-600' :
-                    'text-red-600'
-                  }`}>
-                    {(analysis.opportunity_score * 100).toFixed(0)}%
-                  </span>
-                </div>
-              </div>
-            )}
-            {analysis.recommendation && (
-              <p className="text-gray-700">{analysis.recommendation}</p>
-            )}
-
-            {/* Actions */}
-            <div className="flex gap-3 mt-6">
+            <div className="flex flex-wrap gap-3">
               <button onClick={handleTrack} className="btn btn-secondary">
                 Track ASIN
               </button>
@@ -260,7 +421,29 @@ export function AsinAnalyzerPage() {
               >
                 Convert to Listing
               </button>
+              <a
+                href={`https://www.amazon.co.uk/dp/${analysis.asin}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-secondary"
+              >
+                View on Amazon ↗
+              </a>
+              <a
+                href={`https://keepa.com/#!product/2-${analysis.asin}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-secondary"
+              >
+                View on Keepa ↗
+              </a>
             </div>
+            <p className="text-xs text-gray-400 mt-3">
+              Analyzed at: {new Date(analysis.analyzed_at).toLocaleString()}
+              {analysis.market_data?.last_update && (
+                <> • Keepa data: {new Date(analysis.market_data.last_update).toLocaleString()}</>
+              )}
+            </p>
           </div>
 
           {/* Convert Form */}

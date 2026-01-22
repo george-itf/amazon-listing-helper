@@ -1644,18 +1644,54 @@ export async function registerV2Routes(fastify) {
       const features = await featureStoreService.getLatestFeatures('ASIN', asinEntity.id);
       const featuresJson = features?.features_json || {};
 
-      // Return AsinAnalysis-compatible response
+      // Return AsinAnalysis-compatible response with full Keepa data
       return reply.status(201).send(wrapResponse({
         asin_entity_id: asinEntity.id,
         asin: sanitizedAsin,
         sync_job_id: jobResult.rows[0].id,
         market_data: {
+          // Product info
+          title: keepaMetrics.title || asinEntity.title || null,
+          brand: keepaMetrics.brand || asinEntity.brand || null,
+          category: keepaMetrics.category || asinEntity.category || null,
+          main_image_url: keepaMetrics.mainImageUrl || null,
+
+          // Current prices
+          price_current: keepaMetrics.price_current || null,
+          price_amazon: keepaMetrics.price_amazon || null,
+          buy_box_price: keepaMetrics.buy_box_price || null,
+
+          // Price statistics (90 day)
           keepa_price_median_90d: keepaMetrics.price_median_90d || null,
           keepa_price_p25_90d: keepaMetrics.price_p25_90d || null,
           keepa_price_p75_90d: keepaMetrics.price_p75_90d || null,
-          keepa_volatility_90d: keepaMetrics.volatility_90d || null,
+          keepa_price_min_90d: keepaMetrics.price_min_90d || null,
+          keepa_price_max_90d: keepaMetrics.price_max_90d || null,
+          keepa_volatility_90d: keepaMetrics.price_volatility_90d || null,
+
+          // Sales rank
+          sales_rank_current: keepaMetrics.sales_rank_current || null,
+          sales_rank_avg_90d: keepaMetrics.sales_rank_avg_90d || null,
+          keepa_rank_trend_90d: keepaMetrics.sales_rank_trend_90d || null,
+
+          // Offers/Competition
           keepa_offers_count_current: keepaMetrics.offers_count_current || null,
-          keepa_rank_trend_90d: keepaMetrics.rank_trend_90d || null,
+          offers_fba_count: keepaMetrics.offers_fba_count || null,
+          offers_fbm_count: keepaMetrics.offers_fbm_count || null,
+
+          // Buy Box info
+          buy_box_is_amazon: keepaMetrics.buy_box_is_amazon || null,
+
+          // Rating
+          rating: keepaMetrics.rating || null,
+          rating_count: keepaMetrics.rating_count || null,
+
+          // Stock/Availability
+          out_of_stock_percentage_90d: keepaMetrics.out_of_stock_percentage_90d || null,
+
+          // Timestamps
+          last_update: keepaMetrics.last_update || null,
+          last_price_change: keepaMetrics.last_price_change || null,
         },
         economics_scenario: featuresJson.has_scenario_bom ? {
           suggested_price_inc_vat: keepaMetrics.price_current || 0,
