@@ -53,32 +53,66 @@ import {
 } from '../services/audit.service.js';
 import { recordJobEvent, updateJobQueueLength } from '../lib/metrics.js';
 import { captureException } from '../lib/sentry.js';
+// A.3.1: Per-job timeout support
+import { withTimeout, getJobTimeout } from '../lib/job-timeout.js';
+// C.1: Circuit breaker for external APIs
+import { getCircuitBreaker } from '../lib/circuit-breaker.js';
+
+// C.2: Track schema health issues detected during queries
+const schemaIssues = new Set();
 
 /**
- * Safe database query wrapper - returns null on table not exist errors
+ * Safe database query wrapper - handles table not exist errors with better logging
+ * C.2 FIX: Now logs warnings with table name and tracks schema issues
+ *
  * @param {string} text - SQL query
  * @param {Array} params - Query parameters
  * @param {string} operation - Operation name for logging
- * @returns {Promise<pg.QueryResult|null>}
+ * @returns {Promise<{rows: Array, schemaError?: string}|null>}
  */
 async function safeQuery(text, params = [], operation = 'query') {
   try {
     return await query(text, params);
   } catch (error) {
     if (error.message?.includes('does not exist')) {
-      workerLogger.warn({ operation }, `Skipping ${operation}: table does not exist`);
-      return null;
+      // C.2 FIX: Extract table name and log meaningful warning
+      const tableMatch = error.message.match(/relation "([^"]+)" does not exist/);
+      const tableName = tableMatch ? tableMatch[1] : 'unknown';
+
+      workerLogger.warn({
+        operation,
+        table: tableName,
+        hint: 'Run migrations to create missing tables',
+      }, `Schema issue in ${operation}: table "${tableName}" does not exist`);
+
+      // Track the schema issue for health reporting
+      schemaIssues.add(tableName);
+
+      // Return a result object that indicates the schema error
+      return { rows: [], schemaError: `Table ${tableName} does not exist` };
     }
     throw error;
   }
 }
 
+/**
+ * Get current schema issues (for health endpoint)
+ * @returns {string[]}
+ */
+export function getSchemaIssues() {
+  return Array.from(schemaIssues);
+}
+
 // Worker configuration
 const WORKER_POLL_INTERVAL_MS = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '5000', 10);
 const WORKER_BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE || '5', 10);
+const WORKER_SHUTDOWN_TIMEOUT_MS = parseInt(process.env.WORKER_SHUTDOWN_TIMEOUT_MS || '30000', 10);
 
 let isRunning = false;
 let workerInterval = null;
+// A.3.5: Track current job for graceful shutdown
+let currentJobPromise = null;
+let currentJobId = null;
 
 /**
  * Process a single job based on its type
@@ -1155,7 +1189,45 @@ async function processGenerateRecommendationsAsin(job) {
 }
 
 /**
+ * Insert job into Dead Letter Queue
+ * A.3.2 FIX: Records failed jobs for later inspection
+ * @param {Object} job - The failed job
+ * @param {string} errorMessage - Error message
+ * @param {string} errorStack - Error stack trace
+ */
+async function insertIntoDLQ(job, errorMessage, errorStack) {
+  try {
+    await query(`
+      INSERT INTO job_dead_letters (
+        job_id, job_type, scope_type, listing_id, asin_entity_id,
+        payload, attempts, last_error, error_stack
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `, [
+      job.id,
+      job.job_type,
+      job.scope_type || 'LISTING',
+      job.listing_id || null,
+      job.asin_entity_id || null,
+      JSON.stringify(job.input_json || {}),
+      job.attempts || 0,
+      errorMessage,
+      errorStack || null,
+    ]);
+    workerLogger.info({ jobId: job.id, jobType: job.job_type }, 'Job added to Dead Letter Queue');
+  } catch (dlqError) {
+    // DLQ table might not exist yet
+    if (!dlqError.message?.includes('does not exist')) {
+      workerLogger.error({ jobId: job.id, err: dlqError }, 'Failed to insert job into DLQ');
+    }
+  }
+}
+
+/**
  * Main worker loop - process pending jobs
+ *
+ * A.3.1 FIX: Now wraps job processing with timeout
+ * A.3.2 FIX: Inserts into DLQ when max attempts exceeded
+ * A.3.5 FIX: Tracks current job for graceful shutdown
  */
 async function processJobs() {
   if (!isRunning) return;
@@ -1175,8 +1247,22 @@ async function processJobs() {
           continue;
         }
 
-        // Process the job
-        const result = await processJob(claimedJob);
+        // A.3.5: Track current job for graceful shutdown
+        currentJobId = claimedJob.id;
+
+        // A.3.1 FIX: Process the job with timeout
+        const timeoutMs = getJobTimeout(claimedJob.job_type);
+        currentJobPromise = withTimeout(
+          processJob(claimedJob),
+          timeoutMs,
+          `${claimedJob.job_type}:${claimedJob.id}`
+        );
+
+        const result = await currentJobPromise;
+
+        // Clear tracking
+        currentJobPromise = null;
+        currentJobId = null;
 
         // Mark as succeeded
         await jobRepo.markSucceeded(job.id, result);
@@ -1186,16 +1272,30 @@ async function processJobs() {
         workerLogger.info({ jobId: job.id, jobType: job.job_type, durationMs }, 'Job succeeded');
 
       } catch (error) {
-        logJobEvent({ jobId: job.id, jobType: job.job_type, status: 'failed', error: error.message });
-        recordJobEvent({ type: job.job_type, status: 'failed', isRetry: job.attempt > 1 });
-        captureException(error, { jobId: job.id, jobType: job.job_type });
-        workerLogger.error({ jobId: job.id, err: error }, 'Job failed');
+        // Clear tracking
+        currentJobPromise = null;
+        currentJobId = null;
+
+        // Check if this is a timeout error
+        const isTimeout = error.code === 'JOB_TIMEOUT';
+        const errorCode = isTimeout ? 'JOB_TIMEOUT' : (error.code || 'JOB_ERROR');
+
+        logJobEvent({ jobId: job.id, jobType: job.job_type, status: 'failed', error: error.message, code: errorCode });
+        recordJobEvent({ type: job.job_type, status: 'failed', isRetry: job.attempts > 1, isTimeout });
+        captureException(error, { jobId: job.id, jobType: job.job_type, errorCode });
+        workerLogger.error({ jobId: job.id, err: error, code: errorCode }, 'Job failed');
 
         // Mark as failed (will retry if attempts < max_attempts)
-        await jobRepo.markFailed(job.id, error.message, {
+        const updatedJob = await jobRepo.markFailed(job.id, error.message, {
           error: error.message,
+          code: errorCode,
           stack: error.stack,
         });
+
+        // A.3.2 FIX: Insert into DLQ if max attempts exceeded
+        if (updatedJob && updatedJob.status === 'FAILED') {
+          await insertIntoDLQ(updatedJob, error.message, error.stack);
+        }
       }
     }
 
@@ -1223,20 +1323,53 @@ export function startWorker() {
 
 /**
  * Stop the job worker
+ *
+ * A.3.5 FIX: Graceful shutdown - waits for in-progress job to complete
+ *
+ * @param {boolean} graceful - If true, wait for current job to complete
+ * @returns {Promise<void>}
  */
-export function stopWorker() {
+export async function stopWorker(graceful = true) {
   if (!isRunning) {
     workerLogger.info('[Worker] Not running');
     return;
   }
 
-  workerLogger.info('[Worker] Stopping');
+  workerLogger.info('[Worker] Stopping...');
   isRunning = false;
 
+  // Stop polling for new jobs
   if (workerInterval) {
     clearInterval(workerInterval);
     workerInterval = null;
   }
+
+  // A.3.5 FIX: Wait for in-progress job if graceful shutdown requested
+  if (graceful && currentJobPromise) {
+    workerLogger.info({ jobId: currentJobId }, '[Worker] Waiting for in-progress job to complete...');
+
+    try {
+      // Wait for current job with a deadline
+      await Promise.race([
+        currentJobPromise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Shutdown timeout')), WORKER_SHUTDOWN_TIMEOUT_MS)
+        ),
+      ]);
+      workerLogger.info('[Worker] In-progress job completed');
+    } catch (error) {
+      if (error.message === 'Shutdown timeout') {
+        workerLogger.warn({ jobId: currentJobId }, '[Worker] Shutdown timeout - job may still be running');
+      } else {
+        // Job failed during shutdown - that's ok, it will be retried
+        workerLogger.warn({ jobId: currentJobId, err: error }, '[Worker] Job failed during shutdown');
+      }
+    }
+  }
+
+  currentJobPromise = null;
+  currentJobId = null;
+  workerLogger.info('[Worker] Stopped');
 }
 
 /**

@@ -16,10 +16,24 @@ export interface ApiResponse<T> {
   message?: string;
 }
 
+/**
+ * D.4 FIX: Properly typed API error structure
+ */
+export interface ApiErrorDetails {
+  error?: string;
+  message?: string;
+  code?: string;
+  field?: string;
+  violations?: Array<{
+    rule: string;
+    message: string;
+  }>;
+}
+
 export interface ApiError {
   message: string;
   status: number;
-  details?: unknown;
+  details?: ApiErrorDetails;
 }
 
 // Create axios instance with defaults

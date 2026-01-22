@@ -33,18 +33,35 @@ import { getSafeErrorMessage } from './lib/error-handler.js';
 initSentry();
 
 // ============================================================================
-// SECURITY: API Key Authentication
+// SECURITY: API Key Authentication (A.1.2 fix)
 // ============================================================================
+
+// A.1.2: In production, API_KEY MUST be set - fail fast at startup
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const API_KEY = process.env.API_KEY;
+
+if (NODE_ENV === 'production' && !API_KEY) {
+  logger.error('FATAL: API_KEY environment variable is required in production mode');
+  logger.error('Set API_KEY to a secure random value to enable authentication');
+  process.exit(1);
+}
+
+// Log warning once at startup if API_KEY is missing in non-production
+if (!API_KEY && NODE_ENV !== 'production') {
+  logger.warn('WARNING: API_KEY not configured - authentication is disabled');
+  logger.warn('This is acceptable for development but NOT for production');
+}
 
 /**
  * Validate API key from request headers
  * Set API_KEY environment variable to enable authentication
- * If API_KEY is not set, authentication is disabled (for development)
+ *
+ * SECURITY: In production, API_KEY must be set (enforced at startup)
  */
 function validateApiKey(request) {
   const configuredApiKey = process.env.API_KEY;
 
-  // If no API key is configured, skip authentication (dev mode)
+  // If no API key is configured, skip authentication (dev mode only - checked at startup)
   if (!configuredApiKey) {
     return true;
   }
@@ -159,14 +176,23 @@ await fastify.register(cors, {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key'],
 });
 
-// 3. Rate Limiting
+// 3. Rate Limiting (A.1.4 fix: only trust proxy headers when explicitly configured)
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 await fastify.register(rateLimit, {
   max: parseInt(process.env.RATE_LIMIT_MAX || '100', 10), // Max requests per window
   timeWindow: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10), // 1 minute default
   skipOnError: false, // Don't skip rate limiting on errors
   keyGenerator: (request) => {
-    // Use X-Forwarded-For if behind proxy, otherwise use IP
-    return request.headers['x-forwarded-for']?.split(',')[0]?.trim() || request.ip;
+    // A.1.4: Only use X-Forwarded-For if TRUST_PROXY is explicitly enabled
+    // This prevents rate limit bypass via forged proxy headers
+    if (TRUST_PROXY) {
+      const forwarded = request.headers['x-forwarded-for'];
+      if (forwarded) {
+        return forwarded.split(',')[0].trim();
+      }
+    }
+    // Use direct connection IP (Fastify's request.ip respects trustProxy setting)
+    return request.ip;
   },
   errorResponseBuilder: (request, context) => ({
     success: false,

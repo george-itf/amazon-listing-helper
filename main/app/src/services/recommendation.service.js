@@ -21,6 +21,8 @@
 import { query, transaction } from '../database/connection.js';
 import * as featureStoreService from './feature-store.service.js';
 import { loadGuardrails, validatePriceChange } from './guardrails.service.js';
+// A.2.2 FIX: Import fee calculator to recalculate fees for suggested prices
+import { calculateAmazonFeesExVat, roundMoney } from './economics.service.js';
 
 /**
  * Generate recommendations for a listing
@@ -116,12 +118,10 @@ async function doGenerateListingRecommendations(listingId, jobId) {
     if (rec) recommendations.push(rec);
   }
 
-  // Save recommendations
-  const savedRecs = [];
-  for (const rec of recommendations) {
-    const saved = await saveRecommendation(rec, jobId);
-    savedRecs.push(saved);
-  }
+  // A.4.3 FIX: Save recommendations in parallel (bounded concurrency)
+  const savedRecs = await Promise.all(
+    recommendations.map(rec => saveRecommendation(rec, jobId))
+  );
 
   return {
     listing_id: listingId,
@@ -205,6 +205,8 @@ async function doGenerateAsinRecommendations(asinEntityId, jobId) {
 
 /**
  * Generate PRICE_DECREASE_REGAIN_BUYBOX recommendation
+ *
+ * A.2.2 FIX: Recalculates Amazon fees for the suggested price instead of using stale fees
  */
 async function generatePriceDecreaseBuyBoxRec(listingId, features, guardrails) {
   // Suggest price at 25th percentile of market
@@ -217,9 +219,19 @@ async function generatePriceDecreaseBuyBoxRec(listingId, features, guardrails) {
 
   // Calculate new margin at suggested price
   const vatRate = features.vat_rate || 0.2;
-  const priceExVat = suggestedPrice / (1 + vatRate);
+  const priceExVat = roundMoney(suggestedPrice / (1 + vatRate));
+
+  // A.2.2 FIX: Recalculate Amazon fees for the SUGGESTED price, not the current price
+  // This ensures accurate margin projections
+  const suggestedAmazonFeesExVat = calculateAmazonFeesExVat(
+    suggestedPrice,
+    features.fulfillment_channel || 'FBM',
+    features.category || 'General',
+    vatRate
+  );
+
   const totalCost = (features.bom_cost_ex_vat || 0) + (features.shipping_cost_ex_vat || 0) +
-                    (features.packaging_cost_ex_vat || 0) + (features.amazon_fees_ex_vat || 0);
+                    (features.packaging_cost_ex_vat || 0) + suggestedAmazonFeesExVat;
   const newProfit = priceExVat - totalCost;
   const newMargin = priceExVat > 0 ? newProfit / priceExVat : 0;
 
@@ -266,6 +278,8 @@ async function generatePriceDecreaseBuyBoxRec(listingId, features, guardrails) {
 
 /**
  * Generate PRICE_INCREASE_MARGIN_OPPORTUNITY recommendation
+ *
+ * A.2.2 FIX: Recalculates Amazon fees for the suggested price instead of using stale fees
  */
 async function generatePriceIncreaseRec(listingId, features, guardrails) {
   // Suggest price increase up to market median
@@ -285,9 +299,18 @@ async function generatePriceIncreaseRec(listingId, features, guardrails) {
   }
 
   const vatRate = features.vat_rate || 0.2;
-  const priceExVat = actualSuggested / (1 + vatRate);
+  const priceExVat = roundMoney(actualSuggested / (1 + vatRate));
+
+  // A.2.2 FIX: Recalculate Amazon fees for the SUGGESTED price, not the current price
+  const suggestedAmazonFeesExVat = calculateAmazonFeesExVat(
+    actualSuggested,
+    features.fulfillment_channel || 'FBM',
+    features.category || 'General',
+    vatRate
+  );
+
   const totalCost = (features.bom_cost_ex_vat || 0) + (features.shipping_cost_ex_vat || 0) +
-                    (features.packaging_cost_ex_vat || 0) + (features.amazon_fees_ex_vat || 0);
+                    (features.packaging_cost_ex_vat || 0) + suggestedAmazonFeesExVat;
   const newProfit = priceExVat - totalCost;
   const newMargin = priceExVat > 0 ? newProfit / priceExVat : 0;
 

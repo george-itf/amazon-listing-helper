@@ -149,7 +149,34 @@ export async function markSucceeded(jobId, resultData = {}) {
 }
 
 /**
+ * Calculate exponential backoff with full jitter
+ * A.3.3 FIX: Replaces linear backoff with exponential + jitter
+ *
+ * Formula: min(MAX_BACKOFF, BASE * 2^attempt) * random(0.5, 1.5)
+ *
+ * @param {number} attempt - Current attempt number (1-based)
+ * @returns {number} Backoff time in seconds
+ */
+function computeBackoffSeconds(attempt) {
+  const BASE_SECONDS = 30;      // 30 seconds base
+  const MAX_SECONDS = 3600;     // 1 hour max
+  const JITTER_FACTOR = 0.5;    // ±50% jitter
+
+  // Exponential: BASE * 2^(attempt-1)
+  // attempt 1: 30s, attempt 2: 60s, attempt 3: 120s, etc.
+  const exponentialBackoff = Math.min(MAX_SECONDS, BASE_SECONDS * Math.pow(2, attempt - 1));
+
+  // Add jitter: random between 0.5x and 1.5x
+  const jitter = 1 - JITTER_FACTOR + (Math.random() * JITTER_FACTOR * 2);
+
+  return Math.round(exponentialBackoff * jitter);
+}
+
+/**
  * Mark job as failed
+ *
+ * A.3.3 FIX: Now uses exponential backoff with jitter instead of linear
+ *
  * @param {number} jobId
  * @param {string} errorMessage
  * @param {Object} [logEntry]
@@ -168,6 +195,9 @@ export async function markFailed(jobId, errorMessage, logEntry = null) {
     });
   }
 
+  // A.3.3 FIX: Calculate exponential backoff with jitter
+  const backoffSeconds = computeBackoffSeconds(current.attempts);
+
   const result = await query(`
     UPDATE jobs
     SET
@@ -182,13 +212,13 @@ export async function markFailed(jobId, errorMessage, logEntry = null) {
       error_message = $2,
       log_json = $3,
       scheduled_for = CASE
-        WHEN attempts < max_attempts THEN CURRENT_TIMESTAMP + (attempts * INTERVAL '1 minute')
+        WHEN attempts < max_attempts THEN CURRENT_TIMESTAMP + ($4 * INTERVAL '1 second')
         ELSE scheduled_for
       END,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = $1
     RETURNING *
-  `, [jobId, errorMessage, JSON.stringify(logs)]);
+  `, [jobId, errorMessage, JSON.stringify(logs), backoffSeconds]);
 
   return result.rows[0] || null;
 }
