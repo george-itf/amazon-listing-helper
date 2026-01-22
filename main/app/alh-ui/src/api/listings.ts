@@ -81,21 +81,9 @@ export async function publishStockChange(
   return post<PublishResponse>(`/api/v2/listings/${id}/stock/publish`, request);
 }
 
-// Get all listings with features (batch call)
+// Get all listings with features (single API call - features now included in response)
 export async function getListingsWithFeatures(): Promise<ListingWithFeatures[]> {
-  const listings = await getListings();
-
-  // Try to get features for each listing in parallel
-  const listingsWithFeatures = await Promise.all(
-    listings.map(async (listing) => {
-      try {
-        const features = await getListingFeatures(listing.id);
-        return { ...listing, features };
-      } catch {
-        return { ...listing, features: null };
-      }
-    })
-  );
-
-  return listingsWithFeatures;
+  // The /api/v2/listings endpoint now returns features via LEFT JOIN LATERAL
+  // This eliminates N+1 API calls and prevents rate limiting issues
+  return get<ListingWithFeatures[]>('/api/v2/listings');
 }
