@@ -40,6 +40,7 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
             <th className="px-4 py-3">SKU</th>
             <th className="px-4 py-3">ASIN</th>
             <th className="px-4 py-3">Title</th>
+            <th className="px-4 py-3 text-right">Qty</th>
             <th className="px-4 py-3 text-right">Price (inc VAT)</th>
             <th className="px-4 py-3">Buy Box</th>
             <th className="px-4 py-3 text-right">Profit</th>
@@ -68,6 +69,9 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
                 </td>
                 <td className="table-cell max-w-xs truncate" title={listing.title}>
                   {listing.title}
+                </td>
+                <td className="table-cell text-right">
+                  {formatNumber(f?.available_quantity)}
                 </td>
                 <td className="table-cell text-right font-medium">
                   {formatCurrency(f?.price_inc_vat)}

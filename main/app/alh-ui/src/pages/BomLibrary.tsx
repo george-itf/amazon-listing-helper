@@ -87,6 +87,7 @@ export function BomLibraryPage() {
         name: newComponent.name,
         description: newComponent.description || null,
         unit_cost_ex_vat: parseFloat(newComponent.unit_cost_ex_vat),
+        current_stock: 0,
         supplier_id: null,
         lead_time_days: null,
       });
@@ -619,6 +620,7 @@ SKU002\tGadget B\tA cool gadget\tGadgets\t12.50\tSUP-002`}
                     <th className="px-4 py-3">Name</th>
                     <th className="px-4 py-3">Description</th>
                     <th className="px-4 py-3 text-right">Unit Cost (ex VAT)</th>
+                    <th className="px-4 py-3 text-right">Stock</th>
                     <th className="px-4 py-3">Lead Time</th>
                     <th className="px-4 py-3 w-20">Actions</th>
                   </tr>
@@ -640,6 +642,9 @@ SKU002\tGadget B\tA cool gadget\tGadgets\t12.50\tSUP-002`}
                       </td>
                       <td className="table-cell text-right">
                         {renderEditableCell(comp, 'unit_cost_ex_vat', 'number')}
+                      </td>
+                      <td className="table-cell text-right">
+                        {comp.current_stock ?? '-'}
                       </td>
                       <td className="table-cell">
                         {comp.lead_time_days ? `${comp.lead_time_days}d` : '-'}

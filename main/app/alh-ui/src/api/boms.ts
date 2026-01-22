@@ -10,6 +10,7 @@ export interface Component {
   name: string;
   description: string | null;
   unit_cost_ex_vat: number;
+  current_stock: number;
   supplier_id: number | null;
   lead_time_days: number | null;
   created_at: string;
