@@ -36,6 +36,65 @@ function wrapResponse(data, errorMessage = null) {
 }
 
 /**
+ * Allowed settings whitelist with type validation
+ * Prevents arbitrary setting injection and ensures type safety
+ */
+const ALLOWED_SETTINGS = {
+  // Business rules
+  'default_vat_rate': { type: 'number', min: 0, max: 1 },
+  'min_margin': { type: 'number', min: 0, max: 1 },
+  'target_margin': { type: 'number', min: 0, max: 1 },
+
+  // Price change guardrails
+  'max_price_change_pct_per_day': { type: 'number', min: 0, max: 1 },
+  'min_days_of_cover_before_price_change': { type: 'number', min: 0, max: 365 },
+  'min_stock_threshold': { type: 'number', min: 0, max: 10000 },
+  'allow_price_below_break_even': { type: 'boolean' },
+
+  // Sync settings
+  'sync_interval_minutes': { type: 'number', min: 5, max: 1440 },
+  'keepa_sync_enabled': { type: 'boolean' },
+  'sp_api_sync_enabled': { type: 'boolean' },
+
+  // Publish settings
+  'publish_mode': { type: 'string', enum: ['simulate', 'live'] },
+  'auto_publish_enabled': { type: 'boolean' },
+};
+
+/**
+ * Validate a setting value against its schema
+ * @param {string} key - Setting key
+ * @param {any} value - Setting value
+ * @param {Object} schema - Schema definition
+ * @returns {string|null} - Error message or null if valid
+ */
+function validateSettingValue(key, value, schema) {
+  if (schema.type === 'number') {
+    if (typeof value !== 'number' || isNaN(value)) {
+      return `${key} must be a number`;
+    }
+    if (schema.min !== undefined && value < schema.min) {
+      return `${key} must be >= ${schema.min}`;
+    }
+    if (schema.max !== undefined && value > schema.max) {
+      return `${key} must be <= ${schema.max}`;
+    }
+  } else if (schema.type === 'boolean') {
+    if (typeof value !== 'boolean') {
+      return `${key} must be a boolean`;
+    }
+  } else if (schema.type === 'string') {
+    if (typeof value !== 'string') {
+      return `${key} must be a string`;
+    }
+    if (schema.enum && !schema.enum.includes(value)) {
+      return `${key} must be one of: ${schema.enum.join(', ')}`;
+    }
+  }
+  return null; // Valid
+}
+
+/**
  * Handle and log errors safely
  * @param {string} context - Error context for logging
  * @param {Error} error - The error
@@ -1098,7 +1157,7 @@ export async function registerV2Routes(fastify) {
 
   /**
    * PUT /api/v2/settings
-   * Update settings
+   * Update settings (with whitelist validation for security)
    * Body: { key: value, ... }
    */
   fastify.put('/api/v2/settings', async (request, reply) => {
@@ -1106,19 +1165,50 @@ export async function registerV2Routes(fastify) {
       const { query: dbQuery } = await import('../database/connection.js');
       const updates = request.body;
 
+      if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+        return reply.status(400).send(wrapResponse(null, 'Request body must be an object'));
+      }
+
+      // Validate all keys and values against whitelist
+      const errors = [];
+      for (const [key, value] of Object.entries(updates)) {
+        const schema = ALLOWED_SETTINGS[key];
+        if (!schema) {
+          errors.push(`Unknown setting: ${key}. Allowed settings: ${Object.keys(ALLOWED_SETTINGS).join(', ')}`);
+          continue;
+        }
+        const validationError = validateSettingValue(key, value, schema);
+        if (validationError) {
+          errors.push(validationError);
+        }
+      }
+
+      if (errors.length > 0) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Invalid settings',
+          details: errors
+        });
+      }
+
+      // All valid - proceed with updates
       for (const [key, value] of Object.entries(updates)) {
         await dbQuery(`
-          INSERT INTO settings (key, value)
-          VALUES ($1, $2)
+          INSERT INTO settings (key, value, "updatedAt")
+          VALUES ($1, $2, CURRENT_TIMESTAMP)
           ON CONFLICT (key) DO UPDATE SET
             value = $2,
             "updatedAt" = CURRENT_TIMESTAMP
         `, [key, JSON.stringify(value)]);
       }
 
-      return wrapResponse({ updated: true });
+      httpLogger.info({ updatedKeys: Object.keys(updates) }, '[API] Settings updated');
+      return wrapResponse({ updated: true, keys: Object.keys(updates) });
     } catch (error) {
-      httpLogger.error('[API] PUT /settings error:', error.message);
+      httpLogger.error('[API] PUT /settings error:', {
+        message: error.message,
+        stack: error.stack
+      });
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
