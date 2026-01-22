@@ -4,10 +4,25 @@
  * Processes pending jobs from the jobs queue.
  * Per SPEC §6 and DATA_CONTRACTS.md §10.
  *
- * This worker handles:
- * - PUBLISH_PRICE_CHANGE: Publish price changes to Amazon
- * - PUBLISH_STOCK_CHANGE: Publish stock changes to Amazon
- * - (Future) SYNC_AMAZON_*, SYNC_KEEPA_*, COMPUTE_FEATURES_*, GENERATE_RECOMMENDATIONS_*
+ * IMPLEMENTATION STATUS:
+ * ----------------------
+ * FULLY IMPLEMENTED (requires SP-API credentials):
+ * - PUBLISH_PRICE_CHANGE: Updates prices via SP-API Listings Items API (patchListingsItem)
+ * - PUBLISH_STOCK_CHANGE: Updates inventory via SP-API Listings Items API (FBM only; FBA is Amazon-managed)
+ * - SYNC_KEEPA_ASIN: Syncs Keepa data via Keepa API
+ * - COMPUTE_FEATURES_LISTING: Computes and stores listing features
+ * - COMPUTE_FEATURES_ASIN: Computes and stores ASIN features
+ * - GENERATE_RECOMMENDATIONS_LISTING: Generates listing recommendations
+ * - GENERATE_RECOMMENDATIONS_ASIN: Generates ASIN recommendations
+ *
+ * STUBBED (returns simulated success):
+ * - SYNC_AMAZON_OFFER: Would sync offer data from SP-API (not yet implemented)
+ * - SYNC_AMAZON_SALES: Would sync sales data from SP-API (not yet implemented)
+ * - SYNC_AMAZON_CATALOG: Would sync catalog data from SP-API (not yet implemented)
+ *
+ * DEVELOPMENT MODE:
+ * - If SP-API credentials are not configured, PUBLISH_* jobs return simulated success
+ * - This allows local development without Amazon seller account
  *
  * @module JobWorker
  */

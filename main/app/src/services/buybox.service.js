@@ -4,12 +4,11 @@
  * Manages Buy Box status tracking per DATA_CONTRACTS.md §11.
  * Provides stubs for Buy Box status retrieval and recording.
  *
- * Buy Box Status ENUM:
- * - OWNED: Seller owns the Buy Box
- * - LOST: Seller lost the Buy Box to competitor
- * - SUPPRESSED: Buy Box is suppressed (no eligible sellers)
- * - NO_OFFER: No offer from this seller on the listing
- * - UNKNOWN: Status not yet determined
+ * Buy Box Status ENUM (canonical values):
+ * - WON: Seller owns the Buy Box (>=50% win rate or confirmed winner)
+ * - LOST: Seller lost the Buy Box to competitor (0% win rate)
+ * - PARTIAL: Seller has some Buy Box share but not majority (1-49%)
+ * - UNKNOWN: Status not yet determined (no data)
  *
  * @module BuyBoxService
  */
@@ -26,15 +25,14 @@ function safeParseFloat(value, defaultValue = null) {
 }
 
 /**
- * Buy Box status values
+ * Buy Box status values (canonical enum - matches feature_store derivation)
  * @readonly
  * @enum {string}
  */
 export const BUY_BOX_STATUS = {
-  OWNED: 'OWNED',
+  WON: 'WON',
   LOST: 'LOST',
-  SUPPRESSED: 'SUPPRESSED',
-  NO_OFFER: 'NO_OFFER',
+  PARTIAL: 'PARTIAL',
   UNKNOWN: 'UNKNOWN',
 };
 
@@ -47,27 +45,27 @@ export async function getBuyBoxStatusByListing(listingId) {
   const defaultResult = {
     listing_id: listingId,
     status: BUY_BOX_STATUS.UNKNOWN,
-    owner: null,
     price_inc_vat: null,
-    is_ours: null,
-    captured_at: null,
+    buy_box_price_inc_vat: null,
+    buy_box_percentage_30d: null,
+    is_buy_box_winner: null,
+    observed_at: null,
     source: 'none',
   };
 
-  // Try to get from listing_offer_current table
+  // Try to get from listing_offer_current table (schema per 002_slice_b_schema.sql)
   let result;
   try {
     result = await query(`
       SELECT
         buy_box_status,
-        buy_box_price_inc_vat,
-        buy_box_seller,
-        is_our_offer,
-        captured_at
+        price_inc_vat,
+        buy_box_price,
+        buy_box_percentage_30d,
+        is_buy_box_winner,
+        observed_at
       FROM listing_offer_current
       WHERE listing_id = $1
-      ORDER BY captured_at DESC
-      LIMIT 1
     `, [listingId]);
   } catch (error) {
     // Handle missing table gracefully
@@ -82,13 +80,26 @@ export async function getBuyBoxStatusByListing(listingId) {
   }
 
   const row = result.rows[0];
+
+  // Derive status from percentage if status is UNKNOWN but we have data
+  let status = row.buy_box_status || BUY_BOX_STATUS.UNKNOWN;
+  if (status === 'UNKNOWN' && row.buy_box_percentage_30d !== null) {
+    const pct = safeParseFloat(row.buy_box_percentage_30d, null);
+    if (pct !== null) {
+      if (pct >= 50) status = BUY_BOX_STATUS.WON;
+      else if (pct === 0) status = BUY_BOX_STATUS.LOST;
+      else status = BUY_BOX_STATUS.PARTIAL;
+    }
+  }
+
   return {
     listing_id: listingId,
-    status: row.buy_box_status || BUY_BOX_STATUS.UNKNOWN,
-    owner: row.buy_box_seller,
-    price_inc_vat: safeParseFloat(row.buy_box_price_inc_vat, null),
-    is_ours: row.is_our_offer,
-    captured_at: row.captured_at,
+    status,
+    price_inc_vat: safeParseFloat(row.price_inc_vat, null),
+    buy_box_price_inc_vat: safeParseFloat(row.buy_box_price, null),
+    buy_box_percentage_30d: safeParseFloat(row.buy_box_percentage_30d, null),
+    is_buy_box_winner: row.is_buy_box_winner,
+    observed_at: row.observed_at,
     source: 'listing_offer_current',
   };
 }
@@ -153,32 +164,22 @@ export async function getBuyBoxStatusByAsin(asinEntityId) {
   // Get our seller ID for comparison
   const ourSellerId = getSellerId();
 
-  // If we have a linked listing, check if we have an offer
-  let ourPrice = null;
-  if (row.listing_id) {
-    const listingResult = await query(
-      'SELECT price_inc_vat FROM listings WHERE id = $1',
-      [row.listing_id]
-    );
-    ourPrice = safeParseFloat(listingResult.rows[0]?.price_inc_vat, null);
-  }
-
   // Determine status using the determineBuyBoxStatus function
+  // For ASIN-level, we typically don't have percentage data from Keepa
   const status = determineBuyBoxStatus({
     buyBoxPrice,
     buyBoxSeller,
     ourSellerId,
-    ourPrice,
+    buyBoxPercentage: null, // Keepa doesn't provide percentage data
   });
 
   return {
     asin_entity_id: asinEntityId,
     asin: row.asin,
     status,
-    owner: buyBoxSeller,
-    price_inc_vat: buyBoxPrice,
+    buy_box_seller: buyBoxSeller,
+    buy_box_price_inc_vat: buyBoxPrice,
     is_amazon: buyBoxIsAmazon,
-    our_price_inc_vat: ourPrice,
     captured_at: row.captured_at,
     source: row.parsed_json ? 'keepa_snapshots' : 'none',
   };
@@ -186,66 +187,77 @@ export async function getBuyBoxStatusByAsin(asinEntityId) {
 
 /**
  * Determine Buy Box status based on data
+ * Uses canonical WON/LOST/PARTIAL/UNKNOWN values
+ *
  * @param {Object} params
- * @param {number|null} params.buyBoxPrice
- * @param {string|null} params.buyBoxSeller
- * @param {string|null} params.ourSellerId
- * @param {number|null} params.ourPrice
+ * @param {number|null} params.buyBoxPrice - Current Buy Box winner price
+ * @param {string|null} params.buyBoxSeller - Current Buy Box winner seller ID
+ * @param {string|null} params.ourSellerId - Our seller ID
+ * @param {number|null} params.buyBoxPercentage - Our Buy Box win percentage (0-100)
  * @returns {string} Buy Box status
  */
-export function determineBuyBoxStatus({ buyBoxPrice, buyBoxSeller, ourSellerId, ourPrice }) {
-  if (buyBoxPrice === null || buyBoxPrice === undefined) {
-    return BUY_BOX_STATUS.SUPPRESSED;
+export function determineBuyBoxStatus({ buyBoxPrice, buyBoxSeller, ourSellerId, buyBoxPercentage }) {
+  // If we have percentage data, use that for most accurate status
+  if (buyBoxPercentage !== null && buyBoxPercentage !== undefined) {
+    if (buyBoxPercentage >= 50) return BUY_BOX_STATUS.WON;
+    if (buyBoxPercentage === 0) return BUY_BOX_STATUS.LOST;
+    if (buyBoxPercentage > 0) return BUY_BOX_STATUS.PARTIAL;
   }
 
-  if (ourSellerId && buyBoxSeller === ourSellerId) {
-    return BUY_BOX_STATUS.OWNED;
+  // Fallback to seller comparison if we have seller data
+  if (ourSellerId && buyBoxSeller) {
+    return buyBoxSeller === ourSellerId ? BUY_BOX_STATUS.WON : BUY_BOX_STATUS.LOST;
   }
 
-  if (ourPrice === null || ourPrice === undefined) {
-    return BUY_BOX_STATUS.NO_OFFER;
-  }
-
-  return BUY_BOX_STATUS.LOST;
+  // No data available
+  return BUY_BOX_STATUS.UNKNOWN;
 }
 
 /**
  * Record a Buy Box snapshot for a listing
+ * Uses schema-aligned column names per 002_slice_b_schema.sql
+ *
  * @param {Object} params
  * @param {number} params.listingId
- * @param {string} params.buyBoxStatus
- * @param {number|null} params.buyBoxPriceIncVat
- * @param {string|null} params.buyBoxSeller
- * @param {boolean} params.isOurOffer
- * @param {string} [params.source='api']
- * @returns {Promise<Object>} Created snapshot record
+ * @param {string} params.buyBoxStatus - WON, LOST, PARTIAL, or UNKNOWN
+ * @param {number|null} params.priceIncVat - Our current price
+ * @param {number|null} params.buyBoxPrice - Buy Box winner price
+ * @param {number|null} params.buyBoxPercentage30d - Our Buy Box win percentage
+ * @param {boolean|null} params.isBuyBoxWinner - Are we the current winner?
+ * @returns {Promise<Object>} Created/updated record
  */
 export async function recordBuyBoxSnapshot({
   listingId,
   buyBoxStatus,
-  buyBoxPriceIncVat,
-  buyBoxSeller,
-  isOurOffer,
-  source = 'api',
+  priceIncVat,
+  buyBoxPrice,
+  buyBoxPercentage30d,
+  isBuyBoxWinner,
 }) {
+  // Map status to schema enum (schema only has WON, LOST, UNKNOWN)
+  // PARTIAL maps to UNKNOWN in the DB enum until migration adds it
+  const dbStatus = buyBoxStatus === 'PARTIAL' ? 'UNKNOWN' : buyBoxStatus;
+
   const result = await query(`
     INSERT INTO listing_offer_current (
       listing_id,
       buy_box_status,
-      buy_box_price_inc_vat,
-      buy_box_seller,
-      is_our_offer,
-      captured_at
-    ) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+      price_inc_vat,
+      buy_box_price,
+      buy_box_percentage_30d,
+      is_buy_box_winner,
+      observed_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
     ON CONFLICT (listing_id) DO UPDATE SET
       buy_box_status = EXCLUDED.buy_box_status,
-      buy_box_price_inc_vat = EXCLUDED.buy_box_price_inc_vat,
-      buy_box_seller = EXCLUDED.buy_box_seller,
-      is_our_offer = EXCLUDED.is_our_offer,
-      captured_at = CURRENT_TIMESTAMP,
+      price_inc_vat = EXCLUDED.price_inc_vat,
+      buy_box_price = EXCLUDED.buy_box_price,
+      buy_box_percentage_30d = EXCLUDED.buy_box_percentage_30d,
+      is_buy_box_winner = EXCLUDED.is_buy_box_winner,
+      observed_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP
     RETURNING *
-  `, [listingId, buyBoxStatus, buyBoxPriceIncVat, buyBoxSeller, isOurOffer]);
+  `, [listingId, dbStatus, priceIncVat, buyBoxPrice, buyBoxPercentage30d, isBuyBoxWinner]);
 
   return result.rows[0];
 }
@@ -270,7 +282,7 @@ export async function getBuyBoxHistory(listingId, days = 30) {
  */
 export async function ownsBuyBox(listingId) {
   const status = await getBuyBoxStatusByListing(listingId);
-  return status.status === BUY_BOX_STATUS.OWNED;
+  return status.status === BUY_BOX_STATUS.WON;
 }
 
 /**
@@ -281,15 +293,15 @@ export async function ownsBuyBox(listingId) {
 export async function getBuyBoxCompetitiveMetrics(listingId) {
   const status = await getBuyBoxStatusByListing(listingId);
 
-  // Get our current price
+  // Get our current price from listings table
   const listingResult = await query(
     'SELECT price_inc_vat FROM listings WHERE id = $1',
     [listingId]
   );
 
   const ourPrice = safeParseFloat(listingResult.rows[0]?.price_inc_vat, null);
+  const buyBoxPrice = status.buy_box_price_inc_vat;
 
-  const buyBoxPrice = status.price_inc_vat;
   let priceDelta = null;
   let priceDeltaPct = null;
 
@@ -301,11 +313,13 @@ export async function getBuyBoxCompetitiveMetrics(listingId) {
   return {
     listing_id: listingId,
     buy_box_status: status.status,
+    buy_box_percentage_30d: status.buy_box_percentage_30d,
     our_price_inc_vat: ourPrice,
     buy_box_price_inc_vat: buyBoxPrice,
     price_delta: priceDelta !== null ? Math.round(priceDelta * 100) / 100 : null,
     price_delta_pct: priceDeltaPct !== null ? Math.round(priceDeltaPct * 10000) / 10000 : null,
     is_competitive: priceDelta !== null ? priceDelta <= 0 : null,
+    is_buy_box_winner: status.is_buy_box_winner,
   };
 }
 
