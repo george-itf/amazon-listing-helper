@@ -341,7 +341,7 @@ export function BomLibraryPage() {
         className={`cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded ${isModified ? 'bg-yellow-100 font-medium' : ''}`}
         title="Click to edit"
       >
-        {field === 'unit_cost_ex_vat' ? `£${(value as number)?.toFixed(2) || '0.00'}` : value || '-'}
+        {field === 'unit_cost_ex_vat' ? `£${(Number(value) || 0).toFixed(2)}` : value || '-'}
       </span>
     );
   };
@@ -702,7 +702,7 @@ SKU002\tGadget B\tA cool gadget\tGadgets\t12.50\tSUP-002`}
                         )}
                       </td>
                       <td className="table-cell">{bom.lines.length}</td>
-                      <td className="table-cell text-right">£{bom.total_cost_ex_vat.toFixed(2)}</td>
+                      <td className="table-cell text-right">£{(Number(bom.total_cost_ex_vat) || 0).toFixed(2)}</td>
                       <td className="table-cell text-gray-500">
                         {new Date(bom.created_at).toLocaleDateString()}
                       </td>
