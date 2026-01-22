@@ -280,14 +280,36 @@ const start = async () => {
       logger.info({ count: migrationResult.migrationsRun }, 'Database migrations applied');
     }
 
-    // Check schema health (warn but don't block startup)
-    const { checkSchemaHealth } = await import('./database/connection.js');
+    // Check schema health and auto-repair if needed
+    const { checkSchemaHealth, resetFailedMigrations } = await import('./database/connection.js');
     const schemaHealth = await checkSchemaHealth();
     if (!schemaHealth.healthy) {
       logger.warn({
         missing: schemaHealth.missing,
         issues: schemaHealth.issues,
-      }, 'Schema health check failed - some tables are missing. Use POST /api/v2/health/schema/repair to fix.');
+      }, 'Schema health check failed - attempting auto-repair...');
+
+      // Auto-repair: reset failed migrations and re-run
+      try {
+        const resetResult = await resetFailedMigrations();
+        if (resetResult.reset.length > 0) {
+          logger.info({ reset: resetResult.reset }, 'Reset failed migrations');
+          const repairMigrationResult = await runMigrations();
+          logger.info({ count: repairMigrationResult.migrationsRun }, 'Re-ran migrations after reset');
+        }
+
+        // Check health again after repair
+        const healthAfterRepair = await checkSchemaHealth();
+        if (healthAfterRepair.healthy) {
+          logger.info('Schema auto-repair successful');
+        } else {
+          logger.warn({
+            stillMissing: healthAfterRepair.missing,
+          }, 'Schema repair incomplete - some tables still missing');
+        }
+      } catch (repairError) {
+        logger.error({ err: repairError }, 'Schema auto-repair failed');
+      }
     }
 
     // Initialize ML data pool (non-blocking)
