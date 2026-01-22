@@ -249,22 +249,10 @@ async function doComputeListingFeatures(listingId) {
     if (!error.message?.includes('does not exist')) throw error;
   }
 
-  // Source 2: amazon_sales_traffic (fallback - uses ASIN to get buy_box_percentage)
-  if (!offer.buy_box_status && listing.asin) {
-    try {
-      const trafficResult = await query(`
-        SELECT AVG(buy_box_percentage) as avg_buy_box_percentage
-        FROM amazon_sales_traffic
-        WHERE asin = $1
-          AND date >= CURRENT_DATE - INTERVAL '30 days'
-      `, [listing.asin]);
-      if (trafficResult.rows[0]?.avg_buy_box_percentage != null) {
-        buyBoxPercentage30d = safeParseFloat(trafficResult.rows[0].avg_buy_box_percentage, null);
-      }
-    } catch (error) {
-      if (!error.message?.includes('does not exist')) throw error;
-    }
-  }
+  // !IMPORTANT! amazon_sales_traffic fallback REMOVED
+  // The GET_SALES_AND_TRAFFIC_REPORT API requires Brand Analytics permissions we don't have.
+  // Buy box data must come from amazon_listing_offers table only.
+  // Do NOT re-add amazon_sales_traffic queries here.
 
   // Determine Buy Box status from available data
   let buyBoxStatus = offer.buy_box_status || 'UNKNOWN';

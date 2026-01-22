@@ -183,66 +183,30 @@ export async function queueStaleKeepaJobs() {
 }
 
 /**
- * Run Amazon Sales & Traffic sync if data is stale
- * This provides Buy Box percentage data
- * @returns {Promise<{synced: boolean, reason?: string}>}
+ * !IMPORTANT! Amazon Sales & Traffic sync has been REMOVED
+ *
+ * The GET_SALES_AND_TRAFFIC_REPORT API requires Brand Analytics permissions
+ * that are NOT available for this account.
+ *
+ * Do NOT attempt to re-implement this function or use:
+ * - GET_SALES_AND_TRAFFIC_REPORT
+ * - syncSalesAndTraffic()
+ * - amazon_sales_traffic table
+ *
+ * Alternative data sources for Buy Box data:
+ * - Use syncListingOffers() for buy box status
+ * - Use syncCompetitivePricing() for competitive pricing data
+ *
+ * @returns {Promise<{synced: boolean, reason: string}>}
  */
 export async function runAmazonSyncIfStale() {
-  // Check if SP-API credentials are configured
-  if (!hasSpApiCredentials()) {
-    logger.info('[Startup] SP-API credentials not configured - skipping Amazon sync');
-    return { synced: false, reason: 'no_credentials' };
-  }
-
-  try {
-    // Check if we have recent Sales & Traffic data
-    const result = await safeQuery(`
-      SELECT MAX(updated_at) as last_sync
-      FROM amazon_sales_traffic
-    `, [], 'check_amazon_sync');
-
-    const lastSync = result?.rows[0]?.last_sync;
-    const staleThreshold = new Date(Date.now() - AMAZON_SYNC_STALENESS_HOURS * 60 * 60 * 1000);
-
-    if (lastSync && new Date(lastSync) > staleThreshold) {
-      logger.info({ lastSync }, '[Startup] Amazon data is fresh - skipping sync');
-      return { synced: false, reason: 'data_fresh', lastSync };
-    }
-
-    logger.info('[Startup] Amazon data is stale - running Sales & Traffic sync...');
-
-    // Import and run the sync (this can take a while, so it runs async)
-    const amazonSync = await import('../amazon-data-sync.js');
-
-    // Run Sales & Traffic sync (provides Buy Box data)
-    // This is the critical sync - other syncs can be manual
-    const syncResult = await amazonSync.syncSalesAndTraffic(30);
-
-    logger.info({ syncResult }, '[Startup] Amazon Sales & Traffic sync completed');
-
-    // After Amazon sync, queue feature recompute for all affected listings
-    // so they pick up the new Buy Box data
-    await queueStaleFeatureJobs();
-
-    return { synced: true, result: syncResult };
-  } catch (error) {
-    // Check for common permission errors
-    const isForbidden = error.message?.includes('forbidden') || error.message?.includes('403');
-    const isUnauthorized = error.message?.includes('unauthorized') || error.message?.includes('401');
-
-    if (isForbidden) {
-      logger.warn('[Startup] Amazon sync skipped - SP-API credentials lack permission for Sales & Traffic report (requires Brand Analytics role)');
-      return { synced: false, reason: 'permission_denied', error: 'Sales & Traffic report requires Brand Analytics permission' };
-    }
-
-    if (isUnauthorized) {
-      logger.warn('[Startup] Amazon sync skipped - SP-API credentials are invalid or expired');
-      return { synced: false, reason: 'invalid_credentials', error: 'SP-API credentials are invalid or expired' };
-    }
-
-    logger.error({ err: error }, '[Startup] Amazon sync failed');
-    return { synced: false, error: error.message };
-  }
+  // !IMPORTANT! This function is disabled - Sales & Traffic report requires Brand Analytics permissions
+  logger.info('[Startup] Amazon Sales & Traffic sync is DISABLED - requires Brand Analytics permissions we do not have');
+  return {
+    synced: false,
+    reason: 'disabled',
+    error: 'Sales & Traffic report (GET_SALES_AND_TRAFFIC_REPORT) requires Brand Analytics permissions - feature removed',
+  };
 }
 
 /**

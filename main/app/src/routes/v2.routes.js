@@ -3367,25 +3367,17 @@ export async function registerV2Routes(fastify) {
   });
 
   /**
-   * POST /api/v2/sync/sales-traffic
-   * Sync sales and traffic report (Business Reports)
+   * !IMPORTANT! POST /api/v2/sync/sales-traffic has been REMOVED
+   *
+   * The GET_SALES_AND_TRAFFIC_REPORT API requires Brand Analytics permissions
+   * that are NOT available for this account.
+   *
+   * Do NOT re-add this route or attempt to use syncSalesAndTraffic().
+   *
+   * Alternative endpoints for similar data:
+   * - POST /api/v2/sync/listing-offers for buy box status
+   * - POST /api/v2/sync/competitive-pricing for competitive pricing
    */
-  fastify.post('/api/v2/sync/sales-traffic', {
-    config: { timeout: 600000 },
-  }, async (request, reply) => {
-    try {
-      const amazonSync = await import('../amazon-data-sync.js');
-      await amazonSync.ensureTables();
-
-      const { daysBack = 30 } = request.body || {};
-      const result = await amazonSync.syncSalesAndTraffic(daysBack);
-
-      return wrapResponse(result);
-    } catch (error) {
-      httpLogger.error('[API] Sales/traffic sync error:', error.message);
-      return reply.status(500).send(wrapResponse(null, error.message));
-    }
-  });
 
   /**
    * POST /api/v2/sync/financial-events
@@ -3555,39 +3547,18 @@ export async function registerV2Routes(fastify) {
   });
 
   /**
-   * GET /api/v2/amazon/sales-traffic
-   * Get synced sales and traffic data
+   * !IMPORTANT! GET /api/v2/amazon/sales-traffic has been REMOVED
+   *
+   * The amazon_sales_traffic table no longer exists because the
+   * GET_SALES_AND_TRAFFIC_REPORT API requires Brand Analytics permissions
+   * that are NOT available for this account.
+   *
+   * Do NOT re-add this route or the amazon_sales_traffic table.
+   *
+   * Alternative endpoints for similar data:
+   * - GET /api/v2/amazon/listing-offers for buy box data
+   * - GET /api/v2/amazon/competitive-pricing for pricing data
    */
-  fastify.get('/api/v2/amazon/sales-traffic', async (request, reply) => {
-    try {
-      const { asin, days = '30' } = request.query;
-
-      let sql = `
-        SELECT * FROM amazon_sales_traffic
-        WHERE date >= CURRENT_DATE - INTERVAL '${parseInt(days, 10)} days'
-      `;
-      const params = [];
-
-      if (asin) {
-        sql += ' AND asin = $1';
-        params.push(asin);
-      }
-
-      sql += ' ORDER BY date DESC, asin';
-
-      const result = await query(sql, params);
-
-      return wrapResponse({
-        data: result.rows,
-        total: result.rows.length,
-      });
-    } catch (error) {
-      if (error.message.includes('does not exist')) {
-        return wrapResponse({ data: [], total: 0, message: 'Run sync first to create tables' });
-      }
-      return reply.status(500).send(wrapResponse(null, error.message));
-    }
-  });
 
   /**
    * GET /api/v2/amazon/financial-events
@@ -3671,20 +3642,9 @@ export async function registerV2Routes(fastify) {
         dashboard.pricing = pricingResult.rows[0];
       } catch { dashboard.pricing = null; }
 
-      // Sales traffic summary (last 7 days)
-      try {
-        const trafficResult = await query(`
-          SELECT
-            COALESCE(SUM(sessions), 0) as total_sessions,
-            COALESCE(SUM(page_views), 0) as total_page_views,
-            COALESCE(SUM(units_ordered), 0) as total_units,
-            COALESCE(SUM(ordered_product_sales_amount), 0) as total_sales,
-            COALESCE(AVG(buy_box_percentage), 0) as avg_buy_box_pct
-          FROM amazon_sales_traffic
-          WHERE date >= CURRENT_DATE - INTERVAL '7 days'
-        `);
-        dashboard.traffic_7d = trafficResult.rows[0];
-      } catch { dashboard.traffic_7d = null; }
+      // !IMPORTANT! Sales traffic summary REMOVED - amazon_sales_traffic table no longer exists
+      // The GET_SALES_AND_TRAFFIC_REPORT API requires Brand Analytics permissions we don't have
+      dashboard.traffic_7d = null;
 
       // Financial summary
       try {

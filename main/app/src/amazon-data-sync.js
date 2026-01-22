@@ -629,87 +629,21 @@ export async function syncFbaInventoryReport() {
 }
 
 /**
- * Sync sales and traffic report (Business Reports data)
+ * !IMPORTANT! DO NOT USE - Sales & Traffic Report (GET_SALES_AND_TRAFFIC_REPORT)
  *
- * @param {number} [daysBack=30] - Number of days to fetch
- * @param {Object} [options] - Optional parameters
- * @param {string[]} [options.asins] - Specific ASINs to save (filters results after fetch; if omitted, saves all)
- * @returns {Promise<Object>} Sync results with records_fetched, records_saved, and mode
+ * This function has been REMOVED because the Amazon SP-API Sales & Traffic Report
+ * (GET_SALES_AND_TRAFFIC_REPORT) requires Brand Analytics permissions that are NOT
+ * available for this account.
+ *
+ * !IMPORTANT! Claude Code: NEVER attempt to re-implement this function or use
+ * GET_SALES_AND_TRAFFIC_REPORT, salesAndTrafficByAsin, or the amazon_sales_traffic table.
+ * These require Brand Analytics seller permissions we do not have access to.
+ *
+ * Alternative data sources for traffic/buy box data:
+ * - Use syncListingOffers() for buy box status
+ * - Use syncCompetitivePricing() for competitive pricing data
+ * - Use syncOrders() for actual sales data
  */
-export async function syncSalesAndTraffic(daysBack = 30, options = {}) {
-  const sp = getSpClient();
-  if (!sp) throw new Error('SP-API not configured');
-
-  syncLogger.info({ daysBack }, 'Requesting sales & traffic report');
-
-  const endDate = new Date();
-  const startDate = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000);
-
-  // Determine if we're doing targeted filtering
-  let targetAsins = null;
-  let mode = 'global';
-
-  if (options.asins && Array.isArray(options.asins) && options.asins.length > 0) {
-    targetAsins = new Set(options.asins.filter(Boolean));
-    mode = 'targeted';
-    syncLogger.info({ targetedAsinCount: targetAsins.size }, 'Filtering to targeted ASINs');
-  }
-
-  try {
-    const content = await requestAndDownloadReport(sp, 'GET_SALES_AND_TRAFFIC_REPORT', {
-      dataStartTime: startDate.toISOString(),
-      dataEndTime: endDate.toISOString(),
-    });
-
-    // This report is JSON format
-    const data = JSON.parse(content);
-
-    // Get all items from report
-    let items = data.salesAndTrafficByAsin || [];
-    const totalFetched = items.length;
-
-    // Filter to target ASINs if specified
-    if (targetAsins && targetAsins.size > 0) {
-      items = items.filter(item => {
-        const itemAsin = item.parentAsin || item.childAsin;
-        return targetAsins.has(itemAsin);
-      });
-      syncLogger.info({ totalFetched, filtered: items.length }, 'Filtered records for targeted ASINs');
-    }
-
-    let saved = 0;
-    if (items.length > 0) {
-      // Batch upsert filtered sales/traffic data (eliminates N+1)
-      try {
-        saved = await batchUpsertSalesTraffic(items);
-        syncLogger.info({ saved }, 'Batch upserted sales/traffic records');
-      } catch (error) {
-        syncLogger.warn({ err: error }, 'Batch upsert failed, falling back to sequential');
-        for (const item of items) {
-          try {
-            await upsertSalesTraffic(item);
-            saved++;
-          } catch (err) {
-            syncLogger.error({ err }, 'Error saving sales data');
-          }
-        }
-      }
-    }
-
-    return {
-      success: true,
-      records_fetched: totalFetched,
-      records_filtered: items.length,
-      records_saved: saved,
-      days_back: daysBack,
-      mode,
-      ...(mode === 'targeted' && { target_asins: [...targetAsins] }),
-    };
-  } catch (error) {
-    syncLogger.error({ err: error }, 'Sales & traffic report failed');
-    throw error;
-  }
-}
 
 /**
  * Sync all orders report (historical)
@@ -909,8 +843,10 @@ export async function syncCatalogItems(options = {}) {
  * Sync order:
  * 1. Listings (must be first - provides base data)
  * 2. Parallel batch 1: FBA Inventory, Orders, Financial Events (independent API endpoints)
- * 3. Parallel batch 2: Competitive Pricing, FBA Fees, Catalog Items, Sales & Traffic
+ * 3. Parallel batch 2: Competitive Pricing, FBA Fees, Catalog Items
  * 4. Listing Offers (last - most API intensive, separate rate limit bucket)
+ *
+ * !IMPORTANT! Sales & Traffic sync is NOT available - requires Brand Analytics permissions
  *
  * @returns {Promise<Object>} Combined results from all syncs
  */
@@ -958,12 +894,12 @@ export async function syncAll() {
   }
 
   // Phase 2: Parallel - Syncs that query listings table + reports
-  syncLogger.info({ phase: 2 }, 'Parallel: Pricing, Fees, Catalog, Sales');
+  // !IMPORTANT! Sales & Traffic sync removed - requires Brand Analytics permissions we don't have
+  syncLogger.info({ phase: 2 }, 'Parallel: Pricing, Fees, Catalog');
   const phase2Results = await Promise.allSettled([
     syncCompetitivePricing().then(r => ({ name: 'competitive_pricing', result: r })),
     syncFbaFees().then(r => ({ name: 'fba_fees', result: r })),
     syncCatalogItems().then(r => ({ name: 'catalog_items', result: r })),
-    syncSalesAndTraffic(30).then(r => ({ name: 'sales_traffic', result: r })),
   ]);
 
   for (const outcome of phase2Results) {
@@ -1148,29 +1084,10 @@ export async function ensureTables() {
     )
   `);
 
-  // Sales and Traffic data table
-  await query(`
-    CREATE TABLE IF NOT EXISTS amazon_sales_traffic (
-      id SERIAL PRIMARY KEY,
-      asin VARCHAR(20) NOT NULL,
-      date DATE NOT NULL,
-      sessions INTEGER,
-      session_percentage DECIMAL(5,2),
-      page_views INTEGER,
-      page_views_percentage DECIMAL(5,2),
-      buy_box_percentage DECIMAL(5,2),
-      units_ordered INTEGER,
-      units_ordered_b2b INTEGER,
-      unit_session_percentage DECIMAL(5,2),
-      ordered_product_sales_amount DECIMAL(12,2),
-      ordered_product_sales_currency VARCHAR(10),
-      total_order_items INTEGER,
-      raw_json JSONB,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(asin, date)
-    )
-  `);
+  // !IMPORTANT! amazon_sales_traffic table REMOVED
+  // The Sales & Traffic Report (GET_SALES_AND_TRAFFIC_REPORT) requires Brand Analytics
+  // permissions that are NOT available for this account. Do NOT recreate this table
+  // or attempt to use Sales & Traffic data.
 
   // Financial Events table
   await query(`
@@ -1228,8 +1145,7 @@ export async function ensureTables() {
   await query('CREATE INDEX IF NOT EXISTS idx_amazon_competitive_pricing_asin ON amazon_competitive_pricing(asin)');
   await query('CREATE INDEX IF NOT EXISTS idx_amazon_listing_offers_asin ON amazon_listing_offers(asin)');
   await query('CREATE INDEX IF NOT EXISTS idx_amazon_fba_fees_sku ON amazon_fba_fees(seller_sku)');
-  await query('CREATE INDEX IF NOT EXISTS idx_amazon_sales_traffic_asin ON amazon_sales_traffic(asin)');
-  await query('CREATE INDEX IF NOT EXISTS idx_amazon_sales_traffic_date ON amazon_sales_traffic(date)');
+  // !IMPORTANT! amazon_sales_traffic indexes REMOVED - table no longer exists
   await query('CREATE INDEX IF NOT EXISTS idx_amazon_financial_events_order ON amazon_financial_events(amazon_order_id)');
   await query('CREATE INDEX IF NOT EXISTS idx_amazon_catalog_items_asin ON amazon_catalog_items(asin)');
 
@@ -1465,85 +1381,10 @@ async function batchUpsertFbaInventory(items) {
 }
 
 /**
- * Batch upsert sales/traffic data using UNNEST
+ * !IMPORTANT! batchUpsertSalesTraffic REMOVED
+ * The Sales & Traffic Report requires Brand Analytics permissions we don't have.
+ * Do NOT re-implement this function or use amazon_sales_traffic table.
  */
-async function batchUpsertSalesTraffic(items) {
-  if (!items || items.length === 0) return 0;
-
-  const asins = [];
-  const dates = [];
-  const sessions = [];
-  const sessionPercentages = [];
-  const pageViews = [];
-  const pageViewsPercentages = [];
-  const buyBoxPercentages = [];
-  const unitsOrdered = [];
-  const unitsOrderedB2B = [];
-  const unitSessionPercentages = [];
-  const salesAmounts = [];
-  const salesCurrencies = [];
-  const totalOrderItems = [];
-  const rawJsons = [];
-
-  for (const item of items) {
-    const traffic = item.trafficByAsin || {};
-    const sales = item.salesByAsin || {};
-
-    asins.push(item.parentAsin || item.childAsin);
-    dates.push(item.date);
-    sessions.push(traffic.sessions || 0);
-    sessionPercentages.push(traffic.sessionPercentage || 0);
-    pageViews.push(traffic.pageViews || 0);
-    pageViewsPercentages.push(traffic.pageViewsPercentage || 0);
-    buyBoxPercentages.push(traffic.buyBoxPercentage || 0);
-    unitsOrdered.push(sales.unitsOrdered || 0);
-    unitsOrderedB2B.push(sales.unitsOrderedB2B || 0);
-    unitSessionPercentages.push(traffic.unitSessionPercentage || 0);
-    salesAmounts.push(sales.orderedProductSales?.amount || 0);
-    salesCurrencies.push(sales.orderedProductSales?.currencyCode || 'GBP');
-    totalOrderItems.push(sales.totalOrderItems || 0);
-    rawJsons.push(JSON.stringify(item));
-  }
-
-  const result = await query(`
-    INSERT INTO amazon_sales_traffic (
-      asin, date, sessions, session_percentage, page_views,
-      page_views_percentage, buy_box_percentage, units_ordered,
-      units_ordered_b2b, unit_session_percentage, ordered_product_sales_amount,
-      ordered_product_sales_currency, total_order_items, raw_json, updated_at
-    )
-    SELECT asin, date, sessions, session_percentage, page_views,
-           page_views_percentage, buy_box_percentage, units_ordered,
-           units_ordered_b2b, unit_session_percentage, ordered_product_sales_amount,
-           ordered_product_sales_currency, total_order_items, raw_json,
-           CURRENT_TIMESTAMP
-    FROM UNNEST(
-      $1::varchar[], $2::date[], $3::integer[], $4::decimal[], $5::integer[],
-      $6::decimal[], $7::decimal[], $8::integer[],
-      $9::integer[], $10::decimal[], $11::decimal[],
-      $12::varchar[], $13::integer[], $14::jsonb[]
-    ) AS t(asin, date, sessions, session_percentage, page_views,
-           page_views_percentage, buy_box_percentage, units_ordered,
-           units_ordered_b2b, unit_session_percentage, ordered_product_sales_amount,
-           ordered_product_sales_currency, total_order_items, raw_json)
-    ON CONFLICT (asin, date) DO UPDATE SET
-      sessions = EXCLUDED.sessions,
-      session_percentage = EXCLUDED.session_percentage,
-      page_views = EXCLUDED.page_views,
-      buy_box_percentage = EXCLUDED.buy_box_percentage,
-      units_ordered = EXCLUDED.units_ordered,
-      ordered_product_sales_amount = EXCLUDED.ordered_product_sales_amount,
-      raw_json = EXCLUDED.raw_json,
-      updated_at = CURRENT_TIMESTAMP
-  `, [
-    asins, dates, sessions, sessionPercentages, pageViews,
-    pageViewsPercentages, buyBoxPercentages, unitsOrdered,
-    unitsOrderedB2B, unitSessionPercentages, salesAmounts,
-    salesCurrencies, totalOrderItems, rawJsons,
-  ]);
-
-  return result.rowCount;
-}
 
 /**
  * Batch upsert competitive pricing using UNNEST
@@ -1845,43 +1686,11 @@ async function upsertFbaFeeEstimate(sku, feeResult) {
   ]);
 }
 
-async function upsertSalesTraffic(item) {
-  const traffic = item.trafficByAsin || {};
-  const sales = item.salesByAsin || {};
-
-  await query(`
-    INSERT INTO amazon_sales_traffic (
-      asin, date, sessions, session_percentage, page_views,
-      page_views_percentage, buy_box_percentage, units_ordered,
-      units_ordered_b2b, unit_session_percentage, ordered_product_sales_amount,
-      ordered_product_sales_currency, total_order_items, raw_json, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP)
-    ON CONFLICT (asin, date) DO UPDATE SET
-      sessions = EXCLUDED.sessions,
-      session_percentage = EXCLUDED.session_percentage,
-      page_views = EXCLUDED.page_views,
-      buy_box_percentage = EXCLUDED.buy_box_percentage,
-      units_ordered = EXCLUDED.units_ordered,
-      ordered_product_sales_amount = EXCLUDED.ordered_product_sales_amount,
-      raw_json = EXCLUDED.raw_json,
-      updated_at = CURRENT_TIMESTAMP
-  `, [
-    item.parentAsin || item.childAsin,
-    item.date,
-    traffic.sessions,
-    traffic.sessionPercentage,
-    traffic.pageViews,
-    traffic.pageViewsPercentage,
-    traffic.buyBoxPercentage,
-    sales.unitsOrdered,
-    sales.unitsOrderedB2B,
-    traffic.unitSessionPercentage,
-    sales.orderedProductSales?.amount,
-    sales.orderedProductSales?.currencyCode,
-    sales.totalOrderItems,
-    JSON.stringify(item),
-  ]);
-}
+/**
+ * !IMPORTANT! upsertSalesTraffic REMOVED
+ * The Sales & Traffic Report requires Brand Analytics permissions we don't have.
+ * Do NOT re-implement this function or use amazon_sales_traffic table.
+ */
 
 /**
  * J.4 FIX: Upsert financial events with idempotency
@@ -2082,7 +1891,7 @@ export default {
   syncListingOffers,
   syncFbaFees,
   syncFbaInventoryReport,
-  syncSalesAndTraffic,
+  // !IMPORTANT! syncSalesAndTraffic REMOVED - requires Brand Analytics permissions we don't have
   syncOrdersReport,
   syncFinancialEvents,
   syncCatalogItems,
