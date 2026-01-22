@@ -31,6 +31,10 @@ const sslConfig = process.env.DATABASE_URL
 // A.3.4 FIX: DB statement timeout to prevent hung queries exhausting the pool
 const DB_STATEMENT_TIMEOUT_MS = parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '30000', 10);
 
+// O.2 FIX: Slow query threshold configurable via env, default raised to 500ms
+// 100ms was too aggressive for complex joins, will spam logs
+const SLOW_QUERY_THRESHOLD_MS = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS || '500', 10);
+
 // Create connection pool
 // Railway provides DATABASE_URL, local dev uses individual vars
 const pool = process.env.DATABASE_URL
@@ -76,8 +80,8 @@ export async function query(text, params = []) {
     const result = await pool.query(text, params);
     const duration = Date.now() - start;
 
-    // Log slow queries (>100ms)
-    if (duration > 100) {
+    // O.2 FIX: Use configurable threshold (default 500ms instead of 100ms)
+    if (duration > SLOW_QUERY_THRESHOLD_MS) {
       console.log(`[Database] Slow query (${duration}ms):`, text.substring(0, 100));
     }
 

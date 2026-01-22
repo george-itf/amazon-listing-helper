@@ -18,16 +18,36 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Create table for financial events idempotency (J.4 FIX)
 -- Add unique constraint on natural key
+-- Only if the table exists (it's created by a different migration)
 DO $$
 BEGIN
-  -- Add unique index if not exists for idempotency
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_indexes
-    WHERE indexname = 'idx_amazon_financial_events_unique'
+  -- Check if table exists before trying to create index
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'amazon_financial_events'
   ) THEN
-    CREATE UNIQUE INDEX idx_amazon_financial_events_unique
-    ON amazon_financial_events (event_type, amazon_order_id, posted_date)
-    WHERE amazon_order_id IS NOT NULL AND posted_date IS NOT NULL;
+    -- Add unique index if not exists for idempotency
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE indexname = 'idx_amazon_financial_events_unique'
+    ) THEN
+      -- Check if there are duplicates before creating unique index
+      IF NOT EXISTS (
+        SELECT event_type, amazon_order_id, posted_date, COUNT(*)
+        FROM amazon_financial_events
+        WHERE amazon_order_id IS NOT NULL AND posted_date IS NOT NULL
+        GROUP BY event_type, amazon_order_id, posted_date
+        HAVING COUNT(*) > 1
+      ) THEN
+        CREATE UNIQUE INDEX idx_amazon_financial_events_unique
+        ON amazon_financial_events (event_type, amazon_order_id, posted_date)
+        WHERE amazon_order_id IS NOT NULL AND posted_date IS NOT NULL;
+      ELSE
+        RAISE WARNING 'Duplicate records exist in amazon_financial_events - cannot create unique index';
+      END IF;
+    END IF;
+  ELSE
+    RAISE NOTICE 'amazon_financial_events table does not exist - skipping unique index creation';
   END IF;
 END $$;
 

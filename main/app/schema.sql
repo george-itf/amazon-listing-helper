@@ -1,3 +1,20 @@
+-- ============================================================================
+-- DEPRECATED: DO NOT USE THIS FILE
+-- ============================================================================
+-- Y.1 FIX: This schema.sql file is out of sync with the migrations and should
+-- NOT be used to create or update the database schema.
+--
+-- USE MIGRATIONS INSTEAD:
+-- The authoritative schema is defined in /migrations/*.sql files.
+-- Run migrations using: npm run migrate (or your migration runner)
+--
+-- This file is kept for historical reference only and will be removed in a
+-- future version.
+--
+-- Last updated: 2026-01-22 (deprecated)
+-- ============================================================================
+
+-- LEGACY SCHEMA BELOW - DO NOT USE
 -- Complete Database Schema for Amazon Listing Helper
 -- Run this to create/update all tables with correct structure
 

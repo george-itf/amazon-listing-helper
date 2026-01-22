@@ -348,12 +348,20 @@ export const snoozeRecommendationSchema = {
 // COMMON QUERY STRING SCHEMAS
 // ============================================================================
 
+/**
+ * W.4 FIX: Pagination query schema with capped limit
+ * Maximum limit of 500 to prevent abuse / performance issues
+ * Note: Uses string type since query params arrive as strings
+ * Backend should parseInt() and enforce Math.min(limit, 500)
+ */
 export const paginationQuerySchema = {
   type: 'object',
   properties: {
     limit: {
       type: 'string',
       pattern: '^[0-9]+$',
+      // W.4 FIX: Note maximum enforced in backend
+      description: 'Maximum: 500 (enforced server-side)',
     },
     offset: {
       type: 'string',
@@ -361,6 +369,29 @@ export const paginationQuerySchema = {
     },
   },
 };
+
+/**
+ * W.4 FIX: Maximum allowed pagination limit
+ * Use this constant in route handlers to cap limit values
+ */
+export const MAX_PAGINATION_LIMIT = 500;
+
+/**
+ * W.4 FIX: Helper to safely parse and cap pagination params
+ * @param {string|number|undefined} limit - Raw limit value
+ * @param {string|number|undefined} offset - Raw offset value
+ * @param {number} [defaultLimit=50] - Default if not provided
+ * @returns {{ limit: number, offset: number }}
+ */
+export function parsePagination(limit, offset, defaultLimit = 50) {
+  const parsedLimit = parseInt(limit, 10) || defaultLimit;
+  const parsedOffset = parseInt(offset, 10) || 0;
+
+  return {
+    limit: Math.min(Math.max(1, parsedLimit), MAX_PAGINATION_LIMIT),
+    offset: Math.max(0, parsedOffset),
+  };
+}
 
 export const listingIdParamsSchema = {
   type: 'object',
@@ -386,4 +417,6 @@ export default {
   snoozeRecommendationSchema,
   paginationQuerySchema,
   listingIdParamsSchema,
+  MAX_PAGINATION_LIMIT,
+  parsePagination,
 };

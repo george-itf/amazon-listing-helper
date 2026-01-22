@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { PageHeader } from '../layouts/PageHeader';
 import { BuyBoxBadge, RiskBadge } from '../components/badges';
@@ -183,14 +183,15 @@ export function ListingDetailPage() {
     }
   };
 
-  const calculateBomTotal = () => {
+  // N.2 FIX: Memoize BOM total calculation to avoid recalculating on every keystroke
+  const bomTotal = useMemo(() => {
     return bomLines.reduce((total, line) => {
       const component = components.find(c => c.id === line.component_id);
       if (!component) return total;
       const lineCost = line.quantity * (1 + line.wastage_rate) * (Number(component.unit_cost_ex_vat) || 0);
       return total + lineCost;
     }, 0);
-  };
+  }, [bomLines, components]);
 
   if (isLoading) {
     return (
@@ -419,7 +420,7 @@ export function ListingDetailPage() {
                   + Add Component
                 </button>
                 <span className="font-medium">
-                  Total: £{calculateBomTotal().toFixed(2)}
+                  Total: £{bomTotal.toFixed(2)}
                 </span>
               </div>
 
