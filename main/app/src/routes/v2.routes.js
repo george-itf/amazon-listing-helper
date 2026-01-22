@@ -224,8 +224,8 @@ export async function registerV2Routes(fastify) {
 
   /**
    * POST /api/v2/components/import
-   * Import components from CSV
-   * Expected body: { rows: [{ component_sku, name, description?, category?, unit_cost_ex_vat? }] }
+   * Import components from CSV or spreadsheet paste
+   * Expected body: { rows: [{ component_sku, name, description?, category?, unit_cost_ex_vat?, supplier_sku? }] }
    */
   fastify.post('/api/v2/components/import', async (request, reply) => {
     try {
@@ -237,6 +237,53 @@ export async function registerV2Routes(fastify) {
       return wrapResponse(result);
     } catch (error) {
       httpLogger.error('[API] POST /components/import error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * PUT /api/v2/components/bulk
+   * Bulk update multiple components
+   * Expected body: { updates: [{ id, name?, unit_cost_ex_vat?, category?, description?, ... }] }
+   */
+  fastify.put('/api/v2/components/bulk', async (request, reply) => {
+    try {
+      const { updates } = request.body;
+      if (!Array.isArray(updates)) {
+        return reply.status(400).send({ success: false, error: 'Expected updates array in body' });
+      }
+
+      const results = {
+        updated: 0,
+        failed: 0,
+        errors: [],
+      };
+
+      for (const update of updates) {
+        if (!update.id) {
+          results.failed++;
+          results.errors.push({ id: null, error: 'Missing component id' });
+          continue;
+        }
+
+        try {
+          const { id, ...data } = update;
+          const updated = await componentRepo.update(id, data);
+          if (updated) {
+            results.updated++;
+          } else {
+            results.failed++;
+            results.errors.push({ id, error: 'Component not found' });
+          }
+        } catch (error) {
+          results.failed++;
+          results.errors.push({ id: update.id, error: error.message });
+        }
+      }
+
+      return wrapResponse(results);
+    } catch (error) {
+      httpLogger.error('[API] PUT /components/bulk error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });

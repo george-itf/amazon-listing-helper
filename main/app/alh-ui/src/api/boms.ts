@@ -85,6 +85,38 @@ export async function deleteComponent(id: number): Promise<void> {
   return del(`/api/v2/components/${id}`);
 }
 
+// Bulk operations
+export interface ImportComponentRow {
+  component_sku: string;
+  name: string;
+  description?: string;
+  category?: string;
+  unit_cost_ex_vat?: number;
+  supplier_sku?: string;
+}
+
+export interface ImportResult {
+  created: number;
+  updated: number;
+  errors: Array<{ row: number; error: string }>;
+}
+
+export interface BulkUpdateResult {
+  updated: number;
+  failed: number;
+  errors: Array<{ id: number | null; error: string }>;
+}
+
+export async function importComponents(rows: ImportComponentRow[]): Promise<ImportResult> {
+  return post<ImportResult>('/api/v2/components/import', { rows });
+}
+
+export async function bulkUpdateComponents(
+  updates: Array<{ id: number } & Partial<Omit<Component, 'id' | 'created_at' | 'updated_at'>>>
+): Promise<BulkUpdateResult> {
+  return put<BulkUpdateResult>('/api/v2/components/bulk', { updates });
+}
+
 // BOMs
 export async function getBoms(listingId?: number): Promise<Bom[]> {
   const params = listingId ? { listing_id: listingId } : undefined;
