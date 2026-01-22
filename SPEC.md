@@ -330,10 +330,10 @@ Option B (two tables): \`listing\_features\`, \`asin\_features\` with same struc
 
 \#\# 6\) Jobs & Scheduling (Operational Backbone)
 
-\#\#\# 6.1 Job types (enum)  
-\- \`SYNC\_AMAZON\_OFFER\` (price/stock/buy box)  
-\- \`SYNC\_AMAZON\_SALES\` (daily sales/traffic)  
-\- \`SYNC\_AMAZON\_CATALOG\` (attributes/images/title)  
+\#\#\# 6.1 Job types (enum)
+\- \`SYNC\_AMAZON\_OFFER\` (price/stock/buy box)
+\- \`SYNC\_AMAZON\_CATALOG\` (attributes/images/title)
+\- ~~\`SYNC\_AMAZON\_SALES\`~~ **REMOVED** - requires Brand Analytics permissions not available  
 \- \`SYNC\_KEEPA\_ASIN\` (keepa snapshot)  
 \- \`COMPUTE\_FEATURES\_LISTING\`  
 \- \`COMPUTE\_FEATURES\_ASIN\`  

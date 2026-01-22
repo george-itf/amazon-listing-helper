@@ -516,74 +516,25 @@ function getEmptyCompetitiveFeatures() {
 // 6. TRAFFIC FEATURES
 // ============================================================================
 
+/**
+ * !IMPORTANT! Traffic features from Sales & Traffic report are NO LONGER AVAILABLE
+ *
+ * The GET_SALES_AND_TRAFFIC_REPORT API requires Brand Analytics permissions
+ * that are NOT available for this account. The amazon_sales_traffic table
+ * no longer exists.
+ *
+ * Do NOT attempt to re-implement traffic features using:
+ * - GET_SALES_AND_TRAFFIC_REPORT
+ * - amazon_sales_traffic table
+ * - syncSalesAndTraffic()
+ *
+ * This function now returns empty/null values for all traffic features.
+ * Buy box data should come from amazon_listing_offers instead.
+ */
 async function computeTrafficFeatures(asin) {
-  if (!asin) {
-    return getEmptyTrafficFeatures();
-  }
-
-  // Get traffic data from sales_traffic table
-  const traffic = await query(`
-    SELECT
-      -- 7 day metrics
-      COALESCE(SUM(CASE WHEN date >= CURRENT_DATE - 7 THEN sessions END), 0) as sessions_7d,
-      COALESCE(SUM(CASE WHEN date >= CURRENT_DATE - 7 THEN page_views END), 0) as page_views_7d,
-      COALESCE(SUM(CASE WHEN date >= CURRENT_DATE - 7 THEN units_ordered END), 0) as units_7d,
-      COALESCE(AVG(CASE WHEN date >= CURRENT_DATE - 7 THEN buy_box_percentage END), 0) as buy_box_pct_7d,
-
-      -- 30 day metrics
-      COALESCE(SUM(sessions), 0) as sessions_30d,
-      COALESCE(SUM(page_views), 0) as page_views_30d,
-      COALESCE(SUM(units_ordered), 0) as units_30d,
-      COALESCE(AVG(buy_box_percentage), 0) as buy_box_pct_30d,
-      COALESCE(AVG(unit_session_percentage), 0) as conversion_rate_30d
-    FROM amazon_sales_traffic
-    WHERE asin = $1
-      AND date >= CURRENT_DATE - 30
-  `, [asin]);
-
-  const t = traffic.rows[0] || {};
-
-  // Calculate derived metrics
-  const sessions7d = safeFloat(t.sessions_7d);
-  const sessions30d = safeFloat(t.sessions_30d);
-  const pageViews7d = safeFloat(t.page_views_7d);
-  const pageViews30d = safeFloat(t.page_views_30d);
-  const units7d = safeFloat(t.units_7d);
-  const units30d = safeFloat(t.units_30d);
-
-  return {
-    // Sessions
-    traffic_sessions_7d: sessions7d,
-    traffic_sessions_30d: sessions30d,
-    traffic_sessions_per_day_7d: round(sessions7d / 7, 2),
-    traffic_sessions_per_day_30d: round(sessions30d / 30, 2),
-    traffic_sessions_trend: sessions30d > 0 ? (sessions7d / 7) / (sessions30d / 30) : null,
-
-    // Page views
-    traffic_page_views_7d: pageViews7d,
-    traffic_page_views_30d: pageViews30d,
-    traffic_page_views_per_session: sessions30d > 0 ? pageViews30d / sessions30d : null,
-
-    // Conversion
-    traffic_conversion_rate: safeFloat(t.conversion_rate_30d),
-    traffic_conversion_7d: sessions7d > 0 ? units7d / sessions7d : null,
-    traffic_conversion_30d: sessions30d > 0 ? units30d / sessions30d : null,
-
-    // Buy Box
-    traffic_buy_box_pct_7d: safeFloat(t.buy_box_pct_7d),
-    traffic_buy_box_pct_30d: safeFloat(t.buy_box_pct_30d),
-    traffic_buy_box_trend: t.buy_box_pct_30d > 0
-      ? t.buy_box_pct_7d / t.buy_box_pct_30d : null,
-
-    // Traffic quality
-    traffic_has_traffic: sessions30d > 0 ? 1 : 0,
-    traffic_is_high_traffic: sessions30d > 1000 ? 1 : 0,
-    traffic_is_low_traffic: sessions30d < 100 && sessions30d > 0 ? 1 : 0,
-
-    // Log transforms
-    traffic_sessions_30d_log: sessions30d > 0 ? Math.log1p(sessions30d) : 0,
-    traffic_page_views_30d_log: pageViews30d > 0 ? Math.log1p(pageViews30d) : 0,
-  };
+  // !IMPORTANT! Always return empty features - Sales & Traffic data is not available
+  // Requires Brand Analytics permissions we don't have
+  return getEmptyTrafficFeatures();
 }
 
 function getEmptyTrafficFeatures() {
@@ -869,6 +820,8 @@ function computeDerivedFeatures(features) {
   }
 
   // Buy Box impact
+  // !IMPORTANT! traffic_buy_box_pct_30d is no longer available (requires Brand Analytics)
+  // This derived feature will always be null now
   if (features.traffic_buy_box_pct_30d && features.sales_velocity_30d) {
     derived.derived_buy_box_sales_correlation = features.traffic_buy_box_pct_30d * features.sales_velocity_30d;
   }

@@ -15,8 +15,10 @@
  * - GENERATE_RECOMMENDATIONS_LISTING: Generates listing recommendations
  * - GENERATE_RECOMMENDATIONS_ASIN: Generates ASIN recommendations
  * - SYNC_AMAZON_OFFER: Syncs listing offers via amazonSync.syncListingOffers()
- * - SYNC_AMAZON_SALES: Syncs sales/traffic via amazonSync.syncSalesAndTraffic()
  * - SYNC_AMAZON_CATALOG: Syncs catalog items via amazonSync.syncCatalogItems()
+ *
+ * !IMPORTANT! SYNC_AMAZON_SALES has been REMOVED - requires Brand Analytics permissions we don't have.
+ * Do NOT re-add this job type or attempt to use GET_SALES_AND_TRAFFIC_REPORT.
  *
  * AMAZON SYNC JOB DETAILS:
  * - If listing_id is set: targeted sync for that listing's ASIN only
@@ -1020,8 +1022,10 @@ async function processComputeFeaturesAsin(job) {
  *
  * IMPLEMENTED JOB TYPES:
  * - SYNC_AMAZON_OFFER   -> calls amazonSync.syncListingOffers()
- * - SYNC_AMAZON_SALES   -> calls amazonSync.syncSalesAndTraffic()
  * - SYNC_AMAZON_CATALOG -> calls amazonSync.syncCatalogItems()
+ *
+ * !IMPORTANT! SYNC_AMAZON_SALES has been REMOVED - requires Brand Analytics permissions.
+ * Do NOT re-add this job type or use GET_SALES_AND_TRAFFIC_REPORT.
  *
  * TARGETED SYNC:
  * - If job.listing_id is set, syncs only that listing's ASIN
@@ -1108,11 +1112,8 @@ async function processSyncAmazon(job) {
         result = await amazonSync.syncListingOffers(syncOptions);
         break;
 
-      case 'SYNC_AMAZON_SALES': {
-        const daysBack = inputJson.daysBack || 30;
-        result = await amazonSync.syncSalesAndTraffic(daysBack, syncOptions);
-        break;
-      }
+      // !IMPORTANT! SYNC_AMAZON_SALES case REMOVED - requires Brand Analytics permissions
+      // Do NOT re-add this case or attempt to use syncSalesAndTraffic()
 
       case 'SYNC_AMAZON_CATALOG':
         result = await amazonSync.syncCatalogItems(syncOptions);
