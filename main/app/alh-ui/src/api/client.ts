@@ -8,6 +8,7 @@
 import axios, { type AxiosInstance, type AxiosError } from 'axios';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
+const API_KEY = import.meta.env.VITE_API_KEY || '';
 
 export interface ApiResponse<T> {
   success: boolean;
@@ -41,6 +42,8 @@ export const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE,
   headers: {
     'Content-Type': 'application/json',
+    // Include API key if configured (required in production)
+    ...(API_KEY && { 'X-API-Key': API_KEY }),
   },
   timeout: 30000,
 });

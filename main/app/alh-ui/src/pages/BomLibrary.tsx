@@ -86,9 +86,13 @@ export function BomLibraryPage() {
   const handleBackup = async (type: 'boms' | 'full') => {
     setIsBackingUp(true);
     try {
+      const apiKey = import.meta.env.VITE_API_KEY;
       const response = await fetch('/api/v2/backup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey && { 'X-API-Key': apiKey }),
+        },
         body: JSON.stringify({ type }),
       });
 
