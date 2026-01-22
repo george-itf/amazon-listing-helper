@@ -252,8 +252,8 @@ export async function registerV2Routes(fastify) {
    */
   fastify.get('/api/v2/listings', async (request, reply) => {
     try {
-      const { status, limit = '100', offset = '0' } = request.query;
-      const parsedLimit = Math.min(parseInt(limit, 10) || 100, 1000);
+      const { status, limit = '1000', offset = '0' } = request.query;
+      const parsedLimit = Math.min(parseInt(limit, 10) || 1000, 5000);
       const parsedOffset = Math.max(parseInt(offset, 10) || 0, 0);
 
       // Try to fetch listings with features in a single query
