@@ -367,6 +367,24 @@ export async function registerV2Routes(fastify) {
           const migrationResult = await runMigrations();
           httpLogger.info(`[API] GET /listings - auto-repair complete, ${migrationResult.migrationsRun} migrations run`);
 
+          // Queue feature computation for all listings (non-blocking)
+          (async () => {
+            try {
+              const listingsResult = await query('SELECT id FROM listings');
+              const listingIds = listingsResult.rows.map(r => r.id);
+              if (listingIds.length > 0) {
+                await query(`
+                  INSERT INTO jobs (job_type, scope_type, listing_id, priority, created_by)
+                  SELECT 'COMPUTE_FEATURES_LISTING', 'LISTING', unnest($1::integer[]), 3, 'auto-repair'
+                  ON CONFLICT DO NOTHING
+                `, [listingIds]);
+                httpLogger.info(`[API] GET /listings - queued feature computation for ${listingIds.length} listings`);
+              }
+            } catch (e) {
+              httpLogger.warn('[API] GET /listings - failed to queue features:', e.message);
+            }
+          })();
+
           // Retry the original query
           const { status, limit = '1000', offset = '0' } = request.query;
           const parsedLimit = Math.min(parseInt(limit, 10) || 1000, 5000);
