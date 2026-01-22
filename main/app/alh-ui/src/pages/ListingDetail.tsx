@@ -174,7 +174,7 @@ export function ListingDetailPage() {
     return bomLines.reduce((total, line) => {
       const component = components.find(c => c.id === line.component_id);
       if (!component) return total;
-      const lineCost = line.quantity * (1 + line.wastage_rate) * component.unit_cost_ex_vat;
+      const lineCost = line.quantity * (1 + line.wastage_rate) * (Number(component.unit_cost_ex_vat) || 0);
       return total + lineCost;
     }, 0);
   };
@@ -347,7 +347,7 @@ export function ListingDetailPage() {
                         <option value={0}>Select component...</option>
                         {components.map(comp => (
                           <option key={comp.id} value={comp.id}>
-                            {comp.component_sku} - {comp.name} (£{comp.unit_cost_ex_vat.toFixed(2)})
+                            {comp.component_sku} - {comp.name} (£{(Number(comp.unit_cost_ex_vat) || 0).toFixed(2)})
                           </option>
                         ))}
                       </select>
@@ -436,7 +436,7 @@ export function ListingDetailPage() {
                         </span>
                       </span>
                       <span className="font-medium">
-                        £{((line.quantity * (1 + line.wastage_rate) * (line.component?.unit_cost_ex_vat || 0))).toFixed(2)}
+                        £{(line.quantity * (1 + line.wastage_rate) * (Number(line.component?.unit_cost_ex_vat) || 0)).toFixed(2)}
                       </span>
                     </div>
                   ))}
