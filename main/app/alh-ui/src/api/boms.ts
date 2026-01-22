@@ -19,10 +19,17 @@ export interface Component {
 
 export interface BomLine {
   id: number;
-  bom_id: number;
+  bom_id?: number;
   component_id: number;
   quantity: number;
   wastage_rate: number;
+  notes?: string | null;
+  // Flattened component fields from backend (not nested)
+  component_sku?: string;
+  component_name?: string;
+  unit_cost_ex_vat?: number;
+  line_cost_ex_vat?: number;
+  // Legacy nested component (kept for backwards compatibility)
   component?: Component;
 }
 

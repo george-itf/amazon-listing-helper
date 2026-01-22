@@ -11,7 +11,6 @@ import {
   getComponents,
   createBom,
   updateBomLines,
-  activateBom,
 } from '../api/boms';
 import type { ListingWithFeatures, EconomicsResponse, Recommendation } from '../types';
 import type { Bom, Component } from '../api/boms';
@@ -135,20 +134,15 @@ export function ListingDetailPage() {
       const id = parseInt(listingId);
 
       if (bom) {
-        // Update existing BOM lines
+        // Update existing BOM lines (creates new version, auto-activated)
         await updateBomLines(bom.id, { lines: validLines });
-        if (!bom.is_active) {
-          await activateBom(bom.id);
-        }
       } else {
-        // Create new BOM
-        const newBom = await createBom({
+        // Create new BOM (createVersion already sets is_active=true)
+        await createBom({
           listing_id: id,
           scope_type: 'LISTING',
           lines: validLines,
         });
-        // Activate the new BOM
-        await activateBom(newBom.id);
       }
 
       setIsBomEditing(false);
@@ -208,8 +202,8 @@ export function ListingDetailPage() {
   return (
     <div>
       <PageHeader
-        title={listing.seller_sku}
-        subtitle={listing.title}
+        title={listing.title || 'Untitled Listing'}
+        subtitle={listing.seller_sku}
         actions={
           <Link to="/listings" className="btn btn-secondary btn-sm">
             Back to Listings
@@ -435,13 +429,13 @@ export function ListingDetailPage() {
                   {bom.lines.map((line) => (
                     <div key={line.id} className="py-2 flex justify-between">
                       <span>
-                        {line.component?.name || `Component #${line.component_id}`}
+                        {line.component_name || line.component?.name || `Component #${line.component_id}`}
                         <span className="text-gray-500 text-sm ml-2">
                           × {line.quantity}{line.wastage_rate > 0 ? ` (+${(line.wastage_rate * 100).toFixed(0)}% wastage)` : ''}
                         </span>
                       </span>
                       <span className="font-medium">
-                        £{(line.quantity * (1 + line.wastage_rate) * (Number(line.component?.unit_cost_ex_vat) || 0)).toFixed(2)}
+                        £{(Number(line.line_cost_ex_vat) || (line.quantity * (1 + line.wastage_rate) * (Number(line.unit_cost_ex_vat) || Number(line.component?.unit_cost_ex_vat) || 0))).toFixed(2)}
                       </span>
                     </div>
                   ))}
