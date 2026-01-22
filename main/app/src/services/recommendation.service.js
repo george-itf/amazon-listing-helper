@@ -716,7 +716,9 @@ export async function getPendingRecommendations(options = {}) {
       paramIndex++;
     }
 
-    params.push(limit);
+    // Ensure limit is a valid number
+    const validLimit = Math.max(1, Math.min(parseInt(limit, 10) || 50, 1000));
+    params.push(validLimit);
 
     const result = await query(`
       SELECT r.*,
@@ -728,7 +730,7 @@ export async function getPendingRecommendations(options = {}) {
       LEFT JOIN listings l ON r.entity_type = 'LISTING' AND l.id = r.entity_id
       LEFT JOIN asin_entities ae ON r.entity_type = 'ASIN' AND ae.id = r.entity_id
       WHERE ${conditions.join(' AND ')}
-      ORDER BY r.confidence DESC, r.generated_at DESC
+      ORDER BY r.confidence_score DESC NULLS LAST, r.generated_at DESC
       LIMIT $${paramIndex}
     `, params);
 
@@ -739,6 +741,13 @@ export async function getPendingRecommendations(options = {}) {
       console.warn('[Recommendations] recommendations table does not exist');
       return [];
     }
+    // Log full error details for debugging
+    console.error('[Recommendations] Error in getPendingRecommendations:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      stack: error.stack
+    });
     throw error;
   }
 }
