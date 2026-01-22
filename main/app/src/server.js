@@ -100,12 +100,14 @@ async function authenticationHook(request, reply) {
   }
 
   if (!validateApiKey(request)) {
+    // Send 401 Unauthorized response and stop execution
+    // Note: After .send(), we should NOT return reply - just return void
     reply.code(401).send({
       success: false,
       error: 'Unauthorized',
       message: 'Valid API key required. Use Authorization: Bearer <key> or X-API-Key header.',
     });
-    return reply;
+    return;  // Just return - don't return reply after send()
   }
 }
 
@@ -220,7 +222,7 @@ await fastify.register(rateLimit, {
 // 4. API Key Authentication Hook (for /api/v2/* routes)
 fastify.addHook('onRequest', async (request, reply) => {
   if (request.url.startsWith('/api/v2/')) {
-    return authenticationHook(request, reply);
+    await authenticationHook(request, reply);
   }
 });
 
