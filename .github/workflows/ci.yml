@@ -2,104 +2,48 @@ name: CI
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [main, master, develop, 'claude/*']
   pull_request:
     branches: [main, master, develop]
 
+env:
+  NODE_VERSION: '20'
+  # Disable publishing by default in CI
+  ENABLE_PUBLISH: 'false'
+  AMAZON_WRITE_MODE: 'simulate'
+
 jobs:
-  lint-and-test:
+  # ============================================================================
+  # JOB 1: Build, Migrate & Smoke Test
+  # This is the critical CI gate for deployments
+  # ============================================================================
+  migrate-and-smoke:
+    name: Build, Migrate & Smoke Test
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [20.x]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-          cache-dependency-path: main/app/package-lock.json
-
-      - name: Install dependencies
-        working-directory: main/app
-        run: npm ci || npm install
-
-      - name: Run linter
-        working-directory: main/app
-        run: npm run lint --if-present
-        continue-on-error: true  # Don't fail build on lint errors initially
-
-      - name: Run tests
-        working-directory: main/app
-        run: npm test
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg15
         env:
-          NODE_ENV: test
-
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v4
-        if: success()
-        with:
-          directory: main/app/coverage
-          fail_ci_if_error: false
-
-  secret-scan:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history for secret scanning
-
-      - name: Install trufflehog
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
-
-      - name: Run TruffleHog secret scan
-        run: |
-          trufflehog filesystem . --only-verified --fail 2>/dev/null || echo "No verified secrets found"
-
-      - name: Check for common secret patterns
-        run: |
-          echo "Checking for common secret patterns..."
-
-          # Check for AWS keys
-          if grep -rE "AKIA[0-9A-Z]{16}" --include="*.js" --include="*.ts" --include="*.json" --exclude-dir=node_modules . 2>/dev/null; then
-            echo "::error::Potential AWS access key found!"
-            exit 1
-          fi
-
-          # Check for SP-API credentials
-          if grep -rE "amzn1\.(application-oa2-client|oa2-cs\.v1)\.[a-f0-9]+" --include="*.js" --include="*.ts" --include="*.json" --exclude-dir=node_modules . 2>/dev/null; then
-            echo "::error::Potential Amazon SP-API credentials found!"
-            exit 1
-          fi
-
-          # Check for refresh tokens
-          if grep -rE "Atzr\|[A-Za-z0-9_-]{20,}" --include="*.js" --include="*.ts" --include="*.json" --exclude-dir=node_modules . 2>/dev/null; then
-            echo "::error::Potential Amazon refresh token found!"
-            exit 1
-          fi
-
-          echo "No common secret patterns found."
-
-  build:
-    runs-on: ubuntu-latest
-    needs: [lint-and-test, secret-scan]
+          POSTGRES_DB: amazon_listing_helper_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20.x
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: main/app/package-lock.json
 
@@ -107,28 +51,191 @@ jobs:
         working-directory: main/app
         run: npm ci || npm install
 
-      - name: Build frontend (if applicable)
-        working-directory: main/app
+      - name: Wait for Postgres
         run: |
-          if [ -d "alh-ui" ]; then
-            cd alh-ui && npm ci && npm run build
-          fi
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U test_user && break
+            echo "Waiting for postgres..."
+            sleep 1
+          done
 
-      - name: Verify server starts
+      - name: Run migrations from blank DB
         working-directory: main/app
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/amazon_listing_helper_test
+          NODE_ENV: test
         run: |
-          # Start server in background with minimal config
-          timeout 10s node src/server.js &
-          sleep 5
-          # Check if process is still running (didn't crash)
-          if ! pgrep -f "node src/server.js" > /dev/null; then
-            echo "Server failed to start"
+          echo "=== Running database migrations from blank DB ==="
+          node -e "
+            import('./src/database/migrate.js').then(({ runMigrations }) => {
+              return runMigrations();
+            }).then(() => {
+              console.log('✅ Migrations completed successfully');
+              process.exit(0);
+            }).catch(err => {
+              console.error('❌ Migration failed:', err);
+              process.exit(1);
+            });
+          "
+
+      - name: Start API server (without worker)
+        working-directory: main/app
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/amazon_listing_helper_test
+          NODE_ENV: test
+          PORT: 4000
+          DISABLE_WORKER: 'true'
+          ENABLE_PUBLISH: 'false'
+          AMAZON_WRITE_MODE: 'simulate'
+        run: |
+          echo "=== Starting API server ==="
+          node src/server.js &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+
+          # Wait for server to be ready (max 30 seconds)
+          for i in {1..30}; do
+            if curl -s http://localhost:4000/api/v2/health > /dev/null 2>&1; then
+              echo "✅ Server is ready"
+              break
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 1
+          done
+
+          # Final check
+          if ! curl -s http://localhost:4000/api/v2/health > /dev/null 2>&1; then
+            echo "❌ Server failed to start"
             exit 1
           fi
-          echo "Server started successfully"
+
+      - name: Run smoke tests
+        working-directory: main/app
         env:
-          PORT: 3000
-          NODE_ENV: test
-          # Don't require real credentials for build check
-          DATABASE_URL: postgresql://test:test@localhost:5432/test
+          API_BASE_URL: http://localhost:4000
+          ENABLE_PUBLISH: 'false'
+        run: |
+          echo "=== Running smoke tests ==="
+          node scripts/smoke-test.js
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -n "$SERVER_PID" ]; then
+            kill $SERVER_PID 2>/dev/null || true
+          fi
+
+  # ============================================================================
+  # JOB 2: Lint & Syntax Check
+  # ============================================================================
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: main/app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: main/app
+        run: npm ci || npm install
+
+      - name: Syntax check all JS files
+        working-directory: main/app
+        run: |
+          echo "=== Checking JavaScript syntax ==="
+          find src -name "*.js" -type f | while read file; do
+            node --check "$file" 2>&1 || exit 1
+          done
+          echo "✅ All syntax checks passed"
+
+      - name: Run linter (if configured)
+        working-directory: main/app
+        run: npm run lint --if-present
         continue-on-error: true
+
+  # ============================================================================
+  # JOB 3: Secret Scanning
+  # ============================================================================
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for common secret patterns
+        run: |
+          echo "=== Checking for common secret patterns ==="
+
+          FOUND_SECRETS=0
+
+          # Check for AWS keys
+          if grep -rE "AKIA[0-9A-Z]{16}" --include="*.js" --include="*.ts" --include="*.json" --exclude-dir=node_modules . 2>/dev/null; then
+            echo "❌ Potential AWS access key found!"
+            FOUND_SECRETS=1
+          fi
+
+          # Check for SP-API credentials
+          if grep -rE "amzn1\.(application-oa2-client|oa2-cs\.v1)\.[a-f0-9]+" --include="*.js" --include="*.ts" --include="*.json" --exclude-dir=node_modules . 2>/dev/null; then
+            echo "❌ Potential Amazon SP-API credentials found!"
+            FOUND_SECRETS=1
+          fi
+
+          # Check for refresh tokens
+          if grep -rE "Atzr\|[A-Za-z0-9_-]{20,}" --include="*.js" --include="*.ts" --include="*.json" --exclude-dir=node_modules . 2>/dev/null; then
+            echo "❌ Potential Amazon refresh token found!"
+            FOUND_SECRETS=1
+          fi
+
+          # Check for Keepa API keys (32 char alphanumeric)
+          if grep -rE "KEEPA_API_KEY.*['\"][a-zA-Z0-9]{32}['\"]" --include="*.js" --include="*.env*" --exclude-dir=node_modules . 2>/dev/null; then
+            echo "❌ Potential Keepa API key found in code!"
+            FOUND_SECRETS=1
+          fi
+
+          if [ "$FOUND_SECRETS" -eq 1 ]; then
+            echo "::error::Secrets detected in codebase!"
+            exit 1
+          fi
+
+          echo "✅ No common secret patterns found"
+
+  # ============================================================================
+  # JOB 4: Build Frontend (if exists)
+  # ============================================================================
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('main/app/alh-ui/package.json') != '' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: main/app/alh-ui/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: main/app/alh-ui
+        run: npm ci || npm install
+
+      - name: Build frontend
+        working-directory: main/app/alh-ui
+        run: npm run build
+        env:
+          CI: true

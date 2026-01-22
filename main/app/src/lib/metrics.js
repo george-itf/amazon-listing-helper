@@ -146,6 +146,51 @@ export const tokenExpirySeconds = new client.Gauge({
 });
 
 // ============================================================================
+// HTTP REQUEST METRICS
+// ============================================================================
+
+export const httpRequestDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'route', 'status_code'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [register],
+});
+
+export const httpRequestsTotal = new client.Counter({
+  name: 'http_requests_total',
+  help: 'Total number of HTTP requests',
+  labelNames: ['method', 'route', 'status_code'],
+  registers: [register],
+});
+
+// ============================================================================
+// PUBLISH OPERATION METRICS
+// ============================================================================
+
+export const publishOperations = new client.Counter({
+  name: 'publish_operations_total',
+  help: 'Total number of publish operations',
+  labelNames: ['type', 'outcome', 'write_mode'],
+  registers: [register],
+});
+
+export const publishLatency = new client.Histogram({
+  name: 'publish_latency_seconds',
+  help: 'Publish operation latency in seconds',
+  labelNames: ['type', 'outcome'],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
+  registers: [register],
+});
+
+export const spApiWriteFailures = new client.Counter({
+  name: 'spapi_write_failures_total',
+  help: 'Total number of SP-API write operation failures',
+  labelNames: ['type', 'error_code'],
+  registers: [register],
+});
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
@@ -253,6 +298,44 @@ export function updateTokenExpiry(expiresInSeconds) {
 }
 
 /**
+ * Record an HTTP request
+ * @param {Object} opts - Options
+ * @param {string} opts.method - HTTP method (GET, POST, etc.)
+ * @param {string} opts.route - Route pattern (e.g., '/api/v2/listings')
+ * @param {number} opts.statusCode - HTTP status code
+ * @param {number} opts.durationMs - Duration in milliseconds
+ */
+export function recordHttpRequest(opts) {
+  const { method, route, statusCode, durationMs } = opts;
+
+  httpRequestsTotal.inc({ method, route, status_code: statusCode });
+  httpRequestDuration.observe({ method, route, status_code: statusCode }, durationMs / 1000);
+}
+
+/**
+ * Record a publish operation
+ * @param {Object} opts - Options
+ * @param {string} opts.type - Publish type ('price' or 'stock')
+ * @param {string} opts.outcome - Outcome ('success', 'failure', 'simulated', 'blocked')
+ * @param {string} opts.writeMode - Write mode ('simulate' or 'live')
+ * @param {number} [opts.durationMs] - Duration in milliseconds
+ * @param {string} [opts.errorCode] - Error code if failed
+ */
+export function recordPublishOperation(opts) {
+  const { type, outcome, writeMode, durationMs, errorCode } = opts;
+
+  publishOperations.inc({ type, outcome, write_mode: writeMode });
+
+  if (durationMs !== undefined) {
+    publishLatency.observe({ type, outcome }, durationMs / 1000);
+  }
+
+  if (outcome === 'failure' && errorCode) {
+    spApiWriteFailures.inc({ type, error_code: errorCode });
+  }
+}
+
+/**
  * Get the metrics registry
  * @returns {client.Registry} Prometheus registry
  */
@@ -294,6 +377,11 @@ export default {
   jobRetries,
   jobQueueLength,
   tokenExpirySeconds,
+  httpRequestDuration,
+  httpRequestsTotal,
+  publishOperations,
+  publishLatency,
+  spApiWriteFailures,
   // Helpers
   recordKeepaCall,
   recordSpApiCall,
@@ -301,6 +389,8 @@ export default {
   updateJobQueueLength,
   recordFeedStatus,
   updateTokenExpiry,
+  recordHttpRequest,
+  recordPublishOperation,
   getRegistry,
   getMetrics,
   getContentType,

@@ -1,7 +1,7 @@
 /**
  * CredentialsProvider Module
  *
- * Single source of truth for all credential access.
+ * Single source of truth for all credential access and publish mode configuration.
  * SECURITY: Only loads credentials from environment variables.
  * Never reads from disk files to prevent accidental secret exposure.
  *
@@ -14,6 +14,17 @@
  *
  * Required for Keepa:
  *   - KEEPA_API_KEY
+ *
+ * Publish Mode Configuration:
+ *   - ENABLE_PUBLISH: Set to 'true' to allow publish operations (default: false)
+ *   - AMAZON_WRITE_MODE: 'simulate' or 'live' (default: 'simulate')
+ *
+ * Publish behavior matrix:
+ *   | ENABLE_PUBLISH | AMAZON_WRITE_MODE | Behavior                           |
+ *   |----------------|-------------------|------------------------------------|
+ *   | false          | any               | Publish blocked with safe error    |
+ *   | true           | simulate          | Validation + logging, no SP-API    |
+ *   | true           | live              | Full SP-API write operations       |
  *
  * @module CredentialsProvider
  */
@@ -266,6 +277,104 @@ export function validateCredentials({ requireSpApi = false, requireKeepa = false
   }
 }
 
+// ============================================================================
+// PUBLISH MODE CONFIGURATION
+// ============================================================================
+
+/**
+ * Write mode enum values
+ * @readonly
+ * @enum {string}
+ */
+export const WRITE_MODE = {
+  SIMULATE: 'simulate',
+  LIVE: 'live',
+};
+
+/**
+ * Check if publishing is enabled
+ * @returns {boolean} True if ENABLE_PUBLISH=true
+ */
+export function isPublishEnabled() {
+  return process.env.ENABLE_PUBLISH === 'true';
+}
+
+/**
+ * Get the Amazon write mode
+ * @returns {string} 'simulate' or 'live'
+ */
+export function getWriteMode() {
+  const mode = process.env.AMAZON_WRITE_MODE?.toLowerCase();
+  if (mode === 'live') {
+    return WRITE_MODE.LIVE;
+  }
+  return WRITE_MODE.SIMULATE;
+}
+
+/**
+ * Check if we should execute actual SP-API write operations
+ * Returns true only if ENABLE_PUBLISH=true AND AMAZON_WRITE_MODE=live
+ * @returns {boolean}
+ */
+export function shouldExecuteSpApiWrites() {
+  return isPublishEnabled() && getWriteMode() === WRITE_MODE.LIVE;
+}
+
+/**
+ * Get publish configuration for responses
+ * Returns an object that should be included in all publish-related responses
+ * @returns {Object} Publish configuration status
+ */
+export function getPublishConfig() {
+  const enabled = isPublishEnabled();
+  const writeMode = getWriteMode();
+  return {
+    publish_enabled: enabled,
+    write_mode: writeMode,
+    will_execute_writes: enabled && writeMode === WRITE_MODE.LIVE,
+  };
+}
+
+/**
+ * Validate publish operation is allowed
+ * Throws an error if publishing is not enabled
+ * @param {string} operation - Name of the operation for error message
+ * @throws {Error} If ENABLE_PUBLISH is not true
+ */
+export function requirePublishEnabled(operation = 'publish') {
+  if (!isPublishEnabled()) {
+    const error = new Error(
+      `Publish operation '${operation}' blocked: ENABLE_PUBLISH is not set to 'true'. ` +
+      `This is a safety feature. Set ENABLE_PUBLISH=true in your environment to allow publish operations.`
+    );
+    error.code = 'PUBLISH_DISABLED';
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
+/**
+ * Get comprehensive publish status (for health checks and diagnostics)
+ * @returns {Object} Full publish configuration status
+ */
+export function getPublishStatus() {
+  const enabled = isPublishEnabled();
+  const writeMode = getWriteMode();
+  const hasCredentials = hasSpApiCredentials();
+
+  return {
+    enabled,
+    write_mode: writeMode,
+    will_execute_writes: enabled && writeMode === WRITE_MODE.LIVE,
+    has_sp_api_credentials: hasCredentials,
+    ready_for_live: enabled && writeMode === WRITE_MODE.LIVE && hasCredentials,
+    configuration: {
+      ENABLE_PUBLISH: process.env.ENABLE_PUBLISH || '(not set)',
+      AMAZON_WRITE_MODE: process.env.AMAZON_WRITE_MODE || '(not set, defaults to simulate)',
+    },
+  };
+}
+
 export default {
   getSpApiCredentials,
   getSpApiCredentialsRequired,
@@ -279,4 +388,12 @@ export default {
   getSellerId,
   clearCredentialsCache,
   validateCredentials,
+  // Publish mode exports
+  WRITE_MODE,
+  isPublishEnabled,
+  getWriteMode,
+  shouldExecuteSpApiWrites,
+  getPublishConfig,
+  requirePublishEnabled,
+  getPublishStatus,
 };

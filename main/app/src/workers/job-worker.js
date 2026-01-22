@@ -14,14 +14,18 @@
  * - COMPUTE_FEATURES_ASIN: Computes and stores ASIN features
  * - GENERATE_RECOMMENDATIONS_LISTING: Generates listing recommendations
  * - GENERATE_RECOMMENDATIONS_ASIN: Generates ASIN recommendations
+ * - SYNC_AMAZON_OFFER: Syncs listing offers via amazonSync.syncListingOffers()
+ * - SYNC_AMAZON_SALES: Syncs sales/traffic via amazonSync.syncSalesAndTraffic()
+ * - SYNC_AMAZON_CATALOG: Syncs catalog items via amazonSync.syncCatalogItems()
  *
- * STUBBED (returns simulated success):
- * - SYNC_AMAZON_OFFER: Would sync offer data from SP-API (not yet implemented)
- * - SYNC_AMAZON_SALES: Would sync sales data from SP-API (not yet implemented)
- * - SYNC_AMAZON_CATALOG: Would sync catalog data from SP-API (not yet implemented)
+ * AMAZON SYNC JOB DETAILS:
+ * - If listing_id is set: targeted sync for that listing's ASIN only
+ * - If input_json.asins is set: targeted sync for those specific ASINs
+ * - Otherwise: global sync for all ASINs in listings table
+ * - With no SP-API credentials: returns simulated success (no throw)
  *
  * DEVELOPMENT MODE:
- * - If SP-API credentials are not configured, PUBLISH_* jobs return simulated success
+ * - If SP-API credentials are not configured, sync and publish jobs return simulated success
  * - This allows local development without Amazon seller account
  *
  * @module JobWorker
@@ -29,9 +33,24 @@
 
 import { query, transaction } from '../database/connection.js';
 import * as jobRepo from '../repositories/job.repository.js';
-import { hasSpApiCredentials, getSpApiClientConfig, getSellerId, getDefaultMarketplaceId } from '../credentials-provider.js';
+import {
+  hasSpApiCredentials,
+  getSpApiClientConfig,
+  getSellerId,
+  getDefaultMarketplaceId,
+  isPublishEnabled,
+  getWriteMode,
+  shouldExecuteSpApiWrites,
+  getPublishConfig,
+  WRITE_MODE,
+} from '../credentials-provider.js';
 import SellingPartner from 'amazon-sp-api';
 import { workerLogger, logJobEvent } from '../lib/logger.js';
+import {
+  recordPricePublishAudit,
+  recordStockPublishAudit,
+  AUDIT_OUTCOME,
+} from '../services/audit.service.js';
 import { recordJobEvent, updateJobQueueLength } from '../lib/metrics.js';
 import { captureException } from '../lib/sentry.js';
 
@@ -104,6 +123,12 @@ async function processJob(job) {
 
 /**
  * Process PUBLISH_PRICE_CHANGE job
+ *
+ * Respects publish mode configuration:
+ * - ENABLE_PUBLISH=false: Returns error, no changes made
+ * - ENABLE_PUBLISH=true, AMAZON_WRITE_MODE=simulate: Validates and logs, updates local DB only
+ * - ENABLE_PUBLISH=true, AMAZON_WRITE_MODE=live: Full SP-API write + local DB update
+ *
  * @param {Object} job
  * @returns {Promise<Object>}
  */
@@ -111,11 +136,31 @@ async function processPriceChange(job) {
   const input = job.input_json;
   const listingId = job.listing_id;
   const newPrice = input.price_inc_vat;
-  const listingEventId = input.listing_event_id;
+  const publishConfig = getPublishConfig();
+  const writeMode = getWriteMode();
 
-  workerLogger.info({ listingId, newPrice }, 'Publishing price change');
+  workerLogger.info({
+    listingId,
+    newPrice,
+    publishEnabled: publishConfig.publish_enabled,
+    writeMode,
+  }, 'Processing price change job');
 
-  // Update listing_event to PUBLISHED (safe - may not exist)
+  // GATE 1: Check if publishing is enabled
+  if (!isPublishEnabled()) {
+    workerLogger.warn({ listingId }, 'Price change blocked: ENABLE_PUBLISH is not true');
+    return {
+      success: false,
+      error: 'PUBLISH_DISABLED',
+      message: 'Publishing is disabled. Set ENABLE_PUBLISH=true to allow publish operations.',
+      ...publishConfig,
+      publish_attempted: false,
+      publish_succeeded: false,
+      new_price: newPrice,
+    };
+  }
+
+  // Record the publish attempt event
   await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'PRICE_CHANGE_PUBLISHED', $2, $3, $4, $5, 'worker')
@@ -123,31 +168,77 @@ async function processPriceChange(job) {
     listingId,
     job.id,
     JSON.stringify({ price_inc_vat: input.previous_price_inc_vat }),
-    JSON.stringify({ price_inc_vat: newPrice }),
+    JSON.stringify({ price_inc_vat: newPrice, write_mode: writeMode }),
     input.reason,
   ], 'record_price_published');
 
-  // Check if we have SP-API credentials
-  if (!hasSpApiCredentials()) {
-    // STUB: No credentials, simulate success for development
-    workerLogger.warn('No SP-API credentials - simulating success');
+  // GATE 2: Check write mode - simulate vs live
+  if (writeMode === WRITE_MODE.SIMULATE) {
+    workerLogger.info({ listingId, newPrice }, 'Price change in SIMULATE mode - updating local DB only');
 
-    // Update local database
+    const startTime = Date.now();
+
+    // Update local database (simulated)
     await updateListingPrice(listingId, newPrice);
 
     // Record success event
     await recordPriceChangeSuccess(listingId, job.id, input);
 
+    // Record audit event
+    await recordPricePublishAudit({
+      listingId,
+      previousPrice: input.previous_price_inc_vat,
+      newPrice,
+      outcome: AUDIT_OUTCOME.SIMULATED,
+      actorType: 'worker',
+      correlationId: input.correlation_id,
+      spApiCalled: false,
+      durationMs: Date.now() - startTime,
+    });
+
     return {
       success: true,
+      ...publishConfig,
+      publish_attempted: false,
+      publish_succeeded: false,
       simulated: true,
-      message: 'Price change simulated (no SP-API credentials)',
+      message: 'Price change simulated (AMAZON_WRITE_MODE=simulate). Local DB updated, SP-API not called.',
       new_price: newPrice,
     };
   }
 
-  // TODO: Implement actual SP-API call
-  // For now, we'll update local database and mark as success
+  // GATE 3: Check SP-API credentials for live mode
+  if (!hasSpApiCredentials()) {
+    workerLogger.warn({ listingId }, 'Price change blocked: AMAZON_WRITE_MODE=live but no SP-API credentials');
+
+    // Record blocked audit event
+    await recordPricePublishAudit({
+      listingId,
+      previousPrice: input.previous_price_inc_vat,
+      newPrice,
+      outcome: AUDIT_OUTCOME.BLOCKED,
+      actorType: 'worker',
+      correlationId: input.correlation_id,
+      spApiCalled: false,
+      errorCode: 'NO_CREDENTIALS',
+      errorMessage: 'SP-API credentials not configured',
+    });
+
+    return {
+      success: false,
+      error: 'NO_CREDENTIALS',
+      message: 'Cannot execute live publish: SP-API credentials not configured.',
+      ...publishConfig,
+      publish_attempted: false,
+      publish_succeeded: false,
+      new_price: newPrice,
+    };
+  }
+
+  // LIVE MODE: Execute actual SP-API call
+  workerLogger.info({ listingId, newPrice }, 'Executing LIVE price change via SP-API');
+  const startTime = Date.now();
+
   try {
     // Call SP-API to update price
     const spApiResult = await callSpApiUpdatePrice(listingId, newPrice);
@@ -158,20 +249,65 @@ async function processPriceChange(job) {
     // Record success event
     await recordPriceChangeSuccess(listingId, job.id, input);
 
+    // Record audit event
+    await recordPricePublishAudit({
+      listingId,
+      previousPrice: input.previous_price_inc_vat,
+      newPrice,
+      outcome: AUDIT_OUTCOME.SUCCESS,
+      actorType: 'worker',
+      correlationId: input.correlation_id,
+      spApiCalled: true,
+      spApiResponse: spApiResult,
+      durationMs: Date.now() - startTime,
+    });
+
     return {
       success: true,
+      ...publishConfig,
+      publish_attempted: true,
+      publish_succeeded: true,
       sp_api_response: spApiResult,
       new_price: newPrice,
     };
   } catch (error) {
     // Record failure event
     await recordPriceChangeFailure(listingId, job.id, input, error.message);
-    throw error;
+
+    // Record audit event
+    await recordPricePublishAudit({
+      listingId,
+      previousPrice: input.previous_price_inc_vat,
+      newPrice,
+      outcome: AUDIT_OUTCOME.FAILURE,
+      actorType: 'worker',
+      correlationId: input.correlation_id,
+      spApiCalled: true,
+      errorCode: error.code || 'SP_API_ERROR',
+      errorMessage: error.message,
+      durationMs: Date.now() - startTime,
+    });
+
+    // Return structured error instead of throwing
+    return {
+      success: false,
+      ...publishConfig,
+      publish_attempted: true,
+      publish_succeeded: false,
+      error: error.message,
+      new_price: newPrice,
+    };
   }
 }
 
 /**
  * Process PUBLISH_STOCK_CHANGE job
+ *
+ * Respects publish mode configuration:
+ * - ENABLE_PUBLISH=false: Returns error, no changes made
+ * - ENABLE_PUBLISH=true, AMAZON_WRITE_MODE=simulate: Validates and logs, updates local DB only
+ * - ENABLE_PUBLISH=true, AMAZON_WRITE_MODE=live: Full SP-API write + local DB update
+ *
  * @param {Object} job
  * @returns {Promise<Object>}
  */
@@ -179,11 +315,31 @@ async function processStockChange(job) {
   const input = job.input_json;
   const listingId = job.listing_id;
   const newQuantity = input.available_quantity;
-  const listingEventId = input.listing_event_id;
+  const publishConfig = getPublishConfig();
+  const writeMode = getWriteMode();
 
-  workerLogger.info(` Publishing stock change for listing ${listingId}: ${newQuantity} units`);
+  workerLogger.info({
+    listingId,
+    newQuantity,
+    publishEnabled: publishConfig.publish_enabled,
+    writeMode,
+  }, 'Processing stock change job');
 
-  // Update listing_event to PUBLISHED (safe - may not exist)
+  // GATE 1: Check if publishing is enabled
+  if (!isPublishEnabled()) {
+    workerLogger.warn({ listingId }, 'Stock change blocked: ENABLE_PUBLISH is not true');
+    return {
+      success: false,
+      error: 'PUBLISH_DISABLED',
+      message: 'Publishing is disabled. Set ENABLE_PUBLISH=true to allow publish operations.',
+      ...publishConfig,
+      publish_attempted: false,
+      publish_succeeded: false,
+      new_quantity: newQuantity,
+    };
+  }
+
+  // Record the publish attempt event
   await safeQuery(`
     INSERT INTO listing_events (listing_id, event_type, job_id, before_json, after_json, reason, created_by)
     VALUES ($1, 'STOCK_CHANGE_PUBLISHED', $2, $3, $4, $5, 'worker')
@@ -191,30 +347,74 @@ async function processStockChange(job) {
     listingId,
     job.id,
     JSON.stringify({ available_quantity: input.previous_quantity }),
-    JSON.stringify({ available_quantity: newQuantity }),
+    JSON.stringify({ available_quantity: newQuantity, write_mode: writeMode }),
     input.reason,
   ], 'record_stock_published');
 
-  // Check if we have SP-API credentials
-  if (!hasSpApiCredentials()) {
-    // STUB: No credentials, simulate success for development
-    workerLogger.warn('No SP-API credentials - simulating success');
+  // GATE 2: Check write mode - simulate vs live
+  if (writeMode === WRITE_MODE.SIMULATE) {
+    workerLogger.info({ listingId, newQuantity }, 'Stock change in SIMULATE mode - updating local DB only');
+    const startTime = Date.now();
 
-    // Update local database
+    // Update local database (simulated)
     await updateListingStock(listingId, newQuantity);
 
     // Record success event
     await recordStockChangeSuccess(listingId, job.id, input);
 
+    // Record audit event
+    await recordStockPublishAudit({
+      listingId,
+      previousQuantity: input.previous_quantity,
+      newQuantity,
+      outcome: AUDIT_OUTCOME.SIMULATED,
+      actorType: 'worker',
+      spApiCalled: false,
+      durationMs: Date.now() - startTime,
+    });
+
     return {
       success: true,
+      ...publishConfig,
+      publish_attempted: false,
+      publish_succeeded: false,
       simulated: true,
-      message: 'Stock change simulated (no SP-API credentials)',
+      message: 'Stock change simulated (AMAZON_WRITE_MODE=simulate). Local DB updated, SP-API not called.',
       new_quantity: newQuantity,
     };
   }
 
-  // TODO: Implement actual SP-API call
+  // GATE 3: Check SP-API credentials for live mode
+  if (!hasSpApiCredentials()) {
+    workerLogger.warn({ listingId }, 'Stock change blocked: AMAZON_WRITE_MODE=live but no SP-API credentials');
+
+    // Record blocked audit event
+    await recordStockPublishAudit({
+      listingId,
+      previousQuantity: input.previous_quantity,
+      newQuantity,
+      outcome: AUDIT_OUTCOME.BLOCKED,
+      actorType: 'worker',
+      spApiCalled: false,
+      errorCode: 'NO_CREDENTIALS',
+      errorMessage: 'SP-API credentials not configured',
+    });
+
+    return {
+      success: false,
+      error: 'NO_CREDENTIALS',
+      message: 'Cannot execute live publish: SP-API credentials not configured.',
+      ...publishConfig,
+      publish_attempted: false,
+      publish_succeeded: false,
+      new_quantity: newQuantity,
+    };
+  }
+
+  // LIVE MODE: Execute actual SP-API call
+  workerLogger.info({ listingId, newQuantity }, 'Executing LIVE stock change via SP-API');
+  const startTime = Date.now();
+
   try {
     // Call SP-API to update inventory
     const spApiResult = await callSpApiUpdateInventory(listingId, newQuantity);
@@ -225,15 +425,51 @@ async function processStockChange(job) {
     // Record success event
     await recordStockChangeSuccess(listingId, job.id, input);
 
+    // Record audit event
+    await recordStockPublishAudit({
+      listingId,
+      previousQuantity: input.previous_quantity,
+      newQuantity,
+      outcome: AUDIT_OUTCOME.SUCCESS,
+      actorType: 'worker',
+      spApiCalled: true,
+      spApiResponse: spApiResult,
+      durationMs: Date.now() - startTime,
+    });
+
     return {
       success: true,
+      ...publishConfig,
+      publish_attempted: true,
+      publish_succeeded: true,
       sp_api_response: spApiResult,
       new_quantity: newQuantity,
     };
   } catch (error) {
     // Record failure event
     await recordStockChangeFailure(listingId, job.id, input, error.message);
-    throw error;
+
+    // Record audit event
+    await recordStockPublishAudit({
+      listingId,
+      previousQuantity: input.previous_quantity,
+      newQuantity,
+      outcome: AUDIT_OUTCOME.FAILURE,
+      actorType: 'worker',
+      spApiCalled: true,
+      errorCode: error.code || 'SP_API_ERROR',
+      errorMessage: error.message,
+      durationMs: Date.now() - startTime,
+    });
+
+    return {
+      success: false,
+      ...publishConfig,
+      publish_attempted: true,
+      publish_succeeded: false,
+      error: error.message,
+      new_quantity: newQuantity,
+    };
   }
 }
 
@@ -746,56 +982,129 @@ async function processComputeFeaturesAsin(job) {
 }
 
 /**
- * Process SYNC_AMAZON_* jobs (stub implementation)
- * @param {Object} job
- * @returns {Promise<Object>}
+ * Process SYNC_AMAZON_* jobs
+ *
+ * IMPLEMENTED JOB TYPES:
+ * - SYNC_AMAZON_OFFER   -> calls amazonSync.syncListingOffers()
+ * - SYNC_AMAZON_SALES   -> calls amazonSync.syncSalesAndTraffic()
+ * - SYNC_AMAZON_CATALOG -> calls amazonSync.syncCatalogItems()
+ *
+ * TARGETED SYNC:
+ * - If job.listing_id is set, syncs only that listing's ASIN
+ * - If job.input_json.asins is set (array), syncs those ASINs
+ * - Otherwise, runs global sync (all ASINs)
+ *
+ * @param {Object} job - The job object
+ * @returns {Promise<Object>} Sync result
  */
 async function processSyncAmazon(job) {
   const listingId = job.listing_id;
   const jobType = job.job_type;
+  const inputJson = job.input_json || {};
+  const startTime = Date.now();
 
-  workerLogger.info(` Processing ${jobType} for listing ${listingId}`);
+  workerLogger.info(`[SyncAmazon] Processing ${jobType} (job_id=${job.id}, listing_id=${listingId || 'none'})`);
 
-  // Check if we have SP-API credentials
+  // GATE 1: Check if we have SP-API credentials
   if (!hasSpApiCredentials()) {
-    workerLogger.info(` No SP-API credentials - simulating ${jobType}`);
+    workerLogger.info(`[SyncAmazon] No SP-API credentials - simulating ${jobType}`);
     return {
       success: true,
       simulated: true,
-      message: `${jobType} simulated (no SP-API credentials)`,
+      message: `${jobType} simulated (no SP-API credentials configured)`,
     };
   }
 
-  // TODO: Implement actual SP-API calls
-  // For now, return success with simulation flag
-  switch (jobType) {
-    case 'SYNC_AMAZON_OFFER':
-      // Would call SP-API to get current offer data
-      return {
-        success: true,
-        simulated: true,
-        message: 'Offer sync not yet implemented',
-      };
+  // Dynamically import amazon-data-sync (same pattern as routes)
+  const amazonSync = await import('../amazon-data-sync.js');
 
-    case 'SYNC_AMAZON_SALES':
-      // Would call SP-API to get sales data
-      return {
-        success: true,
-        simulated: true,
-        message: 'Sales sync not yet implemented',
-      };
+  // Ensure required tables exist
+  await amazonSync.ensureTables();
 
-    case 'SYNC_AMAZON_CATALOG':
-      // Would call SP-API to get catalog data
-      return {
-        success: true,
-        simulated: true,
-        message: 'Catalog sync not yet implemented',
-      };
+  // Determine target ASINs for targeted sync
+  let targetAsins = null;
 
-    default:
-      throw new Error(`Unknown Amazon sync type: ${jobType}`);
+  // Priority 1: Explicit ASINs in input_json
+  if (inputJson.asins && Array.isArray(inputJson.asins) && inputJson.asins.length > 0) {
+    targetAsins = [...new Set(inputJson.asins.filter(Boolean))];
+    workerLogger.info(`[SyncAmazon] Using ${targetAsins.length} ASIN(s) from input_json`);
   }
+  // Priority 2: Look up ASIN from listing_id
+  else if (listingId) {
+    const listingResult = await safeQuery(
+      'SELECT asin FROM listings WHERE id = $1',
+      [listingId],
+      'get_listing_asin'
+    );
+
+    if (!listingResult || listingResult.rows.length === 0) {
+      workerLogger.info(`[SyncAmazon] Listing ${listingId} not found - skipping`);
+      return {
+        success: true,
+        skipped: true,
+        message: `Listing ${listingId} not found; nothing to sync`,
+      };
+    }
+
+    const asin = listingResult.rows[0].asin;
+    if (!asin) {
+      workerLogger.info(`[SyncAmazon] Listing ${listingId} has no ASIN - skipping`);
+      return {
+        success: true,
+        skipped: true,
+        message: `Listing ${listingId} has no ASIN; nothing to sync`,
+      };
+    }
+
+    targetAsins = [asin];
+    workerLogger.info(`[SyncAmazon] Targeting ASIN ${asin} from listing ${listingId}`);
+  }
+
+  // Build options for targeted sync
+  const syncOptions = targetAsins ? { asins: targetAsins } : {};
+  const syncMode = targetAsins ? 'targeted' : 'global';
+
+  workerLogger.info(`[SyncAmazon] Executing ${jobType} in ${syncMode} mode...`);
+
+  let result;
+
+  try {
+    switch (jobType) {
+      case 'SYNC_AMAZON_OFFER':
+        result = await amazonSync.syncListingOffers(syncOptions);
+        break;
+
+      case 'SYNC_AMAZON_SALES': {
+        const daysBack = inputJson.daysBack || 30;
+        result = await amazonSync.syncSalesAndTraffic(daysBack, syncOptions);
+        break;
+      }
+
+      case 'SYNC_AMAZON_CATALOG':
+        result = await amazonSync.syncCatalogItems(syncOptions);
+        break;
+
+      default:
+        throw new Error(`Unknown Amazon sync type: ${jobType}`);
+    }
+  } catch (error) {
+    const durationMs = Date.now() - startTime;
+    workerLogger.error(`[SyncAmazon] ${jobType} failed after ${durationMs}ms:`, error.message);
+
+    // Re-throw to let job retry logic handle it
+    throw error;
+  }
+
+  const durationMs = Date.now() - startTime;
+  workerLogger.info(`[SyncAmazon] ${jobType} completed in ${durationMs}ms:`, JSON.stringify(result));
+
+  return {
+    ...result,
+    job_id: job.id,
+    job_type: jobType,
+    duration_ms: durationMs,
+    ...(targetAsins && { target_asins: targetAsins }),
+  };
 }
 
 // ============================================================================
