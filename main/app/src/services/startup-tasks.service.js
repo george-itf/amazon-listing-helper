@@ -9,9 +9,11 @@
 
 import { query } from '../database/connection.js';
 import { logger } from '../lib/logger.js';
+import { hasSpApiCredentials } from '../credentials-provider.js';
 
 const FEATURE_STALENESS_HOURS = 24; // Consider features stale after 24 hours
 const KEEPA_STALENESS_DAYS = 7; // Consider Keepa data stale after 7 days
+const AMAZON_SYNC_STALENESS_HOURS = 24; // Consider Amazon data stale after 24 hours
 
 /**
  * Safe database query - returns null on table not exist errors
@@ -180,6 +182,55 @@ export async function queueStaleKeepaJobs() {
 }
 
 /**
+ * Run Amazon Sales & Traffic sync if data is stale
+ * This provides Buy Box percentage data
+ * @returns {Promise<{synced: boolean, reason?: string}>}
+ */
+export async function runAmazonSyncIfStale() {
+  // Check if SP-API credentials are configured
+  if (!hasSpApiCredentials()) {
+    logger.info('[Startup] SP-API credentials not configured - skipping Amazon sync');
+    return { synced: false, reason: 'no_credentials' };
+  }
+
+  try {
+    // Check if we have recent Sales & Traffic data
+    const result = await safeQuery(`
+      SELECT MAX(updated_at) as last_sync
+      FROM amazon_sales_traffic
+    `, [], 'check_amazon_sync');
+
+    const lastSync = result?.rows[0]?.last_sync;
+    const staleThreshold = new Date(Date.now() - AMAZON_SYNC_STALENESS_HOURS * 60 * 60 * 1000);
+
+    if (lastSync && new Date(lastSync) > staleThreshold) {
+      logger.info({ lastSync }, '[Startup] Amazon data is fresh - skipping sync');
+      return { synced: false, reason: 'data_fresh', lastSync };
+    }
+
+    logger.info('[Startup] Amazon data is stale - running Sales & Traffic sync...');
+
+    // Import and run the sync (this can take a while, so it runs async)
+    const amazonSync = await import('../amazon-data-sync.js');
+
+    // Run Sales & Traffic sync (provides Buy Box data)
+    // This is the critical sync - other syncs can be manual
+    const syncResult = await amazonSync.syncSalesAndTraffic(30);
+
+    logger.info({ syncResult }, '[Startup] Amazon Sales & Traffic sync completed');
+
+    // After Amazon sync, queue feature recompute for all affected listings
+    // so they pick up the new Buy Box data
+    await queueStaleFeatureJobs();
+
+    return { synced: true, result: syncResult };
+  } catch (error) {
+    logger.error({ err: error }, '[Startup] Amazon sync failed');
+    return { synced: false, error: error.message };
+  }
+}
+
+/**
  * Run all startup tasks
  * Called from server.js after worker starts
  * Non-blocking - runs in background
@@ -188,7 +239,7 @@ export async function runStartupTasks() {
   logger.info('[Startup] Running startup tasks...');
 
   try {
-    // Run tasks in parallel
+    // Phase 1: Queue feature and Keepa jobs (fast, just creates DB records)
     const [featureResult, keepaResult] = await Promise.all([
       queueStaleFeatureJobs(),
       queueStaleKeepaJobs(),
@@ -197,11 +248,22 @@ export async function runStartupTasks() {
     logger.info({
       features: featureResult,
       keepa: keepaResult,
-    }, '[Startup] Startup tasks completed');
+    }, '[Startup] Job queuing completed');
+
+    // Phase 2: Run Amazon sync if needed (slower, calls external API)
+    // This runs after job queuing to not block initial startup
+    const amazonResult = await runAmazonSyncIfStale();
+
+    logger.info({
+      features: featureResult,
+      keepa: keepaResult,
+      amazon: amazonResult,
+    }, '[Startup] All startup tasks completed');
 
     return {
       features: featureResult,
       keepa: keepaResult,
+      amazon: amazonResult,
     };
   } catch (error) {
     logger.error({ err: error }, '[Startup] Startup tasks failed');
@@ -213,4 +275,5 @@ export default {
   runStartupTasks,
   queueStaleFeatureJobs,
   queueStaleKeepaJobs,
+  runAmazonSyncIfStale,
 };
