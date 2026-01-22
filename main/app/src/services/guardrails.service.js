@@ -11,6 +11,12 @@
 
 import { query } from '../database/connection.js';
 
+// P.5 FIX: Cache guardrails to avoid DB hit on every request
+// TTL configurable via env, default 60 seconds
+const GUARDRAILS_CACHE_TTL_MS = parseInt(process.env.GUARDRAILS_CACHE_TTL_MS || '60000', 10);
+let guardrailsCache = null;
+let guardrailsCacheExpiry = 0;
+
 /**
  * Safe parseFloat - returns default on NaN
  */
@@ -43,9 +49,19 @@ function safeParseInt(value, defaultValue = 0) {
 
 /**
  * Load guardrail settings from database
+ *
+ * P.5 FIX: Uses a simple in-memory cache to avoid DB hit on every request
+ *
+ * @param {boolean} [forceRefresh=false] - Force cache refresh
  * @returns {Promise<Object>} Guardrails configuration
  */
-export async function loadGuardrails() {
+export async function loadGuardrails(forceRefresh = false) {
+  // P.5 FIX: Return cached value if valid and not forcing refresh
+  const now = Date.now();
+  if (!forceRefresh && guardrailsCache && now < guardrailsCacheExpiry) {
+    return guardrailsCache;
+  }
+
   const guardrails = {
     minMargin: 0.15,
     maxPriceChangePctPerDay: 0.05,
@@ -63,6 +79,9 @@ export async function loadGuardrails() {
   } catch (error) {
     // Handle missing settings table - use defaults
     if (error.message?.includes('does not exist')) {
+      // Cache the defaults too
+      guardrailsCache = guardrails;
+      guardrailsCacheExpiry = now + GUARDRAILS_CACHE_TTL_MS;
       return guardrails;
     }
     throw error;
@@ -97,7 +116,20 @@ export async function loadGuardrails() {
     }
   }
 
+  // P.5 FIX: Update cache
+  guardrailsCache = guardrails;
+  guardrailsCacheExpiry = now + GUARDRAILS_CACHE_TTL_MS;
+
   return guardrails;
+}
+
+/**
+ * Invalidate the guardrails cache
+ * Call this when settings are updated
+ */
+export function invalidateGuardrailsCache() {
+  guardrailsCache = null;
+  guardrailsCacheExpiry = 0;
 }
 
 /**
@@ -177,6 +209,8 @@ export async function validatePriceChange({
 /**
  * Validate stock change against guardrails
  *
+ * P.3 FIX: Add severity to violations and check for critical failures
+ *
  * @param {Object} params
  * @param {number} params.listingId
  * @param {number} params.newQuantity - Proposed new quantity
@@ -193,6 +227,17 @@ export async function validateStockChange({
   const guardrails = await loadGuardrails();
   const violations = [];
 
+  // P.3 FIX: Check for invalid (negative) quantity - this is a critical failure
+  if (newQuantity < 0) {
+    violations.push({
+      rule: 'invalid_quantity',
+      threshold: 0,
+      actual: newQuantity,
+      message: 'Stock quantity cannot be negative',
+      severity: 'critical',
+    });
+  }
+
   // 1. Minimum stock threshold warning (not a hard block, but a violation)
   if (newQuantity < guardrails.minStockThreshold && newQuantity > 0) {
     violations.push({
@@ -200,6 +245,7 @@ export async function validateStockChange({
       threshold: guardrails.minStockThreshold,
       actual: newQuantity,
       message: `Stock ${newQuantity} is below minimum threshold ${guardrails.minStockThreshold}`,
+      severity: 'warning',
     });
   }
 
@@ -210,13 +256,15 @@ export async function validateStockChange({
       threshold: 1,
       actual: 0,
       message: 'Setting stock to zero will mark listing as out of stock',
+      severity: 'warning',
     });
   }
 
-  // Stock changes are generally less restrictive than price changes
-  // Return violations as warnings, but mark as passed unless critical
+  // P.3 FIX: Check for critical violations - fail if any critical violations exist
+  const hasCriticalViolation = violations.some(v => v.severity === 'critical');
+
   return {
-    passed: true, // Stock changes don't hard-fail on warnings
+    passed: !hasCriticalViolation,
     violations,
   };
 }
@@ -318,6 +366,7 @@ export async function getGuardrailsSummary(listingId) {
 
 export default {
   loadGuardrails,
+  invalidateGuardrailsCache,
   validatePriceChange,
   validateStockChange,
   calculateDaysOfCover,

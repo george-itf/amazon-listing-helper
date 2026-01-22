@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { ListingWithFeatures, PricePreviewResponse } from '../../types';
 import { previewPriceChange, publishPriceChange } from '../../api/listings';
 
@@ -18,14 +18,29 @@ export function PriceEditModal({ listing, isOpen, onClose, onSuccess }: PriceEdi
   const [isPublishing, setIsPublishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // T.5 FIX: Ref for focus management
+  const priceInputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     if (isOpen) {
       setNewPrice(currentPrice.toFixed(2));
       setReason('');
       setPreview(null);
       setError(null);
+      // T.5 FIX: Focus price input when modal opens
+      setTimeout(() => priceInputRef.current?.focus(), 0);
     }
   }, [isOpen, currentPrice]);
+
+  // T.3 FIX: Clear preview when price changes
+  const handlePriceChange = (value: string) => {
+    setNewPrice(value);
+    // If preview exists and price changed, clear it to force re-preview
+    if (preview) {
+      setPreview(null);
+      setError(null);
+    }
+  };
 
   const handlePreview = async () => {
     const priceValue = parseFloat(newPrice);
@@ -100,12 +115,22 @@ export function PriceEditModal({ listing, isOpen, onClose, onSuccess }: PriceEdi
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
               <input
+                ref={priceInputRef}
                 type="number"
                 step="0.01"
                 min="0"
                 className="input pl-7"
                 value={newPrice}
-                onChange={(e) => setNewPrice(e.target.value)}
+                onChange={(e) => handlePriceChange(e.target.value)}
+                onKeyDown={(e) => {
+                  // T.4 FIX: Allow Enter key to trigger preview (if no preview) or submit
+                  if (e.key === 'Enter' && !isLoading && !isPublishing) {
+                    e.preventDefault();
+                    if (!preview) {
+                      handlePreview();
+                    }
+                  }
+                }}
               />
             </div>
           </div>

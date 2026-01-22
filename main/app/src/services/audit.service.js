@@ -376,19 +376,23 @@ export async function getRecentAuditEvents({
 
 /**
  * Get audit event counts by outcome for a time period
+ *
+ * Q.3 FIX: Use parameterized query to prevent SQL injection
  */
 export async function getAuditSummary(hours = 24) {
   try {
+    // Q.3 FIX: Parameterize the interval to prevent SQL injection
+    // Even though `hours` is a number, using interpolation is unsafe
     const result = await query(`
       SELECT
         event_type,
         outcome,
         COUNT(*) as count
       FROM audit_events
-      WHERE created_at >= NOW() - INTERVAL '${hours} hours'
+      WHERE created_at >= NOW() - $1::interval
       GROUP BY event_type, outcome
       ORDER BY event_type, outcome
-    `);
+    `, [`${hours} hours`]);
 
     return result.rows;
   } catch (error) {

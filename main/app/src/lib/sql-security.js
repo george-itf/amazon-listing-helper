@@ -9,6 +9,7 @@
 
 // Allowlisted tables for backup/restore operations
 // Only these tables can be backed up or restored
+// Note: listing_features and asin_features replaced with feature_store (uses entity_type)
 export const ALLOWED_BACKUP_TABLES = new Set([
   'listings',
   'components',
@@ -16,8 +17,7 @@ export const ALLOWED_BACKUP_TABLES = new Set([
   'boms',
   'bom_lines',
   'asin_entities',
-  'listing_features',
-  'asin_features',
+  'feature_store', // Replaces listing_features and asin_features
   'listing_cost_overrides',
   'marketplaces',
 ]);
@@ -50,11 +50,9 @@ export const ALLOWED_COLUMNS_BY_TABLE = {
   asin_entities: new Set([
     'id', 'asin', 'marketplace_id', 'title', 'brand', 'category', 'status',
   ]),
-  listing_features: new Set([
-    'id', 'listing_id', 'features_json', 'feature_version', 'computed_at',
-  ]),
-  asin_features: new Set([
-    'id', 'asin_entity_id', 'features_json', 'feature_version', 'computed_at',
+  // Replaced listing_features and asin_features with unified feature_store
+  feature_store: new Set([
+    'id', 'entity_type', 'entity_id', 'features_json', 'feature_version', 'computed_at',
   ]),
   listing_cost_overrides: new Set([
     'listing_id', 'shipping_cost_ex_vat', 'packaging_cost_ex_vat',
@@ -120,7 +118,8 @@ export function quoteIdentifier(identifier) {
  */
 export function getBackupTables(type) {
   if (type === 'full') {
-    return ['listings', 'components', 'suppliers', 'boms', 'bom_lines', 'asin_entities', 'listing_features', 'asin_features'];
+    // Use feature_store instead of listing_features/asin_features
+    return ['listings', 'components', 'suppliers', 'boms', 'bom_lines', 'asin_entities', 'feature_store'];
   } else if (type === 'boms') {
     return ['components', 'suppliers', 'boms', 'bom_lines'];
   }
@@ -132,7 +131,8 @@ export function getBackupTables(type) {
  * @returns {string[]} Tables in correct restore order
  */
 export function getRestoreOrder() {
-  return ['marketplaces', 'suppliers', 'components', 'listings', 'boms', 'bom_lines', 'asin_entities', 'listing_features', 'asin_features', 'listing_cost_overrides'];
+  // Use feature_store instead of listing_features/asin_features
+  return ['marketplaces', 'suppliers', 'components', 'listings', 'boms', 'bom_lines', 'asin_entities', 'feature_store', 'listing_cost_overrides'];
 }
 
 /**

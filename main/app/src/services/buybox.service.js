@@ -234,9 +234,8 @@ export async function recordBuyBoxSnapshot({
   buyBoxPercentage30d,
   isBuyBoxWinner,
 }) {
-  // Map status to schema enum (schema only has WON, LOST, UNKNOWN)
-  // PARTIAL maps to UNKNOWN in the DB enum until migration adds it
-  const dbStatus = buyBoxStatus === 'PARTIAL' ? 'UNKNOWN' : buyBoxStatus;
+  // L.2 FIX: DB enum now includes PARTIAL (migration 006), store directly
+  const dbStatus = buyBoxStatus;
 
   const result = await query(`
     INSERT INTO listing_offer_current (
