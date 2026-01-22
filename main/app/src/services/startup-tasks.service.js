@@ -225,6 +225,20 @@ export async function runAmazonSyncIfStale() {
 
     return { synced: true, result: syncResult };
   } catch (error) {
+    // Check for common permission errors
+    const isForbidden = error.message?.includes('forbidden') || error.message?.includes('403');
+    const isUnauthorized = error.message?.includes('unauthorized') || error.message?.includes('401');
+
+    if (isForbidden) {
+      logger.warn('[Startup] Amazon sync skipped - SP-API credentials lack permission for Sales & Traffic report (requires Brand Analytics role)');
+      return { synced: false, reason: 'permission_denied', error: 'Sales & Traffic report requires Brand Analytics permission' };
+    }
+
+    if (isUnauthorized) {
+      logger.warn('[Startup] Amazon sync skipped - SP-API credentials are invalid or expired');
+      return { synced: false, reason: 'invalid_credentials', error: 'SP-API credentials are invalid or expired' };
+    }
+
     logger.error({ err: error }, '[Startup] Amazon sync failed');
     return { synced: false, error: error.message };
   }

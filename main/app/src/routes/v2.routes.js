@@ -4358,6 +4358,129 @@ export async function registerV2Routes(fastify) {
     }
   });
 
+  // ============================================================================
+  // BACKUP
+  // ============================================================================
+
+  /**
+   * POST /api/v2/backup
+   * Create a database backup
+   * Body: { type: 'full' | 'boms' }
+   */
+  fastify.post('/api/v2/backup', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const { type = 'boms' } = request.body || {};
+
+    try {
+      httpLogger.info(`[Backup] Creating ${type} backup...`);
+
+      // Build the backup SQL based on type
+      let tables;
+      if (type === 'full') {
+        tables = ['listings', 'components', 'suppliers', 'boms', 'bom_lines', 'asin_entities', 'listing_features', 'asin_features'];
+      } else {
+        tables = ['components', 'suppliers', 'boms', 'bom_lines'];
+      }
+
+      // Create backup data as JSON export
+      const backup = {
+        type,
+        created_at: new Date().toISOString(),
+        tables: {},
+      };
+
+      for (const table of tables) {
+        try {
+          const result = await dbQuery(`SELECT * FROM ${table}`);
+          backup.tables[table] = {
+            count: result.rows.length,
+            rows: result.rows,
+          };
+        } catch (err) {
+          // Table might not exist
+          httpLogger.warn(`[Backup] Skipping table ${table}: ${err.message}`);
+          backup.tables[table] = { count: 0, rows: [], error: err.message };
+        }
+      }
+
+      // Return as downloadable JSON
+      const filename = `backup_${type}_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+
+      reply.header('Content-Type', 'application/json');
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+
+      return reply.send(backup);
+    } catch (error) {
+      httpLogger.error('[Backup] Backup failed:', error.message);
+      return reply.status(500).send({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * POST /api/v2/backup/restore
+   * Restore from a backup file
+   * Body: { backup: <backup JSON object> }
+   */
+  fastify.post('/api/v2/backup/restore', async (request, reply) => {
+    const { query: dbQuery, transaction } = await import('../database/connection.js');
+    const { backup } = request.body || {};
+
+    if (!backup || !backup.tables) {
+      return reply.status(400).send({ success: false, error: 'Invalid backup format' });
+    }
+
+    try {
+      httpLogger.info(`[Backup] Restoring ${backup.type} backup from ${backup.created_at}...`);
+
+      const results = {};
+
+      // Restore tables in order (dependencies first)
+      const restoreOrder = ['suppliers', 'components', 'boms', 'bom_lines', 'listings', 'asin_entities', 'listing_features', 'asin_features'];
+
+      await transaction(async (client) => {
+        for (const table of restoreOrder) {
+          const tableData = backup.tables[table];
+          if (!tableData || !tableData.rows || tableData.rows.length === 0) {
+            results[table] = { restored: 0, skipped: true };
+            continue;
+          }
+
+          // For each row, try to upsert (this is a simple restore, not a full sync)
+          let restored = 0;
+          for (const row of tableData.rows) {
+            try {
+              const columns = Object.keys(row).filter(k => k !== 'created_at' && k !== 'updated_at');
+              const values = columns.map(c => row[c]);
+              const placeholders = columns.map((_, i) => `$${i + 1}`);
+
+              // Simple insert with conflict handling
+              await client.query(`
+                INSERT INTO ${table} (${columns.join(', ')})
+                VALUES (${placeholders.join(', ')})
+                ON CONFLICT DO NOTHING
+              `, values);
+              restored++;
+            } catch (err) {
+              // Skip individual row errors
+            }
+          }
+          results[table] = { restored, total: tableData.rows.length };
+        }
+      });
+
+      httpLogger.info('[Backup] Restore completed:', results);
+
+      return wrapResponse({
+        message: 'Restore completed',
+        backup_date: backup.created_at,
+        results,
+      });
+    } catch (error) {
+      httpLogger.error('[Backup] Restore failed:', error.message);
+      return reply.status(500).send({ success: false, error: error.message });
+    }
+  });
+
   /**
    * GET /api/v2/ready
    * Kubernetes-style readiness probe
