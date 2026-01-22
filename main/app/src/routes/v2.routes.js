@@ -586,6 +586,15 @@ export async function registerV2Routes(fastify) {
     try {
       if (listing_id) {
         const bom = await bomRepo.createVersion(listing_id, { lines: lines || [], notes });
+
+        // Auto-recompute features so listings page shows updated profit/margin
+        try {
+          const featureStoreService = await import('../services/feature-store.service.js');
+          await featureStoreService.computeListingFeatures(listing_id);
+        } catch (featureError) {
+          console.warn(`[BOM] Failed to recompute features for listing ${listing_id}:`, featureError.message);
+        }
+
         return reply.status(201).send(wrapResponse(bom));
       } else {
         // For ASIN_SCENARIO BOMs, use the clone endpoints
