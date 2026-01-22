@@ -18,6 +18,7 @@ import SellingPartner from 'amazon-sp-api';
 import { getSpApiClientConfig, hasSpApiCredentials, getDefaultMarketplaceId, getSellerId } from './credentials-provider.js';
 import { query, transaction } from './database/connection.js';
 import { syncListings } from './listings-sync.js';
+import { safeFetch } from './lib/safe-fetch.js';
 import { createChildLogger } from './lib/logger.js';
 
 // J.5 FIX: Structured logging
@@ -580,7 +581,11 @@ async function requestAndDownloadReport(sp, reportType, options = {}) {
         })
       );
 
-      const response = await fetch(document.url);
+      // Download with SSRF protection
+      const response = await safeFetch(document.url, {
+        timeout: 60000,  // 60s for large reports
+        maxSize: 100 * 1024 * 1024,  // 100MB
+      });
       return await response.text();
     } else if (report.processingStatus === 'CANCELLED' || report.processingStatus === 'FATAL') {
       syncLogger.error({ reportId, status: report.processingStatus }, 'Report failed');

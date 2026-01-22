@@ -6,6 +6,7 @@
 import SellingPartner from 'amazon-sp-api';
 import { getSpApiClientConfig, hasSpApiCredentials, getDefaultMarketplaceId, getSellerId } from './credentials-provider.js';
 import * as listingRepo from './repositories/listing.repository.js';
+import { safeFetch } from './lib/safe-fetch.js';
 
 /**
  * Create SP-API client
@@ -157,11 +158,11 @@ async function waitForReport(sp, reportId, maxWaitMs = 300000, onProgress = null
 
       console.log(`[ListingsSync] Document URL obtained, downloading...`);
 
-      // Download the document
-      const response = await fetch(document.url);
-      if (!response.ok) {
-        throw new Error(`Failed to download report document: ${response.status}`);
-      }
+      // Download the document (with SSRF protection)
+      const response = await safeFetch(document.url, {
+        timeout: 60000,  // 60s for large reports
+        maxSize: 100 * 1024 * 1024,  // 100MB
+      });
 
       const content = await response.text();
       console.log(`[ListingsSync] Downloaded ${content.length} bytes`);
