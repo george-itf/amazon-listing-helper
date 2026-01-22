@@ -140,7 +140,7 @@ export async function registerV2Routes(fastify) {
 
   fastify.get('/api/v2/components', async (request, reply) => {
     try {
-      const { activeOnly = 'true', supplierId, category, limit = '100', offset = '0' } = request.query;
+      const { activeOnly = 'true', supplierId, category, limit = '1000', offset = '0' } = request.query;
       const components = await componentRepo.findAll({
         activeOnly: activeOnly === 'true',
         supplierId: supplierId ? parseInt(supplierId, 10) : undefined,
