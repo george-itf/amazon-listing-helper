@@ -6,7 +6,15 @@ import { PriceEditModal } from '../components/modals/PriceEditModal';
 import { StockEditModal } from '../components/modals/StockEditModal';
 import { getListingWithFeatures, getListingEconomics } from '../api/listings';
 import { getListingRecommendations } from '../api/recommendations';
+import {
+  getActiveBomForListing,
+  getComponents,
+  createBom,
+  updateBomLines,
+  activateBom,
+} from '../api/boms';
 import type { ListingWithFeatures, EconomicsResponse, Recommendation } from '../types';
+import type { Bom, Component } from '../api/boms';
 
 export function ListingDetailPage() {
   const { listingId } = useParams<{ listingId: string }>();
@@ -18,6 +26,14 @@ export function ListingDetailPage() {
   const [isPriceModalOpen, setIsPriceModalOpen] = useState(false);
   const [isStockModalOpen, setIsStockModalOpen] = useState(false);
 
+  // BOM state
+  const [bom, setBom] = useState<Bom | null>(null);
+  const [components, setComponents] = useState<Component[]>([]);
+  const [isBomEditing, setIsBomEditing] = useState(false);
+  const [bomLines, setBomLines] = useState<Array<{ component_id: number; quantity: number; wastage_rate: number }>>([]);
+  const [isBomSaving, setIsBomSaving] = useState(false);
+  const [bomError, setBomError] = useState<string | null>(null);
+
   useEffect(() => {
     const loadData = async () => {
       if (!listingId) return;
@@ -27,15 +43,28 @@ export function ListingDetailPage() {
 
       try {
         const id = parseInt(listingId);
-        const [listingData, economicsData, recsData] = await Promise.all([
+        const [listingData, economicsData, recsData, bomData, componentsData] = await Promise.all([
           getListingWithFeatures(id),
           getListingEconomics(id).catch(() => null),
           getListingRecommendations(id).catch(() => []),
+          getActiveBomForListing(id).catch(() => null),
+          getComponents().catch(() => []),
         ]);
 
         setListing(listingData);
         setEconomics(economicsData);
         setRecommendations(recsData);
+        setBom(bomData);
+        setComponents(componentsData);
+
+        // Initialize BOM lines from existing BOM
+        if (bomData?.lines) {
+          setBomLines(bomData.lines.map(line => ({
+            component_id: line.component_id,
+            quantity: line.quantity,
+            wastage_rate: line.wastage_rate,
+          })));
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load listing');
       } finally {
@@ -53,11 +82,101 @@ export function ListingDetailPage() {
       getListingWithFeatures(id),
       getListingEconomics(id).catch(() => null),
       getListingRecommendations(id).catch(() => []),
-    ]).then(([listingData, economicsData, recsData]) => {
+      getActiveBomForListing(id).catch(() => null),
+    ]).then(([listingData, economicsData, recsData, bomData]) => {
       setListing(listingData);
       setEconomics(economicsData);
       setRecommendations(recsData);
+      setBom(bomData);
+      if (bomData?.lines) {
+        setBomLines(bomData.lines.map(line => ({
+          component_id: line.component_id,
+          quantity: line.quantity,
+          wastage_rate: line.wastage_rate,
+        })));
+      }
     });
+  };
+
+  // BOM handlers
+  const handleAddBomLine = () => {
+    setBomLines([...bomLines, { component_id: 0, quantity: 1, wastage_rate: 0 }]);
+  };
+
+  const handleRemoveBomLine = (index: number) => {
+    setBomLines(bomLines.filter((_, i) => i !== index));
+  };
+
+  const handleBomLineChange = (index: number, field: 'component_id' | 'quantity' | 'wastage_rate', value: number) => {
+    const newLines = [...bomLines];
+    newLines[index] = { ...newLines[index], [field]: value };
+    setBomLines(newLines);
+  };
+
+  const handleSaveBom = async () => {
+    if (!listingId) return;
+
+    // Filter out lines without a component selected
+    const validLines = bomLines.filter(line => line.component_id > 0);
+    if (validLines.length === 0) {
+      setBomError('Please add at least one component to the BOM');
+      return;
+    }
+
+    setIsBomSaving(true);
+    setBomError(null);
+
+    try {
+      const id = parseInt(listingId);
+
+      if (bom) {
+        // Update existing BOM lines
+        await updateBomLines(bom.id, { lines: validLines });
+        if (!bom.is_active) {
+          await activateBom(bom.id);
+        }
+      } else {
+        // Create new BOM
+        const newBom = await createBom({
+          listing_id: id,
+          scope_type: 'LISTING',
+          lines: validLines,
+        });
+        // Activate the new BOM
+        await activateBom(newBom.id);
+      }
+
+      setIsBomEditing(false);
+      reloadData();
+    } catch (err) {
+      setBomError(err instanceof Error ? err.message : 'Failed to save BOM');
+    } finally {
+      setIsBomSaving(false);
+    }
+  };
+
+  const handleCancelBomEdit = () => {
+    setIsBomEditing(false);
+    setBomError(null);
+    // Reset lines to original BOM
+    if (bom?.lines) {
+      setBomLines(bom.lines.map(line => ({
+        component_id: line.component_id,
+        quantity: line.quantity,
+        wastage_rate: line.wastage_rate,
+      })));
+    } else {
+      setBomLines([]);
+    }
+  };
+
+  const calculateBomTotal = () => {
+    return bomLines.reduce((total, line) => {
+      const component = components.find(c => c.id === line.component_id);
+      if (!component) return total;
+      const lineCost = line.quantity * (1 + line.wastage_rate) * component.unit_cost_ex_vat;
+      return total + lineCost;
+    }, 0);
   };
 
   if (isLoading) {
@@ -189,6 +308,152 @@ export function ListingDetailPage() {
             </div>
           ) : (
             <p className="text-gray-500">Economics data not available</p>
+          )}
+        </div>
+
+        {/* Bill of Materials */}
+        <div className="card">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-semibold">Bill of Materials (BOM)</h3>
+            {!isBomEditing && (
+              <button
+                onClick={() => setIsBomEditing(true)}
+                className="btn btn-primary btn-sm"
+              >
+                {bom ? 'Edit BOM' : 'Create BOM'}
+              </button>
+            )}
+          </div>
+
+          {bomError && (
+            <div className="mb-4 p-2 bg-red-50 text-red-600 rounded text-sm">
+              {bomError}
+            </div>
+          )}
+
+          {isBomEditing ? (
+            <div className="space-y-4">
+              {bomLines.length === 0 ? (
+                <p className="text-gray-500 text-sm">No components added yet. Click "Add Component" to start.</p>
+              ) : (
+                <div className="space-y-2">
+                  {bomLines.map((line, index) => (
+                    <div key={index} className="flex gap-2 items-center">
+                      <select
+                        className="input flex-1"
+                        value={line.component_id}
+                        onChange={(e) => handleBomLineChange(index, 'component_id', parseInt(e.target.value))}
+                      >
+                        <option value={0}>Select component...</option>
+                        {components.map(comp => (
+                          <option key={comp.id} value={comp.id}>
+                            {comp.component_sku} - {comp.name} (£{comp.unit_cost_ex_vat.toFixed(2)})
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        className="input w-20"
+                        placeholder="Qty"
+                        min="0.01"
+                        step="0.01"
+                        value={line.quantity}
+                        onChange={(e) => handleBomLineChange(index, 'quantity', parseFloat(e.target.value) || 0)}
+                      />
+                      <input
+                        type="number"
+                        className="input w-20"
+                        placeholder="Wastage %"
+                        min="0"
+                        max="0.99"
+                        step="0.01"
+                        value={line.wastage_rate}
+                        onChange={(e) => handleBomLineChange(index, 'wastage_rate', parseFloat(e.target.value) || 0)}
+                        title="Wastage rate (e.g., 0.05 = 5%)"
+                      />
+                      <button
+                        onClick={() => handleRemoveBomLine(index)}
+                        className="text-red-600 hover:text-red-800 px-2"
+                        title="Remove"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex justify-between items-center pt-2 border-t">
+                <button
+                  onClick={handleAddBomLine}
+                  className="text-blue-600 hover:text-blue-800 text-sm"
+                >
+                  + Add Component
+                </button>
+                <span className="font-medium">
+                  Total: £{calculateBomTotal().toFixed(2)}
+                </span>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={handleSaveBom}
+                  disabled={isBomSaving}
+                  className="btn btn-primary btn-sm"
+                >
+                  {isBomSaving ? 'Saving...' : 'Save BOM'}
+                </button>
+                <button
+                  onClick={handleCancelBomEdit}
+                  disabled={isBomSaving}
+                  className="btn btn-secondary btn-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+
+              {components.length === 0 && (
+                <p className="text-sm text-gray-500 mt-2">
+                  No components found. <Link to="/bom-library" className="text-blue-600 hover:underline">Add components</Link> first.
+                </p>
+              )}
+            </div>
+          ) : bom ? (
+            <div className="space-y-3">
+              <div className="text-sm text-gray-500 mb-2">
+                Version {bom.version} • {bom.is_active ? 'Active' : 'Inactive'}
+              </div>
+              {bom.lines.length === 0 ? (
+                <p className="text-gray-500">No components in this BOM</p>
+              ) : (
+                <div className="divide-y">
+                  {bom.lines.map((line) => (
+                    <div key={line.id} className="py-2 flex justify-between">
+                      <span>
+                        {line.component?.name || `Component #${line.component_id}`}
+                        <span className="text-gray-500 text-sm ml-2">
+                          × {line.quantity}{line.wastage_rate > 0 ? ` (+${(line.wastage_rate * 100).toFixed(0)}% wastage)` : ''}
+                        </span>
+                      </span>
+                      <span className="font-medium">
+                        £{((line.quantity * (1 + line.wastage_rate) * (line.component?.unit_cost_ex_vat || 0))).toFixed(2)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="pt-2 border-t flex justify-between font-medium">
+                <span>Total BOM Cost</span>
+                <span>£{(Number(bom.total_cost_ex_vat) || 0).toFixed(2)}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-4">
+              <p className="text-gray-500 mb-2">No BOM configured for this listing</p>
+              <p className="text-sm text-gray-400">
+                Create a BOM to track component costs and calculate accurate profit margins.
+              </p>
+            </div>
           )}
         </div>
 

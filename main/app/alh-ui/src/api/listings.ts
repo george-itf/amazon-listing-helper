@@ -28,16 +28,29 @@ export async function getListing(id: number): Promise<Listing> {
 
 // Get listing with features
 export async function getListingWithFeatures(id: number): Promise<ListingWithFeatures> {
-  const [listing, features] = await Promise.all([
+  const [listing, featuresResponse] = await Promise.all([
     getListing(id),
     getListingFeatures(id).catch(() => null),
   ]);
+  // The features endpoint returns { listing_id, features: {...}, computed_at }
+  // We need to extract the nested 'features' object
+  const features = featuresResponse?.features ?? null;
   return { ...listing, features };
 }
 
+// Response type from the features endpoint
+interface FeaturesResponse {
+  listing_id: number;
+  feature_store_id: number | null;
+  feature_version: number;
+  features: ListingFeatures | null;
+  computed_at: string;
+  message?: string;
+}
+
 // Get listing features
-export async function getListingFeatures(id: number): Promise<ListingFeatures> {
-  return get<ListingFeatures>(`/api/v2/listings/${id}/features`);
+export async function getListingFeatures(id: number): Promise<FeaturesResponse> {
+  return get<FeaturesResponse>(`/api/v2/listings/${id}/features`);
 }
 
 // Get listing economics
