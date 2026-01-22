@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { PageHeader } from '../layouts/PageHeader';
 import { ListingsTable } from '../components/tables/ListingsTable';
 import { PriceEditModal } from '../components/modals/PriceEditModal';
@@ -105,8 +105,8 @@ export function ListingsPage() {
     loadListings();
   };
 
-  // Summary stats
-  const stats = {
+  // D.3 FIX: Memoize stats to avoid recalculation on every render
+  const stats = useMemo(() => ({
     total: listings.length,
     active: listings.filter((l) => l.status === 'ACTIVE').length,
     inactive: listings.filter((l) => l.status === 'INACTIVE').length,
@@ -117,12 +117,15 @@ export function ListingsPage() {
         l.features?.stockout_risk === 'HIGH' ||
         (l.features?.margin != null && l.features.margin < 0.15)
     ).length,
-  };
+  }), [listings]);
 
-  // Filter listings based on status tab
-  const filteredListings = statusFilter === 'ALL'
-    ? listings
-    : listings.filter((l) => l.status === statusFilter);
+  // D.3 FIX: Memoize filtered listings to avoid recalculation on every render
+  const filteredListings = useMemo(() =>
+    statusFilter === 'ALL'
+      ? listings
+      : listings.filter((l) => l.status === statusFilter),
+    [listings, statusFilter]
+  );
 
   return (
     <div>

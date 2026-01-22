@@ -28,6 +28,9 @@ const sslConfig = process.env.DATABASE_URL
     }
   : false; // Local dev typically doesn't use SSL
 
+// A.3.4 FIX: DB statement timeout to prevent hung queries exhausting the pool
+const DB_STATEMENT_TIMEOUT_MS = parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '30000', 10);
+
 // Create connection pool
 // Railway provides DATABASE_URL, local dev uses individual vars
 const pool = process.env.DATABASE_URL
@@ -37,6 +40,8 @@ const pool = process.env.DATABASE_URL
       max: parseInt(process.env.DB_POOL_MAX || '20', 10),
       idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS || '30000', 10),
       connectionTimeoutMillis: parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT_MS || '5000', 10),
+      // A.3.4 FIX: Set statement_timeout to prevent hung queries
+      statement_timeout: DB_STATEMENT_TIMEOUT_MS,
     })
   : new Pool({
       host: process.env.DB_HOST || 'localhost',
@@ -47,6 +52,8 @@ const pool = process.env.DATABASE_URL
       max: parseInt(process.env.DB_POOL_MAX || '20', 10),
       idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS || '30000', 10),
       connectionTimeoutMillis: parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT_MS || '5000', 10),
+      // A.3.4 FIX: Set statement_timeout to prevent hung queries
+      statement_timeout: DB_STATEMENT_TIMEOUT_MS,
     });
 // Test connection on startup
 pool.on('connect', () => {

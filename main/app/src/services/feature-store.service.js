@@ -39,12 +39,51 @@ const FEATURE_VERSION = 1;
  * Compute features for a listing
  * Implements COMPUTE_FEATURES_LISTING job
  *
+ * A.2.4 FIX: Uses advisory lock to prevent concurrent feature computations
+ *
  * @param {number} listingId
  * @returns {Promise<Object>}
  */
 export async function computeListingFeatures(listingId) {
   console.log(`[FeatureStore] Computing features for listing ${listingId}`);
 
+  // A.2.4 FIX: Acquire advisory lock to prevent concurrent computation for same listing
+  // Lock key: 300000000 + listingId (namespace for feature computations)
+  const lockKey = 300000000 + listingId;
+  const lockResult = await query('SELECT pg_try_advisory_lock($1) as acquired', [lockKey]);
+
+  if (!lockResult.rows[0].acquired) {
+    console.log(`[FeatureStore] Skipping listing ${listingId} - concurrent computation in progress`);
+    // Return existing features instead of skipping entirely
+    const existing = await getLatestFeatures('LISTING', listingId);
+    if (existing) {
+      return {
+        listing_id: listingId,
+        feature_store_id: existing.id,
+        feature_version: existing.feature_version,
+        features: existing.features_json,
+        computed_at: existing.computed_at,
+        skipped: true,
+        reason: 'Concurrent computation in progress',
+      };
+    }
+    throw new Error(`Cannot compute features: concurrent computation in progress and no existing features`);
+  }
+
+  try {
+    return await doComputeListingFeatures(listingId);
+  } finally {
+    // A.2.4: Always release the lock
+    await query('SELECT pg_advisory_unlock($1)', [lockKey]);
+  }
+}
+
+/**
+ * Internal implementation of feature computation
+ * A.2.3 FIX: Derives lead_time_days from BOM components instead of hardcoded 14 days
+ * @private
+ */
+async function doComputeListingFeatures(listingId) {
   // Get base listing data (LEFT JOIN to handle listings without marketplace)
   const listingResult = await query(`
     SELECT l.*, COALESCE(m.vat_rate, 0.20) as vat_rate, COALESCE(m.currency_code, 'GBP') as currency_code
@@ -102,6 +141,27 @@ export async function computeListingFeatures(listingId) {
   const salesVelocity = safeParseFloat(sales.units_30d, 0) / 30;
   const availableQuantity = listing.available_quantity || 0;
   const daysOfCover = calculateDaysOfCover(availableQuantity, salesVelocity);
+
+  // A.2.3 FIX: Get max lead time from BOM components instead of hardcoded 14 days
+  let leadTimeDays = 14; // Default fallback
+  try {
+    const leadTimeResult = await query(`
+      SELECT COALESCE(MAX(c.lead_time_days), 0) as max_lead_time
+      FROM boms b
+      JOIN bom_lines bl ON bl.bom_id = b.id
+      JOIN components c ON c.id = bl.component_id
+      WHERE b.listing_id = $1
+        AND b.is_active = true
+        AND b.scope_type = 'LISTING'
+    `, [listingId]);
+    const maxLeadTime = safeParseInt(leadTimeResult.rows[0]?.max_lead_time, 0);
+    if (maxLeadTime > 0) {
+      leadTimeDays = maxLeadTime;
+    }
+  } catch (error) {
+    // Table might not exist - use default
+    if (!error.message?.includes('does not exist')) throw error;
+  }
 
   // Get Buy Box status - try multiple sources
   let offer = {};
@@ -244,7 +304,7 @@ export async function computeListingFeatures(listingId) {
     // Inventory
     available_quantity: availableQuantity,
     days_of_cover: daysOfCover !== null ? Math.round(daysOfCover * 10) / 10 : null,
-    lead_time_days: 14, // Default, could be from settings
+    lead_time_days: leadTimeDays, // A.2.3 FIX: Derived from BOM component max lead time
     stockout_risk: calculateStockoutRisk(daysOfCover),
 
     // Buy Box

@@ -130,17 +130,25 @@ async function getCostOverrides(listingId) {
 /**
  * Calculate Amazon fees for a listing
  * Uses standard FBA/FBM fee structure.
+ *
+ * A.2.1 FIX: Amazon referral fees are calculated on VAT-EXCLUSIVE price
+ * per DATA_CONTRACTS.md §4 and SPEC.md VAT semantics.
+ *
  * TODO: Integrate with Amazon Fee Preview API for accuracy
  *
- * @param {number} priceIncVat
+ * @param {number} priceIncVat - Price including VAT
  * @param {string} fulfillmentChannel - 'FBA' or 'FBM'
  * @param {string} category
+ * @param {number} vatRate - VAT rate (e.g., 0.20 for 20%)
  * @returns {number} Fees ex VAT
  */
-function calculateAmazonFeesExVat(priceIncVat, fulfillmentChannel = 'FBM', category = 'General') {
-  // Referral fee: typically 15% of sale price
+function calculateAmazonFeesExVat(priceIncVat, fulfillmentChannel = 'FBM', category = 'General', vatRate = 0.20) {
+  // A.2.1 FIX: Calculate price ex VAT first - Amazon fees are on VAT-exclusive price
+  const priceExVat = roundMoney(priceIncVat / (1 + vatRate));
+
+  // Referral fee: typically 15% of sale price (ex VAT)
   const referralRate = 0.15;
-  const referralFee = priceIncVat * referralRate;
+  const referralFee = roundMoney(priceExVat * referralRate);
 
   // FBA fulfillment fee (if applicable)
   let fulfillmentFee = 0;
@@ -194,6 +202,8 @@ async function getActiveBomVersion(listingId) {
  * Calculate full economics for a listing
  * Implements DATA_CONTRACTS.md §4.2 Economics DTO Contract
  *
+ * A.4.2 FIX: Optimized to use fewer DB queries via a combined query with JOINs
+ *
  * @param {number} listingId
  * @param {Object} [scenario] - Optional scenario overrides
  * @param {number} [scenario.price_inc_vat] - Override current price
@@ -201,54 +211,76 @@ async function getActiveBomVersion(listingId) {
  * @returns {Promise<Object>} Economics DTO per DATA_CONTRACTS.md §4.2
  */
 export async function calculateEconomics(listingId, scenario = {}) {
-  // Get listing data
-  const listingResult = await query(`
+  // A.4.2 FIX: Combined query to reduce DB round trips from 4 to 1
+  const combinedResult = await query(`
     SELECT
       l.id,
       l.price_inc_vat,
       l.marketplace_id,
       l."fulfillmentChannel" as fulfillment_channel,
       l.category,
-      m.vat_rate
+      COALESCE(m.vat_rate, 0.20) as vat_rate,
+      COALESCE((
+        SELECT SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat)
+        FROM boms b
+        JOIN bom_lines bl ON bl.bom_id = b.id
+        JOIN components c ON c.id = bl.component_id
+        WHERE b.listing_id = l.id
+          AND b.is_active = true
+          AND b.scope_type = 'LISTING'
+      ), 0) as bom_cost,
+      COALESCE(lco.shipping_cost_ex_vat, 0) as shipping_cost_ex_vat,
+      COALESCE(lco.packaging_cost_ex_vat, 0) as packaging_cost_ex_vat,
+      COALESCE(lco.handling_cost_ex_vat, 0) as handling_cost_ex_vat,
+      COALESCE(lco.other_cost_ex_vat, 0) as other_cost_ex_vat,
+      (
+        SELECT version FROM boms
+        WHERE listing_id = l.id AND is_active = true AND scope_type = 'LISTING'
+        LIMIT 1
+      ) as bom_version
     FROM listings l
     LEFT JOIN marketplaces m ON m.id = l.marketplace_id
+    LEFT JOIN listing_cost_overrides lco ON lco.listing_id = l.id
     WHERE l.id = $1
   `, [listingId]);
 
-  if (listingResult.rows.length === 0) {
+  if (combinedResult.rows.length === 0) {
     throw new Error(`Listing not found: ${listingId}`);
   }
 
-  const listing = listingResult.rows[0];
-  const vatRate = parseFloat(listing.vat_rate || 0.20);
+  const data = combinedResult.rows[0];
+  const vatRate = parseFloat(data.vat_rate || 0.20);
 
   // Apply scenario overrides
-  const priceIncVat = scenario.price_inc_vat ?? parseFloat(listing.price_inc_vat || 0);
+  const priceIncVat = scenario.price_inc_vat ?? parseFloat(data.price_inc_vat || 0);
 
-  // Get costs
-  let bomCostExVat = await getBomCostExVat(listingId);
+  // Get BOM cost (with optional multiplier)
+  let bomCostExVat = roundMoney(safeParseFloat(data.bom_cost));
   if (scenario.bom_cost_multiplier) {
     bomCostExVat = roundMoney(bomCostExVat * scenario.bom_cost_multiplier);
   }
 
-  const costOverrides = await getCostOverrides(listingId);
+  // A.2.1 FIX: Pass vatRate to calculateAmazonFeesExVat
   const amazonFeesExVat = calculateAmazonFeesExVat(
     priceIncVat,
-    listing.fulfillment_channel,
-    listing.category
+    data.fulfillment_channel,
+    data.category,
+    vatRate  // A.2.1: Now correctly calculates on VAT-exclusive price
   );
 
   // Calculate derived values per DATA_CONTRACTS.md §4.2
   const priceExVat = calculatePriceExVat(priceIncVat, vatRate);
-  const shippingCostExVat = costOverrides.shipping_cost_ex_vat;
-  const packagingCostExVat = costOverrides.packaging_cost_ex_vat;
+  const shippingCostExVat = roundMoney(parseFloat(data.shipping_cost_ex_vat));
+  const packagingCostExVat = roundMoney(parseFloat(data.packaging_cost_ex_vat));
+  const handlingCostExVat = roundMoney(parseFloat(data.handling_cost_ex_vat));
+  const otherCostExVat = roundMoney(parseFloat(data.other_cost_ex_vat));
 
   const totalCostExVat = roundMoney(
     bomCostExVat +
     shippingCostExVat +
     packagingCostExVat +
-    costOverrides.handling_cost_ex_vat +
-    costOverrides.other_cost_ex_vat +
+    handlingCostExVat +
+    otherCostExVat +
     amazonFeesExVat
   );
 
@@ -257,12 +289,9 @@ export async function calculateEconomics(listingId, scenario = {}) {
   const margin = netRevenueExVat > 0 ? roundMoney(profitExVat / netRevenueExVat * 10000) / 10000 : 0;
   const breakEvenPriceIncVat = calculateBreakEvenPriceIncVat(totalCostExVat, vatRate);
 
-  // Get active BOM version
-  const bomVersion = await getActiveBomVersion(listingId);
-
   return {
     listing_id: listingId,
-    marketplace_id: listing.marketplace_id,
+    marketplace_id: data.marketplace_id,
     vat_rate: vatRate,
 
     // Price fields (SPEC §2)
@@ -284,7 +313,7 @@ export async function calculateEconomics(listingId, scenario = {}) {
 
     // Metadata
     computed_at: new Date().toISOString(),
-    bom_version: bomVersion,
+    bom_version: data.bom_version || null,
     fee_snapshot_id: null, // TODO: Implement fee snapshots
   };
 }
@@ -311,24 +340,61 @@ export async function previewPriceChange(listingId, newPriceIncVat) {
 }
 
 /**
- * Batch calculate economics for multiple listings
- * @param {number[]} listingIds
- * @returns {Promise<Object[]>}
+ * Run async functions in parallel with a concurrency limit
+ * @param {Array} items - Items to process
+ * @param {number} concurrency - Max concurrent operations
+ * @param {Function} fn - Async function to call for each item
+ * @returns {Promise<Array>} Results in same order as input
  */
-export async function calculateBatchEconomics(listingIds) {
-  const results = [];
-  for (const listingId of listingIds) {
-    try {
-      const economics = await calculateEconomics(listingId);
-      results.push(economics);
-    } catch (error) {
-      results.push({
-        listing_id: listingId,
-        error: error.message,
-      });
+async function parallelLimit(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const currentIndex = index++;
+      try {
+        results[currentIndex] = await fn(items[currentIndex]);
+      } catch (error) {
+        results[currentIndex] = { error: error.message };
+      }
     }
   }
+
+  // Start workers up to concurrency limit
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, items.length); i++) {
+    workers.push(worker());
+  }
+
+  await Promise.all(workers);
   return results;
+}
+
+/**
+ * Batch calculate economics for multiple listings
+ *
+ * A.4.1 FIX: Now runs in parallel with concurrency limit (was sequential)
+ * This dramatically improves performance for large batches.
+ *
+ * @param {number[]} listingIds
+ * @param {number} [concurrency=10] - Max concurrent calculations
+ * @returns {Promise<Object[]>}
+ */
+export async function calculateBatchEconomics(listingIds, concurrency = 10) {
+  // A.4.1 FIX: Parallel execution with concurrency limit
+  const results = await parallelLimit(listingIds, concurrency, async (listingId) => {
+    const economics = await calculateEconomics(listingId);
+    return economics;
+  });
+
+  // Add listing_id to error results for consistency
+  return results.map((result, idx) => {
+    if (result.error) {
+      return { listing_id: listingIds[idx], error: result.error };
+    }
+    return result;
+  });
 }
 
 // Named exports for testing

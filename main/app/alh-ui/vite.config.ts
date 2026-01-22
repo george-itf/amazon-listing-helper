@@ -14,4 +14,19 @@ export default defineConfig({
       },
     },
   },
+  // E.1 FIX: Add code splitting for better bundle optimization
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Core React dependencies
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          // Data fetching and utilities
+          'vendor-utils': ['axios', '@tanstack/react-virtual'],
+        },
+      },
+    },
+    // Generate chunk size warnings for chunks > 500KB
+    chunkSizeWarningLimit: 500,
+  },
 })

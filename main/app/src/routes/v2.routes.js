@@ -4366,21 +4366,31 @@ export async function registerV2Routes(fastify) {
    * POST /api/v2/backup
    * Create a database backup
    * Body: { type: 'full' | 'boms' }
+   *
+   * SECURITY: Uses allowlisted tables only (A.1.1 SQL injection fix)
    */
   fastify.post('/api/v2/backup', async (request, reply) => {
     const { query: dbQuery } = await import('../database/connection.js');
+    const {
+      isAllowedBackupType,
+      getBackupTables,
+      quoteIdentifier,
+    } = await import('../lib/sql-security.js');
     const { type = 'boms' } = request.body || {};
+
+    // Validate backup type against allowlist (A.1.1)
+    if (!isAllowedBackupType(type)) {
+      return reply.status(400).send({
+        success: false,
+        error: `Invalid backup type: ${type}. Allowed types: full, boms`,
+      });
+    }
 
     try {
       httpLogger.info(`[Backup] Creating ${type} backup...`);
 
-      // Build the backup SQL based on type
-      let tables;
-      if (type === 'full') {
-        tables = ['listings', 'components', 'suppliers', 'boms', 'bom_lines', 'asin_entities', 'listing_features', 'asin_features'];
-      } else {
-        tables = ['components', 'suppliers', 'boms', 'bom_lines'];
-      }
+      // Get allowlisted tables for this backup type (A.1.1)
+      const tables = getBackupTables(type);
 
       // Create backup data as JSON export
       const backup = {
@@ -4391,15 +4401,16 @@ export async function registerV2Routes(fastify) {
 
       for (const table of tables) {
         try {
-          const result = await dbQuery(`SELECT * FROM ${table}`);
+          // Use quoted identifier for safety (even though tables are from allowlist)
+          const result = await dbQuery(`SELECT * FROM ${quoteIdentifier(table)}`);
           backup.tables[table] = {
             count: result.rows.length,
             rows: result.rows,
           };
         } catch (err) {
-          // Table might not exist
+          // Table might not exist - don't leak error details
           httpLogger.warn(`[Backup] Skipping table ${table}: ${err.message}`);
-          backup.tables[table] = { count: 0, rows: [], error: err.message };
+          backup.tables[table] = { count: 0, rows: [], error: 'Table not available' };
         }
       }
 
@@ -4412,7 +4423,7 @@ export async function registerV2Routes(fastify) {
       return reply.send(backup);
     } catch (error) {
       httpLogger.error('[Backup] Backup failed:', error.message);
-      return reply.status(500).send({ success: false, error: error.message });
+      return reply.status(500).send({ success: false, error: 'Backup operation failed' });
     }
   });
 
@@ -4420,51 +4431,87 @@ export async function registerV2Routes(fastify) {
    * POST /api/v2/backup/restore
    * Restore from a backup file
    * Body: { backup: <backup JSON object> }
+   *
+   * SECURITY: Validates all table/column names against allowlists (A.1.1 SQL injection fix)
    */
   fastify.post('/api/v2/backup/restore', async (request, reply) => {
     const { query: dbQuery, transaction } = await import('../database/connection.js');
+    const {
+      isAllowedTable,
+      isAllowedBackupType,
+      getRestoreOrder,
+      filterAllowedColumns,
+      quoteIdentifier,
+    } = await import('../lib/sql-security.js');
     const { backup } = request.body || {};
 
     if (!backup || !backup.tables) {
       return reply.status(400).send({ success: false, error: 'Invalid backup format' });
     }
 
+    // Validate backup type (A.1.1)
+    if (backup.type && !isAllowedBackupType(backup.type)) {
+      return reply.status(400).send({
+        success: false,
+        error: `Invalid backup type in file: ${backup.type}`,
+      });
+    }
+
     try {
-      httpLogger.info(`[Backup] Restoring ${backup.type} backup from ${backup.created_at}...`);
+      httpLogger.info(`[Backup] Restoring ${backup.type || 'unknown'} backup from ${backup.created_at}...`);
 
       const results = {};
 
-      // Restore tables in order (dependencies first)
-      const restoreOrder = ['suppliers', 'components', 'boms', 'bom_lines', 'listings', 'asin_entities', 'listing_features', 'asin_features'];
+      // Use predefined restore order - not from backup file (A.1.1)
+      const restoreOrder = getRestoreOrder();
 
       await transaction(async (client) => {
         for (const table of restoreOrder) {
+          // Validate table name against allowlist (A.1.1)
+          if (!isAllowedTable(table)) {
+            httpLogger.warn(`[Backup] Skipping non-allowlisted table: ${table}`);
+            continue;
+          }
+
           const tableData = backup.tables[table];
           if (!tableData || !tableData.rows || tableData.rows.length === 0) {
             results[table] = { restored: 0, skipped: true };
             continue;
           }
 
-          // For each row, try to upsert (this is a simple restore, not a full sync)
+          // For each row, try to upsert with filtered columns (A.1.1)
           let restored = 0;
+          let skipped = 0;
           for (const row of tableData.rows) {
             try {
-              const columns = Object.keys(row).filter(k => k !== 'created_at' && k !== 'updated_at');
-              const values = columns.map(c => row[c]);
+              // Filter to only allowed columns for this table (A.1.1)
+              const filteredRow = filterAllowedColumns(table, row);
+              const columns = Object.keys(filteredRow);
+
+              if (columns.length === 0) {
+                skipped++;
+                continue;
+              }
+
+              const values = columns.map(c => filteredRow[c]);
               const placeholders = columns.map((_, i) => `$${i + 1}`);
+              // Quote all identifiers for safety (A.1.1)
+              const quotedColumns = columns.map(c => quoteIdentifier(c));
 
               // Simple insert with conflict handling
               await client.query(`
-                INSERT INTO ${table} (${columns.join(', ')})
+                INSERT INTO ${quoteIdentifier(table)} (${quotedColumns.join(', ')})
                 VALUES (${placeholders.join(', ')})
                 ON CONFLICT DO NOTHING
               `, values);
               restored++;
             } catch (err) {
-              // Skip individual row errors
+              // Skip individual row errors, log for debugging
+              httpLogger.debug(`[Backup] Row error in ${table}: ${err.message}`);
+              skipped++;
             }
           }
-          results[table] = { restored, total: tableData.rows.length };
+          results[table] = { restored, skipped, total: tableData.rows.length };
         }
       });
 
@@ -4477,13 +4524,15 @@ export async function registerV2Routes(fastify) {
       });
     } catch (error) {
       httpLogger.error('[Backup] Restore failed:', error.message);
-      return reply.status(500).send({ success: false, error: error.message });
+      return reply.status(500).send({ success: false, error: 'Restore operation failed' });
     }
   });
 
   /**
    * GET /api/v2/ready
    * Kubernetes-style readiness probe
+   *
+   * SECURITY: Does not leak internal error details (A.1.3 fix)
    */
   fastify.get('/api/v2/ready', async (request, reply) => {
     const { testConnection } = await import('../database/connection.js');
@@ -4495,7 +4544,9 @@ export async function registerV2Routes(fastify) {
       }
       return reply.status(503).send({ ready: false, reason: 'database_unavailable' });
     } catch (error) {
-      return reply.status(503).send({ ready: false, reason: error.message });
+      // A.1.3: Don't leak internal error details to clients
+      httpLogger.error('[Ready] Health check failed:', error.message);
+      return reply.status(503).send({ ready: false, reason: 'database_unavailable' });
     }
   });
 
