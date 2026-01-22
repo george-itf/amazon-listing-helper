@@ -1,0 +1,486 @@
+1. What Is This Project?
+Amazon Listing Helper is a full-stack e-commerce management platform for Amazon FBM (Fulfilled by Merchant) sellers. It combines:
+Amazon Seller Central data (via SP-API)
+Keepa price intelligence (competitive pricing)
+Internal BOM (Bill of Materials) costs
+ML-powered recommendations
+To enable data-driven pricing, inventory management, and profitability optimization.
+
+2. High-Level Architecture
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              FRONTEND (React)                               │
+│  /main/app/alh-ui/src                                                       │
+│  ┌──────────┐ ┌───────────────┐ ┌─────────────┐ ┌────────────┐ ┌─────────┐ │
+│  │ Listings │ │ ListingDetail │ │Recommendations│ │AsinAnalyzer│ │BomLibrary│ │
+│  └────┬─────┘ └───────┬───────┘ └──────┬──────┘ └─────┬──────┘ └────┬────┘ │
+│       └───────────────┴────────────────┴──────────────┴─────────────┘      │
+│                                    │                                        │
+│                           API Client Layer (api/*.ts)                       │
+└────────────────────────────────────┼────────────────────────────────────────┘
+                                     │ HTTP/JSON
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         BACKEND (Node.js/Fastify)                           │
+│  /main/app/src                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                    API Routes (v2.routes.js)                          │  │
+│  │  /api/v2/listings, /api/v2/recommendations, /api/v2/asins, etc.       │  │
+│  └───────────────────────────────┬──────────────────────────────────────┘  │
+│                                  │                                          │
+│  ┌───────────────────────────────┴──────────────────────────────────────┐  │
+│  │                        SERVICES LAYER                                 │  │
+│  │  ┌──────────────┐ ┌─────────────────┐ ┌────────────┐ ┌─────────────┐ │  │
+│  │  │ Economics    │ │ Recommendation  │ │   Keepa    │ │ ML-Features │ │  │
+│  │  │ Service      │ │ Service         │ │  Service   │ │  Service    │ │  │
+│  │  └──────────────┘ └─────────────────┘ └────────────┘ └─────────────┘ │  │
+│  │  ┌──────────────┐ ┌─────────────────┐ ┌────────────┐ ┌─────────────┐ │  │
+│  │  │ Guardrails   │ │ FeatureStore    │ │  BuyBox    │ │   Listing   │ │  │
+│  │  │ Service      │ │ Service         │ │  Service   │ │  Service    │ │  │
+│  │  └──────────────┘ └─────────────────┘ └────────────┘ └─────────────┘ │  │
+│  └───────────────────────────────┬──────────────────────────────────────┘  │
+│                                  │                                          │
+│  ┌───────────────────────────────┴──────────────────────────────────────┐  │
+│  │                     REPOSITORIES LAYER                                │  │
+│  │  listing.repo │ bom.repo │ component.repo │ job.repo │ event.repo    │  │
+│  └───────────────────────────────┬──────────────────────────────────────┘  │
+└──────────────────────────────────┼──────────────────────────────────────────┘
+                                   │ SQL
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DATABASE (PostgreSQL)                             │
+│  listings │ boms │ components │ jobs │ listing_events │ keepa_snapshots     │
+│  orders │ feature_store │ recommendations │ suppliers │ asin_entities       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+        ┌────────────────────────────────────────────────────────────────┐
+        │                  BACKGROUND WORKERS                            │
+        │  /main/app/src/workers/job-worker.js                          │
+        │  ┌────────────────┐  ┌───────────────┐  ┌──────────────────┐  │
+        │  │ Price/Stock    │  │ Amazon Sync   │  │ Feature Compute  │  │
+        │  │ Publishing     │  │ (SP-API)      │  │ & Recommendations│  │
+        │  └────────────────┘  └───────────────┘  └──────────────────┘  │
+        └────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+                        ┌────────────────────────────┐
+                        │    EXTERNAL APIS           │
+                        │  ┌────────────┐ ┌───────┐  │
+                        │  │ Amazon     │ │ Keepa │  │
+                        │  │ SP-API     │ │ API   │  │
+                        │  └────────────┘ └───────┘  │
+                        └────────────────────────────┘
+
+
+
+3. Directory Structure
+/home/user/amazon-listing-helper/
+├── main/app/
+│   ├── alh-ui/src/                    # FRONTEND (React + TypeScript)
+│   │   ├── pages/                     # 6 page components
+│   │   │   ├── Listings.tsx           # All listings table view
+│   │   │   ├── ListingDetail.tsx      # Single listing deep-dive
+│   │   │   ├── Recommendations.tsx    # AI recommendations panel
+│   │   │   ├── AsinAnalyzer.tsx       # ASIN research tool
+│   │   │   └── BomLibrary.tsx         # Component/BOM management
+│   │   ├── components/                # Reusable UI components
+│   │   │   ├── badges/                # BuyBoxBadge, RiskBadge
+│   │   │   ├── modals/                # PriceEditModal, StockEditModal
+│   │   │   └── tables/                # ListingsTable
+│   │   ├── api/                       # API client layer (Axios)
+│   │   │   ├── client.ts              # Base HTTP configuration
+│   │   │   ├── listings.ts            # Listings API calls
+│   │   │   ├── recommendations.ts     # Recommendations API
+│   │   │   └── asins.ts               # ASIN analyzer API
+│   │   ├── types/                     # TypeScript interfaces
+│   │   ├── App.tsx                    # Router configuration
+│   │   └── main.tsx                   # Entry point
+│   │
+│   ├── src/                           # BACKEND (Node.js + Fastify)
+│   │   ├── server.js                  # Fastify server entry point
+│   │   ├── routes/
+│   │   │   └── v2.routes.js           # ALL API endpoints (3,827 lines)
+│   │   ├── services/                  # Business logic layer
+│   │   │   ├── economics.service.js   # Profit/margin calculations
+│   │   │   ├── recommendation.service.js  # AI recommendations
+│   │   │   ├── keepa.service.js       # Keepa API integration
+│   │   │   ├── ml-features.service.js # 200+ ML features
+│   │   │   ├── feature-store.service.js # Feature caching
+│   │   │   ├── guardrails.service.js  # Business rule validation
+│   │   │   ├── buybox.service.js      # Buy Box tracking
+│   │   │   └── listing.service.js     # Listing operations
+│   │   ├── repositories/              # Data access layer
+│   │   │   ├── listing.repository.js  # Listing CRUD
+│   │   │   ├── bom.repository.js      # BOM management (versioned)
+│   │   │   ├── component.repository.js # Component library
+│   │   │   ├── job.repository.js      # Job queue management
+│   │   │   └── listing-event.repository.js # Audit trail
+│   │   ├── workers/
+│   │   │   └── job-worker.js          # Background job processor
+│   │   ├── database/
+│   │   │   └── connection.js          # PostgreSQL pool
+│   │   ├── amazon-data-sync.js        # SP-API data sync
+│   │   └── listings-sync.js           # Merchant listings sync
+│   │
+│   ├── schema.sql                     # Primary database schema
+│   ├── orders-schema.sql              # Orders tables
+│   └── docker-compose.yml             # PostgreSQL, Redis, MinIO
+│
+├── SPEC.md                            # Product specification (130KB)
+├── DATA_CONTRACTS.md                  # API data contracts
+└── .github/                           # CI/CD workflows
+
+
+
+4. Frontend → Backend Data Flow
+Flow 1: Loading Listings
+User opens /listings
+        │
+        ▼
+Listings.tsx → useEffect()
+        │
+        ▼
+api/listings.ts → GET /api/v2/listings
+        │
+        ▼
+v2.routes.js:252 → listingRepo.getAll()
+        │
+        ▼
+PostgreSQL: SELECT * FROM listings LEFT JOIN listing_images
+        │
+        ▼
+For each listing: GET /api/v2/listings/{id}/features
+        │
+        ▼
+featureStoreService.getLatestFeatures() → feature_store table
+        │
+        ▼
+Return ListingWithFeatures[] → Render ListingsTable
+
+
+Flow 2: Price Change (Preview → Publish)
+User clicks "Edit Price" on listing
+        │
+        ▼
+PriceEditModal opens → User enters new price
+        │
+        ▼
+PREVIEW: POST /api/v2/listings/{id}/price/preview
+        │
+        ├─→ economicsService.calculateEconomics(newPrice)
+        │      └─→ BOM cost + Fees + VAT calculations
+        │
+        ├─→ guardrails.validatePriceChange()
+        │      └─→ Check: min margin, max daily change, DOC
+        │
+        └─→ Return: {economics, guardrails} → Show preview UI
+        
+User clicks "Publish"
+        │
+        ▼
+PUBLISH: POST /api/v2/listings/{id}/price/publish
+        │
+        ├─→ RE-VALIDATE guardrails (never trust UI)
+        │
+        └─→ Transaction:
+              1. INSERT listing_event (audit)
+              2. INSERT job (PUBLISH_PRICE_CHANGE, PENDING)
+              3. Link event ↔ job
+        │
+        ▼
+Job Worker picks up job
+        │
+        ├─→ Call Amazon SP-API patchListingsItem
+        ├─→ UPDATE listings.price_inc_vat
+        ├─→ INSERT listing_event (SUCCEEDED)
+        └─→ Queue COMPUTE_FEATURES_LISTING job
+
+
+Flow 3: Recommendations
+RecommendationsPage mounts
+        │
+        ▼
+GET /api/v2/recommendations?status=PENDING
+        │
+        ▼
+recommendationService.getPendingRecommendations()
+        │
+        ▼
+Return recommendations with:
+  - Type (PRICE_DECREASE_REGAIN_BUYBOX, etc.)
+  - Severity (LOW/MEDIUM/HIGH/CRITICAL)
+  - Evidence (price bands, Buy Box %, velocity)
+  - Confidence score (0.0-1.0)
+        │
+        ▼
+User actions:
+  - Accept → POST /api/v2/recommendations/{id}/accept
+  - Reject → POST /api/v2/recommendations/{id}/reject
+  - Snooze → POST /api/v2/recommendations/{id}/snooze
+
+
+
+5. Service Layer - What Each Service Does
+Service
+Purpose
+Key Responsibility
+economics.service.js
+All profit/margin math
+VAT-aware pricing, BOM costs, break-even calculations
+recommendation.service.js
+AI recommendations
+Generates pricing/stock suggestions with confidence scores
+keepa.service.js
+Market intelligence
+Fetches price history, competitor data from Keepa API
+ml-features.service.js
+Feature engineering
+200+ ML features for model training
+feature-store.service.js
+Feature caching
+Stores computed features with deduplication
+guardrails.service.js
+Business rules
+Validates price/stock changes against safety thresholds
+buybox.service.js
+Buy Box tracking
+Monitors Buy Box ownership and competitive position
+listing.service.js
+CRUD + Jobs
+Listing operations and atomic job/event creation
+
+
+6. Database Tables - Key Relationships
+┌─────────────────────────────────────────────────────────────────┐
+│                         CORE ENTITIES                           │
+├─────────────────────────────────────────────────────────────────┤
+│  listings ←───────────────────────────────────────────────────┐ │
+│  (id, seller_sku, asin, price_inc_vat, available_quantity)    │ │
+│     │                                                         │ │
+│     ├──→ listing_images (1:N)                                 │ │
+│     ├──→ boms (1:N versions, 1 active)                        │ │
+│     │      └──→ bom_lines (1:N)                               │ │
+│     │            └──→ components (M:1)                        │ │
+│     │                  └──→ suppliers (M:1)                   │ │
+│     ├──→ listing_events (1:N audit trail)                     │ │
+│     ├──→ jobs (1:N background tasks)                          │ │
+│     ├──→ recommendations (1:N)                                │ │
+│     └──→ feature_store (1:N snapshots)                        │ │
+├─────────────────────────────────────────────────────────────────┤
+│  asin_entities ←──────────────────────────────────────────────┐ │
+│  (id, asin, marketplace_id, status)                           │ │
+│     │                                                         │ │
+│     ├──→ keepa_snapshots (1:N price history)                  │ │
+│     ├──→ feature_store (1:N snapshots, entity_type='ASIN')    │ │
+│     └──→ recommendations (1:N, entity_type='ASIN')            │ │
+├─────────────────────────────────────────────────────────────────┤
+│  orders ←───────────────────────────────────────────────────┐   │
+│  (amazon_order_id, purchase_date, order_total)              │   │
+│     └──→ order_items (1:N) ──→ links to listings via sku    │   │
+├─────────────────────────────────────────────────────────────────┤
+│  jobs (background task queue)                                   │
+│  (id, job_type, status, listing_id, input_json, result_json)    │
+│                                                                 │
+│  Job Types:                                                     │
+│  - PUBLISH_PRICE_CHANGE, PUBLISH_STOCK_CHANGE                   │
+│  - SYNC_KEEPA_ASIN, SYNC_AMAZON_*                               │
+│  - COMPUTE_FEATURES_LISTING, GENERATE_RECOMMENDATIONS_LISTING   │
+└─────────────────────────────────────────────────────────────────┘
+
+
+
+7. Background Job System
+JOB LIFECYCLE:
+                                    ┌──────────────┐
+                                    │   PENDING    │
+                                    └──────┬───────┘
+                                           │ Worker claims (FOR UPDATE SKIP LOCKED)
+                                           ▼
+                                    ┌──────────────┐
+                                    │   RUNNING    │
+                                    └──────┬───────┘
+                            ┌──────────────┴──────────────┐
+                            │                             │
+                            ▼                             ▼
+                     ┌──────────────┐             ┌──────────────┐
+                     │  SUCCEEDED   │             │ attempts < 3 │
+                     └──────────────┘             └──────┬───────┘
+                                                        │ Retry with backoff
+                                                        ▼
+                                                 ┌──────────────┐
+                                                 │   PENDING    │─┐
+                                                 └──────────────┘ │
+                                                        │         │ Loop
+                                                        └─────────┘
+                                                 If attempts >= max_attempts:
+                                                        │
+                                                        ▼
+                                                 ┌──────────────┐
+                                                 │    FAILED    │
+                                                 └──────────────┘
+
+JOB TYPES & HANDLERS:
+┌─────────────────────────────┬────────────────────────────────────────┐
+│ Job Type                    │ What It Does                           │
+├─────────────────────────────┼────────────────────────────────────────┤
+│ PUBLISH_PRICE_CHANGE        │ Call SP-API → Update local DB → Event  │
+│ PUBLISH_STOCK_CHANGE        │ Call SP-API → Update local DB → Event  │
+│ SYNC_KEEPA_ASIN             │ Fetch Keepa → Save snapshot            │
+│ COMPUTE_FEATURES_LISTING    │ Calculate 200+ features → Save         │
+│ GENERATE_RECOMMENDATIONS    │ Analyze features → Create recs         │
+│ SYNC_AMAZON_*               │ Fetch from SP-API → Bulk upsert        │
+└─────────────────────────────┴────────────────────────────────────────┘
+
+
+
+8. Key Business Logic Patterns
+Economics (VAT-Aware)
+price_inc_vat (what customer pays)
+        │
+        ▼ ÷ 1.20 (UK VAT)
+price_ex_vat
+        │
+        ▼ - costs
+┌───────────────────────────────────────┐
+│ BOM Cost (components × qty × wastage) │
+│ + Shipping                            │
+│ + Packaging                           │
+│ + Handling                            │
+│ + Amazon Fees (15% of price_ex_vat)   │
+│ = Total Cost                          │
+└───────────────────────────────────────┘
+        │
+        ▼
+profit_ex_vat = price_ex_vat - total_cost
+margin = profit / price_ex_vat
+break_even = total_cost × 1.20
+
+
+Guardrails (Never Trust UI)
+┌────────────────────────────────────────────────────────┐
+│ Rule                        │ Default │ Purpose        │
+├────────────────────────────────────────────────────────┤
+│ min_margin                  │ 15%     │ Prevent loss   │
+│ max_price_change_pct_per_day│ 5%      │ No volatility  │
+│ min_days_of_cover           │ 7 days  │ Don't cut low  │
+│ allow_price_below_break_even│ false   │ Block losses   │
+└────────────────────────────────────────────────────────┘
+
+VALIDATION FLOW:
+1. UI sends price change
+2. Backend RE-CALCULATES economics
+3. Backend RE-VALIDATES all guardrails
+4. If ANY violation → 400 error (blocked)
+5. If all pass → Create job + event atomically
+
+
+Recommendations Engine
+INPUT: Latest features from feature_store
+       ├─ Buy Box status (WON/LOST)
+       ├─ Margin (% and vs guardrail)
+       ├─ Keepa price bands (p25, median, p75)
+       ├─ Sales velocity & trend
+       └─ Days of cover
+
+RULES:
+┌────────────────────────────────┬────────────────────────────────┐
+│ If Buy Box LOST                │ Suggest P25 price (regain BB)  │
+│ If Buy Box WON + margin > 20%  │ Suggest median price (increase)│
+│ If DOC < 14 days               │ Suggest restock                │
+│ If margin < 15%                │ Alert: review costs            │
+│ If sales anomaly > 0.7         │ Alert: investigate             │
+└────────────────────────────────┴────────────────────────────────┘
+
+CONFIDENCE SCORING:
+- Keepa volatility < 10% → HIGH (0.85)
+- Keepa volatility < 20% → MEDIUM (0.65)
+- Keepa volatility > 20% → LOW (0.45)
+
+
+
+9. Technology Stack Summary
+Layer
+Technology
+Frontend
+React 19, TypeScript, Vite 7, Tailwind CSS, Axios
+Backend
+Node.js 20, Fastify 4, ES Modules
+Database
+PostgreSQL 15, pg driver (direct SQL)
+External APIs
+Amazon SP-API, Keepa API
+Background Jobs
+Custom job queue with PostgreSQL
+Deployment
+Railway, Docker Compose (local)
+Observability
+Pino logger, Prometheus metrics, Sentry
+
+
+10. Key Files Quick Reference
+File
+Lines
+What It Does
+v2.routes.js
+3,827
+ALL API endpoints in one file
+ml-features.service.js
+44KB
+200+ ML feature engineering
+job-worker.js
+28KB
+Background job processor
+keepa.service.js
+27KB
+Keepa API integration
+recommendation.service.js
+24KB
+AI recommendation engine
+amazon-data-sync.js
+62KB
+Full Amazon SP-API sync
+economics.service.js
+~15KB
+Profit/margin calculations
+
+
+11. Mental Model Summary
+┌─────────────────────────────────────────────────────────────────────┐
+│                    AMAZON LISTING HELPER                            │
+│                                                                     │
+│  PURPOSE: Help FBM sellers maximize profit through:                 │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐     │
+│  │ Smart Pricing   │  │ Stock Alerts    │  │ Market Intel    │     │
+│  │ (guardrails)    │  │ (DOC tracking)  │  │ (Keepa data)    │     │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘     │
+│                                                                     │
+│  DATA FLOW:                                                         │
+│  Amazon SP-API → DB → Features → Recommendations → User Action      │
+│                                                                     │
+│  SAFETY:                                                            │
+│  • VAT-inclusive prices for customers                               │
+│  • VAT-exclusive calculations internally                            │
+│  • All economics calculated server-side (never trust UI)            │
+│  • Guardrails block unprofitable changes                            │
+│  • Full audit trail via listing_events                              │
+│                                                                     │
+│  ASYNC PROCESSING:                                                  │
+│  • Jobs table = task queue                                          │
+│  • Worker polls for PENDING jobs                                    │
+│  • Atomic claiming with SKIP LOCKED                                 │
+│  • Retry with exponential backoff                                   │
+│  • Cascade: price change → feature recompute → new recommendations  │
+└─────────────────────────────────────────────────────────────────────┘
+
+
+
+This is a production-grade B2B SaaS platform with sophisticated:
+Financial calculations (VAT-aware, BOM-based)
+ML feature engineering (200+ features)
+Recommendation engine with confidence scoring
+Robust async job processing
+Complete audit trail
+Market intelligence integration
+The architecture cleanly separates concerns across frontend, API, services, repositories, and database layers.
+
+
+
