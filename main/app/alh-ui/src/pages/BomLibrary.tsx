@@ -46,6 +46,9 @@ export function BomLibraryPage() {
   const [hasChanges, setHasChanges] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Backup
+  const [isBackingUp, setIsBackingUp] = useState(false);
+
   const loadData = async () => {
     setIsLoading(true);
     setError(null);
@@ -73,6 +76,38 @@ export function BomLibraryPage() {
   const showSuccess = (message: string) => {
     setSuccessMessage(message);
     setTimeout(() => setSuccessMessage(null), 5000);
+  };
+
+  const handleBackup = async (type: 'boms' | 'full') => {
+    setIsBackingUp(true);
+    try {
+      const response = await fetch('/api/v2/backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Backup failed');
+      }
+
+      // Download the backup file
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `backup_${type}_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      showSuccess(`${type === 'full' ? 'Full' : 'BOM'} backup downloaded successfully`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Backup failed');
+    } finally {
+      setIsBackingUp(false);
+    }
   };
 
   const handleCreateComponent = async () => {
@@ -354,6 +389,28 @@ export function BomLibraryPage() {
         subtitle="Manage components and bills of materials"
         actions={
           <div className="flex gap-2">
+            <div className="relative group">
+              <button
+                disabled={isBackingUp}
+                className="btn btn-secondary btn-sm"
+              >
+                {isBackingUp ? 'Backing up...' : 'Backup'}
+              </button>
+              <div className="absolute right-0 mt-1 w-40 bg-white border rounded shadow-lg hidden group-hover:block z-10">
+                <button
+                  onClick={() => handleBackup('boms')}
+                  className="block w-full text-left px-4 py-2 hover:bg-gray-100 text-sm"
+                >
+                  BOMs Only
+                </button>
+                <button
+                  onClick={() => handleBackup('full')}
+                  className="block w-full text-left px-4 py-2 hover:bg-gray-100 text-sm"
+                >
+                  Full Backup
+                </button>
+              </div>
+            </div>
             <button
               onClick={() => setShowImportModal(true)}
               className="btn btn-secondary btn-sm"

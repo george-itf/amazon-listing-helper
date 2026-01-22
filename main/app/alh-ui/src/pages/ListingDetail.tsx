@@ -37,6 +37,7 @@ export function ListingDetailPage() {
   const [bomLines, setBomLines] = useState<Array<{ component_id: number; quantity: number; wastage_rate: number }>>([]);
   const [isBomSaving, setIsBomSaving] = useState(false);
   const [bomError, setBomError] = useState<string | null>(null);
+  const [componentSearches, setComponentSearches] = useState<{ [key: number]: string }>({});
 
   useEffect(() => {
     const loadData = async () => {
@@ -115,6 +116,19 @@ export function ListingDetailPage() {
     const newLines = [...bomLines];
     newLines[index] = { ...newLines[index], [field]: value };
     setBomLines(newLines);
+  };
+
+  const handleComponentSearch = (index: number, search: string) => {
+    setComponentSearches(prev => ({ ...prev, [index]: search }));
+  };
+
+  const getFilteredComponents = (index: number) => {
+    const search = (componentSearches[index] || '').toLowerCase();
+    if (!search) return components;
+    return components.filter(c =>
+      c.component_sku?.toLowerCase().includes(search) ||
+      c.name?.toLowerCase().includes(search)
+    );
   };
 
   const handleSaveBom = async () => {
@@ -335,29 +349,44 @@ export function ListingDetailPage() {
               {bomLines.length === 0 ? (
                 <p className="text-gray-500 text-sm">No components added yet. Click "Add Component" to start.</p>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-3">
                   {bomLines.map((line, index) => (
                     <div key={index} className="flex gap-2 items-center">
-                      <select
-                        className="input flex-1"
-                        value={line.component_id}
-                        onChange={(e) => handleBomLineChange(index, 'component_id', parseInt(e.target.value))}
-                      >
-                        <option value={0}>Select component...</option>
-                        {components.map(comp => (
-                          <option key={comp.id} value={comp.id}>
-                            {comp.component_sku} - {comp.name} (£{(Number(comp.unit_cost_ex_vat) || 0).toFixed(2)})
-                          </option>
-                        ))}
-                      </select>
+                      <div className="flex-1 relative">
+                        <input
+                          type="text"
+                          className="input w-full mb-1"
+                          placeholder="Search components..."
+                          value={componentSearches[index] || ''}
+                          onChange={(e) => handleComponentSearch(index, e.target.value)}
+                        />
+                        <select
+                          className="input w-full"
+                          value={line.component_id}
+                          onChange={(e) => {
+                            handleBomLineChange(index, 'component_id', parseInt(e.target.value));
+                            handleComponentSearch(index, ''); // Clear search after selection
+                          }}
+                        >
+                          <option value={0}>Select component...</option>
+                          {getFilteredComponents(index).map(comp => (
+                            <option key={comp.id} value={comp.id}>
+                              {comp.component_sku} - {comp.name} (£{(Number(comp.unit_cost_ex_vat) || 0).toFixed(2)})
+                            </option>
+                          ))}
+                        </select>
+                        {componentSearches[index] && getFilteredComponents(index).length === 0 && (
+                          <p className="text-xs text-gray-500 mt-1">No matches found</p>
+                        )}
+                      </div>
                       <input
                         type="number"
                         className="input w-20"
                         placeholder="Qty"
-                        min="0.01"
-                        step="0.01"
+                        min="1"
+                        step="1"
                         value={line.quantity}
-                        onChange={(e) => handleBomLineChange(index, 'quantity', parseFloat(e.target.value) || 0)}
+                        onChange={(e) => handleBomLineChange(index, 'quantity', parseInt(e.target.value) || 1)}
                       />
                       <input
                         type="number"
