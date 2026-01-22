@@ -356,30 +356,97 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(mapped);
     } catch (error) {
-      // Handle missing feature_store table gracefully - fall back to basic listings
+      // Handle missing feature_store table - auto-repair schema and retry
       if (error.message?.includes('does not exist')) {
-        httpLogger.warn('[API] GET /listings - feature_store table missing, returning listings without features');
+        httpLogger.warn('[API] GET /listings - table missing, attempting auto-repair...');
         try {
-          const listings = await listingRepo.getAll({
-            limit: Math.min(parseInt(request.query.limit, 10) || 1000, 5000),
-            offset: Math.max(parseInt(request.query.offset, 10) || 0, 0),
-            status: request.query.status,
-          });
-          const mapped = listings.map(l => ({
+          // Auto-repair schema
+          const { resetFailedMigrations } = await import('../database/connection.js');
+          const { runMigrations } = await import('../database/migrate.js');
+          await resetFailedMigrations();
+          const migrationResult = await runMigrations();
+          httpLogger.info(`[API] GET /listings - auto-repair complete, ${migrationResult.migrationsRun} migrations run`);
+
+          // Retry the original query
+          const { status, limit = '1000', offset = '0' } = request.query;
+          const parsedLimit = Math.min(parseInt(limit, 10) || 1000, 5000);
+          const parsedOffset = Math.max(parseInt(offset, 10) || 0, 0);
+
+          let retrySql = `
+            SELECT
+              l.id,
+              l.seller_sku,
+              l.asin,
+              l.title,
+              l.status,
+              l."createdAt" as created_at,
+              l."updatedAt" as updated_at,
+              fs.features_json,
+              fs.computed_at as features_computed_at
+            FROM listings l
+            LEFT JOIN LATERAL (
+              SELECT features_json, computed_at
+              FROM feature_store
+              WHERE entity_type = 'LISTING' AND entity_id = l.id
+              ORDER BY computed_at DESC
+              LIMIT 1
+            ) fs ON true
+            WHERE 1=1
+          `;
+
+          const retryParams = [];
+          let retryParamCount = 1;
+
+          if (status) {
+            retrySql += ` AND l.status = $${retryParamCount++}`;
+            retryParams.push(status);
+          }
+
+          retrySql += ` ORDER BY l."updatedAt" DESC NULLS LAST`;
+          retrySql += ` LIMIT $${retryParamCount++} OFFSET $${retryParamCount++}`;
+          retryParams.push(parsedLimit, parsedOffset);
+
+          const retryResult = await query(retrySql, retryParams);
+
+          const mapped = retryResult.rows.map(l => ({
             id: l.id,
             seller_sku: l.seller_sku,
             asin: l.asin || null,
             title: l.title || '',
             marketplace_id: 1,
             status: (l.status || 'active').toUpperCase(),
-            created_at: l.createdAt || l.created_at || new Date().toISOString(),
-            updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
-            features: null,
+            created_at: l.created_at || new Date().toISOString(),
+            updated_at: l.updated_at || new Date().toISOString(),
+            features: l.features_json || null,
+            features_computed_at: l.features_computed_at || null,
           }));
+
           return wrapResponse(mapped);
-        } catch (fallbackError) {
-          httpLogger.error('[API] GET /listings fallback error:', fallbackError.message);
-          return reply.status(500).send(wrapResponse(null, fallbackError.message));
+        } catch (repairError) {
+          httpLogger.error('[API] GET /listings auto-repair failed:', repairError.message);
+          // Fall back to basic listings without features
+          try {
+            const listings = await listingRepo.getAll({
+              limit: Math.min(parseInt(request.query.limit, 10) || 1000, 5000),
+              offset: Math.max(parseInt(request.query.offset, 10) || 0, 0),
+              status: request.query.status,
+            });
+            const mapped = listings.map(l => ({
+              id: l.id,
+              seller_sku: l.seller_sku,
+              asin: l.asin || null,
+              title: l.title || '',
+              marketplace_id: 1,
+              status: (l.status || 'active').toUpperCase(),
+              created_at: l.createdAt || l.created_at || new Date().toISOString(),
+              updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
+              features: null,
+            }));
+            return wrapResponse(mapped);
+          } catch (fallbackError) {
+            httpLogger.error('[API] GET /listings fallback error:', fallbackError.message);
+            return reply.status(500).send(wrapResponse(null, fallbackError.message));
+          }
         }
       }
       httpLogger.error('[API] GET /listings error:', error.message);
