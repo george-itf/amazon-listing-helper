@@ -15,6 +15,7 @@ export function ListingsPage() {
   const [selectedListing, setSelectedListing] = useState<ListingWithFeatures | null>(null);
   const [isPriceModalOpen, setIsPriceModalOpen] = useState(false);
   const [spApiConfigured, setSpApiConfigured] = useState<boolean | null>(null);
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE'>('ALL');
 
   const loadListings = async () => {
     setIsLoading(true);
@@ -108,6 +109,7 @@ export function ListingsPage() {
   const stats = {
     total: listings.length,
     active: listings.filter((l) => l.status === 'ACTIVE').length,
+    inactive: listings.filter((l) => l.status === 'INACTIVE').length,
     buyBoxWon: listings.filter((l) => l.features?.buy_box_status === 'WON').length,
     atRisk: listings.filter(
       (l) =>
@@ -116,6 +118,11 @@ export function ListingsPage() {
         (l.features?.margin != null && l.features.margin < 0.15)
     ).length,
   };
+
+  // Filter listings based on status tab
+  const filteredListings = statusFilter === 'ALL'
+    ? listings
+    : listings.filter((l) => l.status === statusFilter);
 
   return (
     <div>
@@ -191,6 +198,40 @@ export function ListingsPage() {
         </div>
       </div>
 
+      {/* Status tabs */}
+      <div className="flex gap-2 mb-4">
+        <button
+          onClick={() => setStatusFilter('ALL')}
+          className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+            statusFilter === 'ALL'
+              ? 'bg-blue-100 text-blue-700'
+              : 'text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          All ({stats.total})
+        </button>
+        <button
+          onClick={() => setStatusFilter('ACTIVE')}
+          className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+            statusFilter === 'ACTIVE'
+              ? 'bg-green-100 text-green-700'
+              : 'text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          Active ({stats.active})
+        </button>
+        <button
+          onClick={() => setStatusFilter('INACTIVE')}
+          className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+            statusFilter === 'INACTIVE'
+              ? 'bg-gray-200 text-gray-700'
+              : 'text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          Inactive ({stats.inactive})
+        </button>
+      </div>
+
       {/* Main content */}
       <div className="card">
         {isLoading && !isSyncing && (
@@ -222,7 +263,7 @@ export function ListingsPage() {
 
         {!isLoading && !isSyncing && listings.length > 0 && (
           <ListingsTable
-            listings={listings}
+            listings={filteredListings}
             onEditPrice={handleEditPrice}
           />
         )}
