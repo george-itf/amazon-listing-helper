@@ -2,7 +2,7 @@
  * Listing Types (per DATA_CONTRACTS.md)
  */
 
-export type BuyBoxStatus = 'WON' | 'LOST' | 'UNKNOWN';
+export type BuyBoxStatus = 'WON' | 'LOST' | 'PARTIAL' | 'UNKNOWN';
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN';
 export type PricePosition = 'BELOW_BAND' | 'IN_BAND' | 'ABOVE_BAND' | null;
 
