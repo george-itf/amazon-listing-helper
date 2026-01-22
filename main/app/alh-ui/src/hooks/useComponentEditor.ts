@@ -199,7 +199,8 @@ export function useComponentEditor() {
   }, [state.editingCell]);
 
   // Save all changes (I.3: with progress tracking)
-  const saveChanges = useCallback(async (): Promise<{ updated: number; failed: number; errors: Array<{ id: number; error: string }> }> => {
+  // NOTE: BulkUpdateResult.errors has id: number | null per api/boms.ts
+  const saveChanges = useCallback(async (): Promise<{ updated: number; failed: number; errors: Array<{ id: number | null; error: string }> }> => {
     if (state.editedComponents.size === 0) {
       return { updated: 0, failed: 0, errors: [] };
     }
