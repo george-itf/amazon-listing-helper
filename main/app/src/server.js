@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
+import fastifyCompress from '@fastify/compress';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -176,7 +177,19 @@ await fastify.register(cors, {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key'],
 });
 
-// 3. Rate Limiting (A.1.4 fix: only trust proxy headers when explicitly configured)
+// 3. Response Compression (gzip/deflate for JSON payloads)
+await fastify.register(fastifyCompress, {
+  global: true,
+  encodings: ['gzip', 'deflate'],
+  threshold: 1024,  // Only compress responses > 1KB
+  zlibOptions: {
+    level: 6,  // Balanced compression level (1=fastest/least, 9=slowest/most)
+  },
+});
+
+logger.info('Response compression enabled (gzip/deflate, threshold: 1KB)');
+
+// 4. Rate Limiting (A.1.4 fix: only trust proxy headers when explicitly configured)
 const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 await fastify.register(rateLimit, {
   max: parseInt(process.env.RATE_LIMIT_MAX || '100', 10), // Max requests per window
