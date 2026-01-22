@@ -248,33 +248,93 @@ export async function registerV2Routes(fastify) {
   /**
    * GET /api/v2/listings
    * Get all listings with optional filters
+   * Now includes features via LEFT JOIN LATERAL to eliminate N+1 API calls
    */
   fastify.get('/api/v2/listings', async (request, reply) => {
     try {
       const { status, limit = '100', offset = '0' } = request.query;
-      const filters = {
-        limit: Math.min(parseInt(limit, 10) || 100, 1000), // Cap at 1000
-        offset: Math.max(parseInt(offset, 10) || 0, 0),
-      };
-      if (status) filters.status = status;
+      const parsedLimit = Math.min(parseInt(limit, 10) || 100, 1000);
+      const parsedOffset = Math.max(parseInt(offset, 10) || 0, 0);
 
-      const listings = await listingRepo.getAll(filters);
+      // Try to fetch listings with features in a single query
+      let sql = `
+        SELECT
+          l.id,
+          COALESCE(l.seller_sku, l.sku) as seller_sku,
+          l.asin,
+          l.title,
+          l.status,
+          l."createdAt" as created_at,
+          l."updatedAt" as updated_at,
+          fs.features_json,
+          fs.computed_at as features_computed_at
+        FROM listings l
+        LEFT JOIN LATERAL (
+          SELECT features_json, computed_at
+          FROM feature_store
+          WHERE entity_type = 'LISTING' AND entity_id = l.id
+          ORDER BY computed_at DESC
+          LIMIT 1
+        ) fs ON true
+        WHERE 1=1
+      `;
 
-      // Map to frontend expected format (DATA_CONTRACTS.md)
-      // Note: Database column is seller_sku (renamed from sku in migration 001)
-      const mapped = listings.map(l => ({
+      const params = [];
+      let paramCount = 1;
+
+      if (status) {
+        sql += ` AND l.status = $${paramCount++}`;
+        params.push(status);
+      }
+
+      sql += ` ORDER BY l."updatedAt" DESC NULLS LAST`;
+      sql += ` LIMIT $${paramCount++} OFFSET $${paramCount++}`;
+      params.push(parsedLimit, parsedOffset);
+
+      const result = await query(sql, params);
+
+      // Map to frontend expected format with features included
+      const mapped = result.rows.map(l => ({
         id: l.id,
         seller_sku: l.seller_sku,
         asin: l.asin || null,
         title: l.title || '',
         marketplace_id: 1, // Default UK marketplace
         status: (l.status || 'active').toUpperCase(),
-        created_at: l.createdAt || l.created_at || new Date().toISOString(),
-        updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
+        created_at: l.created_at || new Date().toISOString(),
+        updated_at: l.updated_at || new Date().toISOString(),
+        features: l.features_json || null,
+        features_computed_at: l.features_computed_at || null,
       }));
 
       return wrapResponse(mapped);
     } catch (error) {
+      // Handle missing feature_store table gracefully - fall back to basic listings
+      if (error.message?.includes('does not exist')) {
+        httpLogger.warn('[API] GET /listings - feature_store table missing, returning listings without features');
+        try {
+          const listings = await listingRepo.getAll({
+            limit: Math.min(parseInt(request.query.limit, 10) || 100, 1000),
+            offset: Math.max(parseInt(request.query.offset, 10) || 0, 0),
+            status: request.query.status,
+          });
+          const mapped = listings.map(l => ({
+            id: l.id,
+            seller_sku: l.seller_sku,
+            asin: l.asin || null,
+            title: l.title || '',
+            marketplace_id: 1,
+            status: (l.status || 'active').toUpperCase(),
+            created_at: l.createdAt || l.created_at || new Date().toISOString(),
+            updated_at: l.updatedAt || l.updated_at || new Date().toISOString(),
+            features: null,
+          }));
+          return wrapResponse(mapped);
+        } catch (fallbackError) {
+          httpLogger.error('[API] GET /listings fallback error:', fallbackError.message);
+          return reply.status(500).send(wrapResponse(null, fallbackError.message));
+        }
+      }
       httpLogger.error('[API] GET /listings error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
@@ -365,6 +425,11 @@ export async function registerV2Routes(fastify) {
       const result = await query(sql, params);
       return wrapResponse(result.rows);
     } catch (error) {
+      // Handle missing tables gracefully - return empty array
+      if (error.message?.includes('does not exist')) {
+        httpLogger.warn('[API] GET /boms - table does not exist, returning empty array');
+        return wrapResponse([]);
+      }
       httpLogger.error('[API] GET /boms error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
@@ -1732,6 +1797,48 @@ export async function registerV2Routes(fastify) {
     `, [listingId]);
 
     return wrapResponse({ job_id: jobResult.rows[0].id, status: 'PENDING' });
+  });
+
+  /**
+   * POST /api/v2/listings/features/compute-all
+   * Trigger feature computation for ALL listings (admin/bootstrap endpoint)
+   * Useful for initial data population after importing listings
+   */
+  fastify.post('/api/v2/listings/features/compute-all', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+
+    try {
+      // Get all listing IDs
+      const listingsResult = await dbQuery('SELECT id FROM listings');
+      const listingIds = listingsResult.rows.map(r => r.id);
+
+      if (listingIds.length === 0) {
+        return wrapResponse({ message: 'No listings found', jobs_created: 0 });
+      }
+
+      // Bulk insert jobs using UNNEST
+      // ON CONFLICT DO NOTHING avoids duplicate jobs
+      const jobResult = await dbQuery(`
+        INSERT INTO jobs (job_type, scope_type, listing_id, priority, created_by)
+        SELECT 'COMPUTE_FEATURES_LISTING', 'LISTING', unnest($1::integer[]), 3, 'admin-bulk'
+        ON CONFLICT DO NOTHING
+        RETURNING id
+      `, [listingIds]);
+
+      return wrapResponse({
+        message: `Queued feature computation for ${listingIds.length} listings`,
+        jobs_created: jobResult.rowCount || 0,
+        listings_count: listingIds.length,
+      });
+    } catch (error) {
+      // Handle missing tables gracefully
+      if (error.message?.includes('does not exist')) {
+        httpLogger.warn('[API] POST /listings/features/compute-all - table does not exist');
+        return reply.status(400).send(wrapResponse(null, 'Required tables not yet created. Run migrations first.'));
+      }
+      httpLogger.error('[API] POST /listings/features/compute-all error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
   });
 
   /**

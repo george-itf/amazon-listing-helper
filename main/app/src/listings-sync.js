@@ -312,6 +312,30 @@ export async function syncListings(options = {}) {
         results.listingsCreated = bulkResult.created;
         results.listingsUpdated = bulkResult.updated;
         console.log(`[ListingsSync] Bulk upsert complete: ${bulkResult.created} created, ${bulkResult.updated} updated`);
+
+        // Queue feature computation jobs for all synced listings
+        if (bulkResult.rows && bulkResult.rows.length > 0) {
+          try {
+            const listingIds = bulkResult.rows.map(r => r.id);
+            const { query: dbQuery } = await import('./database/connection.js');
+
+            // Use UNNEST for efficient bulk insert of jobs
+            // ON CONFLICT DO NOTHING avoids duplicate jobs for same listing
+            const jobResult = await dbQuery(`
+              INSERT INTO jobs (job_type, scope_type, listing_id, priority, created_by)
+              SELECT 'COMPUTE_FEATURES_LISTING', 'LISTING', unnest($1::integer[]), 3, 'listings-sync'
+              ON CONFLICT DO NOTHING
+            `, [listingIds]);
+
+            console.log(`[ListingsSync] Queued feature computation for ${listingIds.length} listings`);
+            results.featuresJobsQueued = listingIds.length;
+          } catch (jobError) {
+            // Don't fail sync if job creation fails - features can be computed later
+            console.warn('[ListingsSync] Failed to queue feature jobs (non-fatal):', jobError.message);
+            results.warnings = results.warnings || [];
+            results.warnings.push('Failed to queue feature computation jobs');
+          }
+        }
       } catch (error) {
         console.error(`[ListingsSync] Bulk upsert failed:`, error.message);
 
