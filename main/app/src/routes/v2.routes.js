@@ -1908,6 +1908,157 @@ export async function registerV2Routes(fastify) {
     });
   });
 
+  /**
+   * POST /api/v2/listings/keepa/sync-all
+   * Bulk sync Keepa data for all listings with ASINs
+   * Admin endpoint to populate Keepa data initially
+   */
+  fastify.post('/api/v2/listings/keepa/sync-all', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const { hasKeepaCredentials } = await import('../credentials-provider.js');
+
+    // Check if Keepa credentials are configured
+    if (!hasKeepaCredentials()) {
+      return reply.status(400).send({
+        success: false,
+        error: 'Keepa API credentials not configured',
+        message: 'Set KEEPA_API_KEY environment variable to enable Keepa integration',
+      });
+    }
+
+    try {
+      // Get all unique ASINs from listings with marketplace_id
+      const asinsResult = await dbQuery(`
+        SELECT DISTINCT asin, marketplace_id
+        FROM listings
+        WHERE asin IS NOT NULL AND asin != ''
+      `);
+
+      if (asinsResult.rows.length === 0) {
+        return wrapResponse({
+          synced: 0,
+          message: 'No listings with ASINs found',
+        });
+      }
+
+      // Group ASINs by marketplace
+      const asinsByMarketplace = new Map();
+      for (const row of asinsResult.rows) {
+        const marketplaceId = row.marketplace_id || 1; // Default to 1 if null
+        if (!asinsByMarketplace.has(marketplaceId)) {
+          asinsByMarketplace.set(marketplaceId, []);
+        }
+        asinsByMarketplace.get(marketplaceId).push(row.asin);
+      }
+
+      // Import Keepa service
+      const keepaService = await import('../services/keepa.service.js');
+
+      let totalSynced = 0;
+      let totalFailed = 0;
+      const results = [];
+
+      // Sync each marketplace's ASINs
+      for (const [marketplaceId, asins] of asinsByMarketplace) {
+        console.log(`[Keepa Bulk Sync] Syncing ${asins.length} ASINs for marketplace ${marketplaceId}`);
+
+        try {
+          const syncResults = await keepaService.syncKeepaAsinsBatched(asins, marketplaceId, { skipCache: false });
+
+          let synced = 0;
+          let failed = 0;
+
+          for (const [asin, result] of syncResults) {
+            if (result.failed) {
+              failed++;
+            } else {
+              synced++;
+            }
+          }
+
+          totalSynced += synced;
+          totalFailed += failed;
+
+          results.push({
+            marketplace_id: marketplaceId,
+            total_asins: asins.length,
+            synced,
+            failed,
+          });
+        } catch (error) {
+          console.error(`[Keepa Bulk Sync] Error syncing marketplace ${marketplaceId}:`, error.message);
+          totalFailed += asins.length;
+          results.push({
+            marketplace_id: marketplaceId,
+            total_asins: asins.length,
+            synced: 0,
+            failed: asins.length,
+            error: error.message,
+          });
+        }
+      }
+
+      // Compute features for listings with synced ASINs
+      const computeImmediately = request.body?.compute_immediately === true;
+      const recomputeOption = request.body?.recompute_features !== false;
+      let featuresComputed = 0;
+      let featuresQueued = 0;
+
+      if (recomputeOption && totalSynced > 0) {
+        // Get listing IDs with ASINs
+        const listingsWithAsins = await dbQuery(`
+          SELECT id FROM listings
+          WHERE asin IS NOT NULL AND asin != ''
+        `);
+        const listingIds = listingsWithAsins.rows.map(r => r.id);
+
+        if (computeImmediately) {
+          // Compute features synchronously (can be slow for many listings)
+          console.log(`[Keepa Bulk Sync] Computing features for ${listingIds.length} listings...`);
+          const featureStoreService = await import('../services/feature-store.service.js');
+
+          for (const listingId of listingIds) {
+            try {
+              await featureStoreService.computeListingFeatures(listingId);
+              featuresComputed++;
+            } catch (error) {
+              console.warn(`[Keepa Bulk Sync] Failed to compute features for listing ${listingId}:`, error.message);
+            }
+          }
+        } else {
+          // Queue jobs for async computation
+          try {
+            const jobResult = await dbQuery(`
+              INSERT INTO jobs (job_type, scope_type, listing_id, priority, created_by)
+              SELECT 'COMPUTE_FEATURES_LISTING', 'LISTING', unnest($1::integer[]), 3, 'keepa-bulk-sync'
+              ON CONFLICT DO NOTHING
+              RETURNING id
+            `, [listingIds]);
+            featuresQueued = jobResult.rowCount;
+          } catch (error) {
+            console.warn('[Keepa Bulk Sync] Could not queue feature jobs:', error.message);
+          }
+        }
+      }
+
+      return wrapResponse({
+        total_asins: asinsResult.rows.length,
+        synced: totalSynced,
+        failed: totalFailed,
+        features_computed: featuresComputed,
+        features_jobs_queued: featuresQueued,
+        results,
+      });
+    } catch (error) {
+      console.error('[Keepa Bulk Sync] Error:', error);
+      return reply.status(500).send({
+        success: false,
+        error: 'Failed to sync Keepa data',
+        message: error.message,
+      });
+    }
+  });
+
   // ============================================================================
   // FEATURE STORE (Slice C)
   // ============================================================================
@@ -1946,10 +2097,12 @@ export async function registerV2Routes(fastify) {
   /**
    * POST /api/v2/listings/:listingId/features/refresh
    * Trigger feature computation for a listing
+   * Pass ?immediate=true or body { immediate: true } to compute synchronously
    */
   fastify.post('/api/v2/listings/:listingId/features/refresh', async (request, reply) => {
     const { query: dbQuery } = await import('../database/connection.js');
     const listingId = parseInt(request.params.listingId, 10);
+    const immediate = request.query?.immediate === 'true' || request.body?.immediate === true;
 
     // Verify listing exists
     const listingResult = await dbQuery('SELECT id FROM listings WHERE id = $1', [listingId]);
@@ -1957,7 +2110,24 @@ export async function registerV2Routes(fastify) {
       return reply.status(404).send({ success: false, error: 'Listing not found' });
     }
 
-    // Create feature computation job
+    if (immediate) {
+      // Compute synchronously
+      try {
+        const featureStoreService = await import('../services/feature-store.service.js');
+        const result = await featureStoreService.computeListingFeatures(listingId);
+        return wrapResponse({
+          listing_id: listingId,
+          feature_store_id: result.feature_store_id,
+          features: result.features,
+          computed_at: result.computed_at,
+          immediate: true,
+        });
+      } catch (error) {
+        return reply.status(500).send({ success: false, error: error.message });
+      }
+    }
+
+    // Create feature computation job (async)
     const jobResult = await dbQuery(`
       INSERT INTO jobs (job_type, scope_type, listing_id, created_by)
       VALUES ('COMPUTE_FEATURES_LISTING', 'LISTING', $1, 'user')
@@ -1971,9 +2141,11 @@ export async function registerV2Routes(fastify) {
    * POST /api/v2/listings/features/compute-all
    * Trigger feature computation for ALL listings (admin/bootstrap endpoint)
    * Useful for initial data population after importing listings
+   * Pass ?immediate=true or body { immediate: true } to compute synchronously
    */
   fastify.post('/api/v2/listings/features/compute-all', async (request, reply) => {
     const { query: dbQuery } = await import('../database/connection.js');
+    const immediate = request.query?.immediate === 'true' || request.body?.immediate === true;
 
     try {
       // Get all listing IDs
@@ -1981,10 +2153,37 @@ export async function registerV2Routes(fastify) {
       const listingIds = listingsResult.rows.map(r => r.id);
 
       if (listingIds.length === 0) {
-        return wrapResponse({ message: 'No listings found', jobs_created: 0 });
+        return wrapResponse({ message: 'No listings found', computed: 0, jobs_created: 0 });
       }
 
-      // Bulk insert jobs using UNNEST
+      if (immediate) {
+        // Compute synchronously (can be slow for many listings)
+        console.log(`[Feature Compute All] Computing features for ${listingIds.length} listings...`);
+        const featureStoreService = await import('../services/feature-store.service.js');
+
+        let computed = 0;
+        let failed = 0;
+
+        for (const listingId of listingIds) {
+          try {
+            await featureStoreService.computeListingFeatures(listingId);
+            computed++;
+          } catch (error) {
+            console.warn(`[Feature Compute All] Failed for listing ${listingId}:`, error.message);
+            failed++;
+          }
+        }
+
+        return wrapResponse({
+          message: `Computed features for ${computed} listings`,
+          computed,
+          failed,
+          listings_count: listingIds.length,
+          immediate: true,
+        });
+      }
+
+      // Bulk insert jobs using UNNEST (async)
       // ON CONFLICT DO NOTHING avoids duplicate jobs
       const jobResult = await dbQuery(`
         INSERT INTO jobs (job_type, scope_type, listing_id, priority, created_by)
