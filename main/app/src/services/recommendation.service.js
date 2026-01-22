@@ -752,16 +752,6 @@ export async function getPendingRecommendations(options = {}) {
   }
 }
 
-/**
- * Round money to 2 decimal places
- * Includes NaN guard to prevent propagation
- */
-function roundMoney(value) {
-  if (typeof value !== 'number' || isNaN(value)) return 0;
-  const result = Math.round(value * 100) / 100;
-  return result === 0 ? 0 : result; // Avoid -0
-}
-
 export default {
   generateListingRecommendations,
   generateAsinRecommendations,
