@@ -20,6 +20,9 @@ import { registerV2Routes } from './routes/v2.routes.js';
 // Job worker
 import { startWorker, stopWorker } from './workers/job-worker.js';
 
+// Startup tasks
+import { runStartupTasks } from './services/startup-tasks.service.js';
+
 // Observability
 import { logger, httpLogger } from './lib/logger.js';
 import { initSentry, captureException, flush as sentryFlush } from './lib/sentry.js';
@@ -323,6 +326,11 @@ const start = async () => {
     if (process.env.DISABLE_WORKER !== 'true') {
       startWorker();
       logger.info('Job worker started');
+
+      // Run startup tasks (non-blocking) - queues feature/Keepa jobs for stale data
+      runStartupTasks().catch(err => {
+        logger.warn({ err }, 'Startup tasks warning');
+      });
     }
   } catch (err) {
     logger.fatal({ err }, 'Failed to start server');
