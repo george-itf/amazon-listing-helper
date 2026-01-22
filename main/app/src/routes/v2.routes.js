@@ -2358,8 +2358,15 @@ export async function registerV2Routes(fastify) {
       if (error.message?.includes('does not exist')) {
         return wrapResponse([]);
       }
-      httpLogger.error('[API] GET /recommendations error:', error.message);
-      return reply.status(500).send(wrapResponse(null, error.message));
+      // Improved error logging to capture full error details
+      httpLogger.error('[API] GET /recommendations error:', {
+        message: error.message || 'No error message',
+        stack: error.stack,
+        code: error.code,
+        name: error.name,
+        error: String(error)
+      });
+      return reply.status(500).send(wrapResponse(null, error.message || 'Internal server error'));
     }
   });
 
