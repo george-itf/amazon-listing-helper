@@ -11,10 +11,14 @@ import {
   getComponents,
   createBom,
   updateBomLines,
-  activateBom,
 } from '../api/boms';
 import type { ListingWithFeatures, EconomicsResponse, Recommendation } from '../types';
 import type { Bom, Component } from '../api/boms';
+import {
+  getRecommendationTitle,
+  getRecommendationDescription,
+  getRecommendationActionText,
+} from '../types/recommendations';
 
 export function ListingDetailPage() {
   const { listingId } = useParams<{ listingId: string }>();
@@ -130,20 +134,15 @@ export function ListingDetailPage() {
       const id = parseInt(listingId);
 
       if (bom) {
-        // Update existing BOM lines
+        // Update existing BOM lines (creates new version, auto-activated)
         await updateBomLines(bom.id, { lines: validLines });
-        if (!bom.is_active) {
-          await activateBom(bom.id);
-        }
       } else {
-        // Create new BOM
-        const newBom = await createBom({
+        // Create new BOM (createVersion already sets is_active=true)
+        await createBom({
           listing_id: id,
           scope_type: 'LISTING',
           lines: validLines,
         });
-        // Activate the new BOM
-        await activateBom(newBom.id);
       }
 
       setIsBomEditing(false);
@@ -203,8 +202,8 @@ export function ListingDetailPage() {
   return (
     <div>
       <PageHeader
-        title={listing.seller_sku}
-        subtitle={listing.title}
+        title={listing.title || 'Untitled Listing'}
+        subtitle={listing.seller_sku}
         actions={
           <Link to="/listings" className="btn btn-secondary btn-sm">
             Back to Listings
@@ -430,13 +429,13 @@ export function ListingDetailPage() {
                   {bom.lines.map((line) => (
                     <div key={line.id} className="py-2 flex justify-between">
                       <span>
-                        {line.component?.name || `Component #${line.component_id}`}
+                        {line.component_name || line.component?.name || `Component #${line.component_id}`}
                         <span className="text-gray-500 text-sm ml-2">
                           × {line.quantity}{line.wastage_rate > 0 ? ` (+${(line.wastage_rate * 100).toFixed(0)}% wastage)` : ''}
                         </span>
                       </span>
                       <span className="font-medium">
-                        £{(line.quantity * (1 + line.wastage_rate) * (Number(line.component?.unit_cost_ex_vat) || 0)).toFixed(2)}
+                        £{(Number(line.line_cost_ex_vat) || (line.quantity * (1 + line.wastage_rate) * (Number(line.unit_cost_ex_vat) || Number(line.component?.unit_cost_ex_vat) || 0))).toFixed(2)}
                       </span>
                     </div>
                   ))}
@@ -510,20 +509,30 @@ export function ListingDetailPage() {
               {recommendations.map((rec) => (
                 <div key={rec.id} className="p-3 bg-gray-50 rounded-lg">
                   <div className="flex items-start justify-between">
-                    <div>
-                      <p className="font-medium">{rec.title}</p>
-                      <p className="text-sm text-gray-600">{rec.description}</p>
+                    <div className="flex-1 mr-3">
+                      <p className="font-medium">{getRecommendationTitle(rec)}</p>
+                      <p className="text-sm text-gray-600">{getRecommendationDescription(rec)}</p>
+                      <p className="text-sm text-blue-600 mt-1">{getRecommendationActionText(rec)}</p>
                     </div>
-                    <RiskBadge
-                      level={rec.severity === 'CRITICAL' ? 'HIGH' : rec.severity}
-                      label={rec.severity}
-                    />
+                    <div className="flex flex-col items-end gap-1">
+                      <RiskBadge
+                        level={rec.confidence as 'LOW' | 'MEDIUM' | 'HIGH'}
+                        label={rec.confidence}
+                      />
+                      <span className={`text-xs px-2 py-0.5 rounded ${
+                        rec.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700' :
+                        rec.status === 'ACCEPTED' ? 'bg-green-100 text-green-700' :
+                        rec.status === 'REJECTED' ? 'bg-red-100 text-red-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>
+                        {rec.status}
+                      </span>
+                    </div>
                   </div>
-                  {rec.evidence_json?.computed_at && (
-                    <p className="text-xs text-gray-400 mt-2">
-                      Evidence computed at: {new Date(rec.evidence_json.computed_at).toLocaleString()}
-                    </p>
-                  )}
+                  <div className="text-xs text-gray-400 mt-2 flex justify-between">
+                    <span>Confidence: {(rec.confidence_score * 100).toFixed(0)}%</span>
+                    <span>Generated: {new Date(rec.generated_at || rec.created_at).toLocaleString()}</span>
+                  </div>
                 </div>
               ))}
             </div>

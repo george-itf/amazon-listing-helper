@@ -5,21 +5,23 @@ interface BuyBoxBadgeProps {
 }
 
 export function BuyBoxBadge({ status }: BuyBoxBadgeProps) {
-  const styles = {
+  const styles: Record<BuyBoxStatus, string> = {
     WON: 'badge-success',
+    PARTIAL: 'badge-warning',
     LOST: 'badge-danger',
     UNKNOWN: 'badge-neutral',
   };
 
-  const labels = {
+  const labels: Record<BuyBoxStatus, string> = {
     WON: 'Won',
+    PARTIAL: 'Partial',
     LOST: 'Lost',
     UNKNOWN: 'Unknown',
   };
 
   return (
-    <span className={`badge ${styles[status]}`}>
-      {labels[status]}
+    <span className={`badge ${styles[status] || 'badge-neutral'}`}>
+      {labels[status] || status}
     </span>
   );
 }

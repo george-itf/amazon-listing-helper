@@ -103,8 +103,11 @@ export async function computeListingFeatures(listingId) {
   const availableQuantity = listing.available_quantity || 0;
   const daysOfCover = calculateDaysOfCover(availableQuantity, salesVelocity);
 
-  // Get Buy Box status from listing_offer_current - safe if table doesn't exist
+  // Get Buy Box status - try multiple sources
   let offer = {};
+  let buyBoxPercentage30d = null;
+
+  // Source 1: listing_offer_current (primary)
   try {
     const offerResult = await query(`
       SELECT buy_box_status, buy_box_percentage_30d, buy_box_price, is_buy_box_winner
@@ -115,7 +118,39 @@ export async function computeListingFeatures(listingId) {
   } catch (error) {
     if (!error.message?.includes('does not exist')) throw error;
   }
-  const buyBoxStatus = offer.buy_box_status || 'UNKNOWN';
+
+  // Source 2: amazon_sales_traffic (fallback - uses ASIN to get buy_box_percentage)
+  if (!offer.buy_box_status && listing.asin) {
+    try {
+      const trafficResult = await query(`
+        SELECT AVG(buy_box_percentage) as avg_buy_box_percentage
+        FROM amazon_sales_traffic
+        WHERE asin = $1
+          AND date >= CURRENT_DATE - INTERVAL '30 days'
+      `, [listing.asin]);
+      if (trafficResult.rows[0]?.avg_buy_box_percentage != null) {
+        buyBoxPercentage30d = safeParseFloat(trafficResult.rows[0].avg_buy_box_percentage, null);
+      }
+    } catch (error) {
+      if (!error.message?.includes('does not exist')) throw error;
+    }
+  }
+
+  // Determine Buy Box status from available data
+  let buyBoxStatus = offer.buy_box_status || 'UNKNOWN';
+  if (buyBoxStatus === 'UNKNOWN' && buyBoxPercentage30d !== null) {
+    // Derive status from buy_box_percentage: >50% = WON, 0% = LOST, otherwise PARTIAL
+    if (buyBoxPercentage30d >= 50) {
+      buyBoxStatus = 'WON';
+    } else if (buyBoxPercentage30d === 0) {
+      buyBoxStatus = 'LOST';
+    } else {
+      buyBoxStatus = 'PARTIAL'; // We have some buy box share but not majority
+    }
+  }
+
+  // Use buy_box_percentage from either source
+  const finalBuyBoxPercentage = safeParseFloat(offer.buy_box_percentage_30d, null) ?? buyBoxPercentage30d;
 
   // Get latest Keepa data if ASIN is available
   let keepaFeatures = {
@@ -176,6 +211,8 @@ export async function computeListingFeatures(listingId) {
     buyBoxRisk = 'LOW';
   } else if (buyBoxStatus === 'LOST') {
     buyBoxRisk = 'HIGH';
+  } else if (buyBoxStatus === 'PARTIAL') {
+    buyBoxRisk = 'MEDIUM';
   }
 
   // Calculate anomaly scores using Z-score analysis
@@ -212,7 +249,7 @@ export async function computeListingFeatures(listingId) {
 
     // Buy Box
     buy_box_status: buyBoxStatus,
-    buy_box_percentage_30d: safeParseFloat(offer.buy_box_percentage_30d, null),
+    buy_box_percentage_30d: finalBuyBoxPercentage,
     buy_box_risk: buyBoxRisk,
     competitor_price_position: competitorPricePosition,
 
