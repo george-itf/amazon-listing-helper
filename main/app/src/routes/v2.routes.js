@@ -1207,8 +1207,13 @@ export async function registerV2Routes(fastify) {
   /**
    * POST /api/v2/listings/:listingId/price/publish
    * Publish price change - creates job and listing_event
+   *
+   * Respects publish mode configuration:
+   * - ENABLE_PUBLISH=false: Returns 403 error
+   * - ENABLE_PUBLISH=true: Creates job (actual SP-API call depends on AMAZON_WRITE_MODE)
+   *
    * Body: { price_inc_vat, reason, correlation_id? }
-   * Response: { job_id, status, listing_event_id }
+   * Response: { job_id, status, listing_event_id, publish_config }
    */
   fastify.post('/api/v2/listings/:listingId/price/publish', {
     schema: schemas.pricePublishSchema,
@@ -1218,7 +1223,19 @@ export async function registerV2Routes(fastify) {
     const newPriceIncVat = parseFloat(price_inc_vat);
 
     try {
+      const { isPublishEnabled, getPublishConfig } = await import('../credentials-provider.js');
       const { validatePriceChange, calculateDaysOfCover } = await import('../services/guardrails.service.js');
+
+      // GATE: Check if publishing is enabled
+      const publishConfig = getPublishConfig();
+      if (!isPublishEnabled()) {
+        return reply.status(403).send({
+          success: false,
+          error: 'PUBLISH_DISABLED',
+          message: 'Publishing is disabled. Set ENABLE_PUBLISH=true in environment to allow publish operations.',
+          publish_config: publishConfig,
+        });
+      }
 
       // Get current listing data via service
       const listing = await listingService.getListingById(listingId);
@@ -1277,7 +1294,10 @@ export async function registerV2Routes(fastify) {
         correlationId: correlation_id,
       });
 
-      return reply.status(201).send(wrapResponse(result));
+      return reply.status(201).send(wrapResponse({
+        ...result,
+        publish_config: publishConfig,
+      }));
     } catch (error) {
       console.error('Price publish error:', error);
       // Handle duplicate job error specifically
@@ -1362,7 +1382,13 @@ export async function registerV2Routes(fastify) {
   /**
    * POST /api/v2/listings/:listingId/stock/publish
    * Publish stock change - creates job and listing_event
+   *
+   * Respects publish mode configuration:
+   * - ENABLE_PUBLISH=false: Returns 403 error
+   * - ENABLE_PUBLISH=true: Creates job (actual SP-API call depends on AMAZON_WRITE_MODE)
+   *
    * Body: { available_quantity, reason }
+   * Response: { job_id, status, listing_event_id, publish_config }
    */
   fastify.post('/api/v2/listings/:listingId/stock/publish', {
     schema: schemas.stockPublishSchema,
@@ -1372,6 +1398,19 @@ export async function registerV2Routes(fastify) {
     const newQuantity = parseInt(available_quantity, 10);
 
     try {
+      const { isPublishEnabled, getPublishConfig } = await import('../credentials-provider.js');
+
+      // GATE: Check if publishing is enabled
+      const publishConfig = getPublishConfig();
+      if (!isPublishEnabled()) {
+        return reply.status(403).send({
+          success: false,
+          error: 'PUBLISH_DISABLED',
+          message: 'Publishing is disabled. Set ENABLE_PUBLISH=true in environment to allow publish operations.',
+          publish_config: publishConfig,
+        });
+      }
+
       // Get current listing via service
       const listing = await listingService.getListingById(listingId);
       if (!listing) {
@@ -1395,7 +1434,10 @@ export async function registerV2Routes(fastify) {
         reason,
       });
 
-      return reply.status(201).send(wrapResponse(result));
+      return reply.status(201).send(wrapResponse({
+        ...result,
+        publish_config: publishConfig,
+      }));
     } catch (error) {
       console.error('Stock publish error:', error);
       // Handle duplicate job error specifically
@@ -4162,7 +4204,7 @@ export async function registerV2Routes(fastify) {
    */
   fastify.get('/api/v2/health', async (request, reply) => {
     const { testConnection } = await import('../database/connection.js');
-    const { getCredentialsStatus } = await import('../credentials-provider.js');
+    const { getCredentialsStatus, getPublishStatus } = await import('../credentials-provider.js');
 
     let dbHealthy = false;
     let keepaRateLimit = null;
@@ -4185,6 +4227,9 @@ export async function registerV2Routes(fastify) {
     // Get credentials status
     const credentials = getCredentialsStatus();
 
+    // Get publish status
+    const publishStatus = getPublishStatus();
+
     // Determine overall health
     const isHealthy = dbHealthy && credentials.spApi;
 
@@ -4205,6 +4250,19 @@ export async function registerV2Routes(fastify) {
           status: credentials.keepa ? 'ok' : 'not_configured',
           message: credentials.keepa ? 'API key configured' : 'Missing API key',
           rate_limit: keepaRateLimit,
+        },
+        publish: {
+          status: publishStatus.enabled ? (publishStatus.write_mode === 'live' ? 'live' : 'simulate') : 'disabled',
+          enabled: publishStatus.enabled,
+          write_mode: publishStatus.write_mode,
+          ready_for_live: publishStatus.ready_for_live,
+          message: !publishStatus.enabled
+            ? 'Publishing disabled (ENABLE_PUBLISH not set)'
+            : publishStatus.write_mode === 'simulate'
+              ? 'Simulate mode - SP-API writes blocked'
+              : publishStatus.has_sp_api_credentials
+                ? 'Live mode - SP-API writes enabled'
+                : 'Live mode but missing SP-API credentials',
         },
       },
     };
