@@ -522,6 +522,7 @@ export async function syncFbaFees() {
       await sleep(SYNC_CONFIG.delays.perItem);
     } catch (error) {
       syncLogger.debug({ sku: listing.seller_sku, err: error.message }, 'Skipped fees for SKU');
+    }
   }
 
   return {
