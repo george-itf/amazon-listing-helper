@@ -361,7 +361,7 @@ export async function registerV2Routes(fastify) {
         httpLogger.warn('[API] GET /listings - feature_store table missing, returning listings without features');
         try {
           const listings = await listingRepo.getAll({
-            limit: Math.min(parseInt(request.query.limit, 10) || 100, 1000),
+            limit: Math.min(parseInt(request.query.limit, 10) || 1000, 5000),
             offset: Math.max(parseInt(request.query.offset, 10) || 0, 0),
             status: request.query.status,
           });
