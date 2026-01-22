@@ -2,6 +2,8 @@
  * Amazon Data Sync Service
  * Comprehensive data fetching from ALL available Amazon SP-API endpoints
  *
+ * J.1-J.6 FIX: Improved rate limiting, timeouts, error handling, and config
+ *
  * Supported APIs:
  * - Reports API (listings, inventory, orders, sales)
  * - Orders API (real-time order data)
@@ -16,6 +18,81 @@ import SellingPartner from 'amazon-sp-api';
 import { getSpApiClientConfig, hasSpApiCredentials, getDefaultMarketplaceId, getSellerId } from './credentials-provider.js';
 import { query, transaction } from './database/connection.js';
 import { syncListings } from './listings-sync.js';
+import { createChildLogger } from './lib/logger.js';
+
+// J.5 FIX: Structured logging
+const syncLogger = createChildLogger({ service: 'amazon-sync' });
+
+// J.6 FIX: Centralized sync configuration
+const SYNC_CONFIG = {
+  // Rate limiting delays (ms)
+  delays: {
+    pagination: parseInt(process.env.SYNC_PAGINATION_DELAY_MS, 10) || 500,
+    perItem: parseInt(process.env.SYNC_PER_ITEM_DELAY_MS, 10) || 200,
+    batchDelay: parseInt(process.env.SYNC_BATCH_DELAY_MS, 10) || 1000,
+    reportPoll: parseInt(process.env.SYNC_REPORT_POLL_DELAY_MS, 10) || 5000,
+  },
+  // J.2 FIX: Report timeout (15 minutes default, env configurable)
+  reportTimeoutMs: parseInt(process.env.SYNC_REPORT_TIMEOUT_MS, 10) || 900000,
+  // Batch sizes
+  batchSizes: {
+    pricing: 20,  // API limit for competitive pricing
+    orderItems: 50, // Batch for order items upsert
+  },
+};
+
+// J.1 FIX: Centralized rate limiter for SP-API calls
+class SpApiRateLimiter {
+  constructor() {
+    // Rate limits per endpoint (requests per second)
+    this.limits = {
+      orders: { rps: 0.5, lastCall: 0 },       // 1 request per 2 seconds
+      fbaInventory: { rps: 2, lastCall: 0 },   // 2 requests per second
+      productPricing: { rps: 0.5, lastCall: 0 }, // Rate-limited endpoint
+      productFees: { rps: 1, lastCall: 0 },
+      catalogItems: { rps: 2, lastCall: 0 },
+      finances: { rps: 0.5, lastCall: 0 },
+      reports: { rps: 0.25, lastCall: 0 },     // Very rate-limited
+      default: { rps: 1, lastCall: 0 },
+    };
+    this.pendingRequests = new Map();
+  }
+
+  async waitForSlot(endpoint) {
+    const config = this.limits[endpoint] || this.limits.default;
+    const minInterval = 1000 / config.rps;
+    const now = Date.now();
+    const timeSinceLastCall = now - config.lastCall;
+
+    if (timeSinceLastCall < minInterval) {
+      const waitTime = minInterval - timeSinceLastCall;
+      syncLogger.debug({ endpoint, waitTime }, 'Rate limiting - waiting');
+      await sleep(waitTime);
+    }
+
+    config.lastCall = Date.now();
+  }
+
+  async execute(endpoint, operation, fn) {
+    await this.waitForSlot(endpoint);
+
+    try {
+      const result = await fn();
+      return result;
+    } catch (error) {
+      // Handle throttling errors with exponential backoff
+      if (error.code === 'QuotaExceeded' || error.statusCode === 429) {
+        const retryAfter = parseInt(error.headers?.['x-amzn-ratelimit-limit'], 10) || 2000;
+        syncLogger.warn({ endpoint, operation, retryAfter }, 'Rate limited - backing off');
+        await sleep(retryAfter);
+        return fn(); // Retry once
+      }
+      throw error;
+    }
+  }
+}
+
+const rateLimiter = new SpApiRateLimiter();
 
 /**
  * Create SP-API client
@@ -50,7 +127,8 @@ export async function syncOrders(daysBack = 30) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log(`[AmazonSync] Syncing orders from last ${daysBack} days...`);
+  // J.5 FIX: Structured logging
+  syncLogger.info({ daysBack }, 'Syncing orders');
 
   const marketplaceId = getDefaultMarketplaceId();
   const createdAfter = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
@@ -69,35 +147,39 @@ export async function syncOrders(daysBack = 30) {
       },
     };
 
-    const response = await sp.callAPI(params);
+    // J.1 FIX: Use centralized rate limiter
+    const response = await rateLimiter.execute('orders', 'getOrders', () =>
+      sp.callAPI(params)
+    );
 
     if (response.Orders) {
       orders = orders.concat(response.Orders);
     }
 
     nextToken = response.NextToken;
-    console.log(`[AmazonSync] Fetched ${orders.length} orders so far...`);
+    syncLogger.debug({ orderCount: orders.length }, 'Fetched orders page');
 
-    // Rate limiting - wait 500ms between calls
-    if (nextToken) await sleep(500);
+    // J.6 FIX: Use centralized delay config
+    if (nextToken) await sleep(SYNC_CONFIG.delays.pagination);
   } while (nextToken);
 
-  console.log(`[AmazonSync] Total orders fetched: ${orders.length}`);
+  syncLogger.info({ totalOrders: orders.length }, 'Total orders fetched');
 
   // Save to database using batch upsert (eliminates N+1)
   let saved = 0;
   try {
     saved = await batchUpsertOrders(orders);
-    console.log(`[AmazonSync] Batch upserted ${saved} orders`);
+    syncLogger.info({ saved }, 'Batch upserted orders');
   } catch (error) {
-    console.error(`[AmazonSync] Batch upsert failed, falling back to sequential:`, error.message);
+    // J.5 FIX: Structured error logging
+    syncLogger.warn({ err: error }, 'Batch upsert failed, falling back to sequential');
     // Fallback to individual upserts if batch fails
     for (const order of orders) {
       try {
         await upsertOrder(order);
         saved++;
       } catch (err) {
-        console.error(`[AmazonSync] Error saving order ${order.AmazonOrderId}:`, err.message);
+        syncLogger.error({ err, orderId: order.AmazonOrderId }, 'Error saving order');
       }
     }
   }
@@ -112,38 +194,63 @@ export async function syncOrders(daysBack = 30) {
 
 /**
  * Get order items for specific orders
+ * J.3 FIX: Batch insert order items to eliminate N+1
  */
 export async function syncOrderItems(orderIds) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log(`[AmazonSync] Fetching items for ${orderIds.length} orders...`);
+  syncLogger.info({ orderCount: orderIds.length }, 'Fetching order items');
 
-  let totalItems = 0;
+  // J.3 FIX: Collect all items first, then batch insert
+  const allItems = [];
 
   for (const orderId of orderIds) {
     try {
-      const response = await sp.callAPI({
-        operation: 'getOrderItems',
-        endpoint: 'orders',
-        path: { orderId },
-      });
+      // J.1 FIX: Use centralized rate limiter
+      const response = await rateLimiter.execute('orders', 'getOrderItems', () =>
+        sp.callAPI({
+          operation: 'getOrderItems',
+          endpoint: 'orders',
+          path: { orderId },
+        })
+      );
 
       if (response.OrderItems) {
         for (const item of response.OrderItems) {
-          await upsertOrderItem(orderId, item);
-          totalItems++;
+          allItems.push({ orderId, item });
         }
       }
 
-      // Rate limiting
-      await sleep(200);
+      // J.6 FIX: Use centralized delay config
+      await sleep(SYNC_CONFIG.delays.perItem);
     } catch (error) {
-      console.error(`[AmazonSync] Error fetching items for order ${orderId}:`, error.message);
+      // J.5 FIX: Structured error logging
+      syncLogger.error({ err: error, orderId }, 'Error fetching items for order');
     }
   }
 
-  return { items_synced: totalItems };
+  // J.3 FIX: Batch upsert all collected items
+  let saved = 0;
+  try {
+    if (allItems.length > 0) {
+      saved = await batchUpsertOrderItems(allItems);
+      syncLogger.info({ saved, total: allItems.length }, 'Batch upserted order items');
+    }
+  } catch (error) {
+    // Fallback to sequential inserts if batch fails
+    syncLogger.warn({ err: error }, 'Batch upsert failed, falling back to sequential');
+    for (const { orderId, item } of allItems) {
+      try {
+        await upsertOrderItem(orderId, item);
+        saved++;
+      } catch (err) {
+        syncLogger.error({ err, orderId, orderItemId: item.OrderItemId }, 'Error saving order item');
+      }
+    }
+  }
+
+  return { items_synced: saved };
 }
 
 // ============================================================================
@@ -157,7 +264,7 @@ export async function syncFbaInventory() {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log('[AmazonSync] Syncing FBA inventory...');
+  syncLogger.info('Syncing FBA inventory');
 
   const marketplaceId = getDefaultMarketplaceId();
   let inventoryItems = [];
@@ -176,31 +283,35 @@ export async function syncFbaInventory() {
       },
     };
 
-    const response = await sp.callAPI(params);
+    // J.1 FIX: Use centralized rate limiter
+    const response = await rateLimiter.execute('fbaInventory', 'getInventorySummaries', () =>
+      sp.callAPI(params)
+    );
 
     if (response.inventorySummaries) {
       inventoryItems = inventoryItems.concat(response.inventorySummaries);
     }
 
     nextToken = response.pagination?.nextToken;
-    console.log(`[AmazonSync] Fetched ${inventoryItems.length} inventory items...`);
+    syncLogger.debug({ itemCount: inventoryItems.length }, 'Fetched inventory page');
 
-    if (nextToken) await sleep(500);
+    // J.6 FIX: Use centralized delay config
+    if (nextToken) await sleep(SYNC_CONFIG.delays.pagination);
   } while (nextToken);
 
   // Save to database using batch upsert (eliminates N+1)
   let saved = 0;
   try {
     saved = await batchUpsertFbaInventory(inventoryItems);
-    console.log(`[AmazonSync] Batch upserted ${saved} inventory items`);
+    syncLogger.info({ saved }, 'Batch upserted inventory items');
   } catch (error) {
-    console.error(`[AmazonSync] Batch upsert failed, falling back to sequential:`, error.message);
+    syncLogger.warn({ err: error }, 'Batch upsert failed, falling back to sequential');
     for (const item of inventoryItems) {
       try {
         await upsertFbaInventory(item);
         saved++;
       } catch (err) {
-        console.error(`[AmazonSync] Error saving inventory ${item.sellerSku}:`, err.message);
+        syncLogger.error({ err, sku: item.sellerSku }, 'Error saving inventory');
       }
     }
   }
@@ -223,7 +334,7 @@ export async function syncCompetitivePricing() {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log('[AmazonSync] Syncing competitive pricing...');
+  syncLogger.info('Syncing competitive pricing');
 
   // Get all ASINs from listings
   const listingsResult = await query('SELECT DISTINCT asin FROM listings WHERE asin IS NOT NULL');
@@ -236,21 +347,24 @@ export async function syncCompetitivePricing() {
   const marketplaceId = getDefaultMarketplaceId();
   let saved = 0;
 
-  // Process in batches of 20 (API limit)
-  const batchSize = 20;
+  // J.6 FIX: Use centralized batch size config
+  const batchSize = SYNC_CONFIG.batchSizes.pricing;
   for (let i = 0; i < asins.length; i += batchSize) {
     const batch = asins.slice(i, i + batchSize);
 
     try {
-      const response = await sp.callAPI({
-        operation: 'getCompetitivePricing',
-        endpoint: 'productPricing',
-        query: {
-          MarketplaceId: marketplaceId,
-          Asins: batch,
-          ItemType: 'Asin',
-        },
-      });
+      // J.1 FIX: Use centralized rate limiter
+      const response = await rateLimiter.execute('productPricing', 'getCompetitivePricing', () =>
+        sp.callAPI({
+          operation: 'getCompetitivePricing',
+          endpoint: 'productPricing',
+          query: {
+            MarketplaceId: marketplaceId,
+            Asins: batch,
+            ItemType: 'Asin',
+          },
+        })
+      );
 
       if (response && Array.isArray(response)) {
         // Batch upsert all items from this API call
@@ -258,10 +372,11 @@ export async function syncCompetitivePricing() {
         saved += batchSaved;
       }
 
-      console.log(`[AmazonSync] Processed ${Math.min(i + batchSize, asins.length)}/${asins.length} ASINs`);
-      await sleep(1000); // Rate limiting
+      syncLogger.debug({ processed: Math.min(i + batchSize, asins.length), total: asins.length }, 'Processed pricing batch');
+      // J.6 FIX: Use centralized delay config
+      await sleep(SYNC_CONFIG.delays.batchDelay);
     } catch (error) {
-      console.error(`[AmazonSync] Error fetching pricing batch:`, error.message);
+      syncLogger.error({ err: error, batchStart: i }, 'Error fetching pricing batch');
     }
   }
 
@@ -291,12 +406,12 @@ export async function syncListingOffers(options = {}) {
     // Targeted sync - use provided ASINs
     asins = [...new Set(options.asins.filter(Boolean))]; // Dedupe and filter nulls
     mode = 'targeted';
-    console.log(`[AmazonSync] Syncing listing offers for ${asins.length} targeted ASIN(s)...`);
+    syncLogger.info({ asinCount: asins.length, mode }, 'Syncing listing offers (targeted)');
   } else {
     // Global sync - fetch all ASINs from listings
     const listingsResult = await query('SELECT DISTINCT asin FROM listings WHERE asin IS NOT NULL');
     asins = listingsResult.rows.map(r => r.asin).filter(Boolean);
-    console.log(`[AmazonSync] Syncing listing offers for all ${asins.length} ASIN(s)...`);
+    syncLogger.info({ asinCount: asins.length, mode }, 'Syncing listing offers (global)');
   }
 
   if (asins.length === 0) {
@@ -314,15 +429,18 @@ export async function syncListingOffers(options = {}) {
 
   for (const asin of asins) {
     try {
-      const response = await sp.callAPI({
-        operation: 'getItemOffers',
-        endpoint: 'productPricing',
-        path: { Asin: asin },
-        query: {
-          MarketplaceId: marketplaceId,
-          ItemCondition: 'New',
-        },
-      });
+      // J.1 FIX: Use centralized rate limiter
+      const response = await rateLimiter.execute('productPricing', 'getItemOffers', () =>
+        sp.callAPI({
+          operation: 'getItemOffers',
+          endpoint: 'productPricing',
+          path: { Asin: asin },
+          query: {
+            MarketplaceId: marketplaceId,
+            ItemCondition: 'New',
+          },
+        })
+      );
 
       if (response?.Offers) {
         for (const offer of response.Offers) {
@@ -331,10 +449,11 @@ export async function syncListingOffers(options = {}) {
         }
       }
 
-      await sleep(200); // Rate limiting
+      // J.6 FIX: Use centralized delay config
+      await sleep(SYNC_CONFIG.delays.perItem);
     } catch (error) {
-      // Skip - might be throttled or ASIN not found
-      console.log(`[AmazonSync] Skipped offers for ${asin}: ${error.message}`);
+      // J.5 FIX: Structured logging for skipped items
+      syncLogger.debug({ asin, err: error.message }, 'Skipped offers for ASIN');
     }
   }
 
@@ -358,7 +477,7 @@ export async function syncFbaFees() {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log('[AmazonSync] Syncing FBA fee estimates...');
+  syncLogger.info('Syncing FBA fee estimates');
 
   // Get all listings with prices
   const listingsResult = await query(`
@@ -372,34 +491,37 @@ export async function syncFbaFees() {
 
   for (const listing of listingsResult.rows) {
     try {
-      const response = await sp.callAPI({
-        operation: 'getMyFeesEstimateForSKU',
-        endpoint: 'productFees',
-        path: { SellerSKU: listing.seller_sku },
-        body: {
-          FeesEstimateRequest: {
-            MarketplaceId: marketplaceId,
-            PriceToEstimateFees: {
-              ListingPrice: {
-                CurrencyCode: 'GBP',
-                Amount: parseFloat(listing.price_inc_vat),
+      // J.1 FIX: Use centralized rate limiter
+      const response = await rateLimiter.execute('productFees', 'getMyFeesEstimateForSKU', () =>
+        sp.callAPI({
+          operation: 'getMyFeesEstimateForSKU',
+          endpoint: 'productFees',
+          path: { SellerSKU: listing.seller_sku },
+          body: {
+            FeesEstimateRequest: {
+              MarketplaceId: marketplaceId,
+              PriceToEstimateFees: {
+                ListingPrice: {
+                  CurrencyCode: 'GBP',
+                  Amount: parseFloat(listing.price_inc_vat),
+                },
               },
+              Identifier: listing.seller_sku,
+              IsAmazonFulfilled: true,
             },
-            Identifier: listing.seller_sku,
-            IsAmazonFulfilled: true,
           },
-        },
-      });
+        })
+      );
 
       if (response?.FeesEstimateResult) {
         await upsertFbaFeeEstimate(listing.seller_sku, response.FeesEstimateResult);
         saved++;
       }
 
-      await sleep(200); // Rate limiting
+      // J.6 FIX: Use centralized delay config
+      await sleep(SYNC_CONFIG.delays.perItem);
     } catch (error) {
-      console.log(`[AmazonSync] Skipped fees for ${listing.seller_sku}: ${error.message}`);
-    }
+      syncLogger.debug({ sku: listing.seller_sku, err: error.message }, 'Skipped fees for SKU');
   }
 
   return {
@@ -431,37 +553,44 @@ async function requestAndDownloadReport(sp, reportType, options = {}) {
   });
 
   const reportId = createResponse.reportId;
-  console.log(`[AmazonSync] Report ${reportType} requested: ${reportId}`);
+  syncLogger.info({ reportType, reportId }, 'Report requested');
 
-  // Wait for completion
-  const maxWait = 300000; // 5 minutes
+  // J.2 FIX: Wait for completion with configurable timeout (15 minutes default)
+  const maxWait = SYNC_CONFIG.reportTimeoutMs;
   const startTime = Date.now();
 
   while (Date.now() - startTime < maxWait) {
-    const report = await sp.callAPI({
-      operation: 'getReport',
-      endpoint: 'reports',
-      path: { reportId },
-    });
+    // J.1 FIX: Use centralized rate limiter
+    const report = await rateLimiter.execute('reports', 'getReport', () =>
+      sp.callAPI({
+        operation: 'getReport',
+        endpoint: 'reports',
+        path: { reportId },
+      })
+    );
 
     if (report.processingStatus === 'DONE') {
       // Download document
-      const document = await sp.callAPI({
-        operation: 'getReportDocument',
-        endpoint: 'reports',
-        path: { reportDocumentId: report.reportDocumentId },
-      });
+      const document = await rateLimiter.execute('reports', 'getReportDocument', () =>
+        sp.callAPI({
+          operation: 'getReportDocument',
+          endpoint: 'reports',
+          path: { reportDocumentId: report.reportDocumentId },
+        })
+      );
 
       const response = await fetch(document.url);
       return await response.text();
     } else if (report.processingStatus === 'CANCELLED' || report.processingStatus === 'FATAL') {
+      syncLogger.error({ reportId, status: report.processingStatus }, 'Report failed');
       throw new Error(`Report failed: ${report.processingStatus}`);
     }
 
-    await sleep(5000);
+    await sleep(SYNC_CONFIG.delays.reportPoll);
   }
 
-  throw new Error('Report timed out');
+  syncLogger.error({ reportId, timeoutMs: maxWait }, 'Report timed out');
+  throw new Error(`Report timed out after ${maxWait / 1000} seconds`);
 }
 
 /**
@@ -471,7 +600,7 @@ export async function syncFbaInventoryReport() {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log('[AmazonSync] Requesting FBA inventory report...');
+  syncLogger.info('Requesting FBA inventory report');
 
   try {
     const content = await requestAndDownloadReport(sp, 'GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA');
@@ -483,7 +612,7 @@ export async function syncFbaInventoryReport() {
         await upsertFbaInventoryReport(item);
         saved++;
       } catch (error) {
-        console.error(`[AmazonSync] Error saving inventory item:`, error.message);
+        syncLogger.error({ err: error }, 'Error saving inventory item');
       }
     }
 
@@ -493,7 +622,7 @@ export async function syncFbaInventoryReport() {
       items_saved: saved,
     };
   } catch (error) {
-    console.error('[AmazonSync] FBA inventory report failed:', error.message);
+    syncLogger.error({ err: error }, 'FBA inventory report failed');
     throw error;
   }
 }
@@ -510,7 +639,7 @@ export async function syncSalesAndTraffic(daysBack = 30, options = {}) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log(`[AmazonSync] Requesting sales & traffic report for last ${daysBack} days...`);
+  syncLogger.info({ daysBack }, 'Requesting sales & traffic report');
 
   const endDate = new Date();
   const startDate = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000);
@@ -522,7 +651,7 @@ export async function syncSalesAndTraffic(daysBack = 30, options = {}) {
   if (options.asins && Array.isArray(options.asins) && options.asins.length > 0) {
     targetAsins = new Set(options.asins.filter(Boolean));
     mode = 'targeted';
-    console.log(`[AmazonSync] Will filter to ${targetAsins.size} targeted ASIN(s)`);
+    syncLogger.info({ targetedAsinCount: targetAsins.size }, 'Filtering to targeted ASINs');
   }
 
   try {
@@ -544,7 +673,7 @@ export async function syncSalesAndTraffic(daysBack = 30, options = {}) {
         const itemAsin = item.parentAsin || item.childAsin;
         return targetAsins.has(itemAsin);
       });
-      console.log(`[AmazonSync] Filtered from ${totalFetched} to ${items.length} records for targeted ASINs`);
+      syncLogger.info({ totalFetched, filtered: items.length }, 'Filtered records for targeted ASINs');
     }
 
     let saved = 0;
@@ -552,15 +681,15 @@ export async function syncSalesAndTraffic(daysBack = 30, options = {}) {
       // Batch upsert filtered sales/traffic data (eliminates N+1)
       try {
         saved = await batchUpsertSalesTraffic(items);
-        console.log(`[AmazonSync] Batch upserted ${saved} sales/traffic records`);
+        syncLogger.info({ saved }, 'Batch upserted sales/traffic records');
       } catch (error) {
-        console.error(`[AmazonSync] Batch upsert failed, falling back to sequential:`, error.message);
+        syncLogger.warn({ err: error }, 'Batch upsert failed, falling back to sequential');
         for (const item of items) {
           try {
             await upsertSalesTraffic(item);
             saved++;
           } catch (err) {
-            console.error(`[AmazonSync] Error saving sales data:`, err.message);
+            syncLogger.error({ err }, 'Error saving sales data');
           }
         }
       }
@@ -576,7 +705,7 @@ export async function syncSalesAndTraffic(daysBack = 30, options = {}) {
       ...(mode === 'targeted' && { target_asins: [...targetAsins] }),
     };
   } catch (error) {
-    console.error('[AmazonSync] Sales & traffic report failed:', error.message);
+    syncLogger.error({ err: error }, 'Sales & traffic report failed');
     throw error;
   }
 }
@@ -588,7 +717,7 @@ export async function syncOrdersReport(daysBack = 30) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log(`[AmazonSync] Requesting orders report for last ${daysBack} days...`);
+  syncLogger.info({ daysBack }, 'Requesting orders report');
 
   const endDate = new Date();
   const startDate = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000);
@@ -607,7 +736,7 @@ export async function syncOrdersReport(daysBack = 30) {
         await upsertOrderFromReport(order);
         saved++;
       } catch (error) {
-        console.error(`[AmazonSync] Error saving order:`, error.message);
+        syncLogger.error({ err: error }, 'Error saving order');
       }
     }
 
@@ -617,7 +746,7 @@ export async function syncOrdersReport(daysBack = 30) {
       orders_saved: saved,
     };
   } catch (error) {
-    console.error('[AmazonSync] Orders report failed:', error.message);
+    syncLogger.error({ err: error }, 'Orders report failed');
     throw error;
   }
 }
@@ -628,12 +757,13 @@ export async function syncOrdersReport(daysBack = 30) {
 
 /**
  * Sync financial events (settlements, refunds, fees)
+ * J.4 FIX: Added idempotency via unique constraint on (event_type, amazon_order_id, posted_date)
  */
 export async function syncFinancialEvents(daysBack = 30) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log(`[AmazonSync] Syncing financial events from last ${daysBack} days...`);
+  syncLogger.info({ daysBack }, 'Syncing financial events');
 
   const postedAfter = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
 
@@ -650,31 +780,40 @@ export async function syncFinancialEvents(daysBack = 30) {
       },
     };
 
-    const response = await sp.callAPI(params);
+    // J.1 FIX: Use centralized rate limiter
+    const response = await rateLimiter.execute('finances', 'listFinancialEvents', () =>
+      sp.callAPI(params)
+    );
 
     if (response.FinancialEvents) {
       events.push(response.FinancialEvents);
     }
 
     nextToken = response.NextToken;
-    if (nextToken) await sleep(500);
+    // J.6 FIX: Use centralized delay config
+    if (nextToken) await sleep(SYNC_CONFIG.delays.pagination);
   } while (nextToken);
 
-  // Save to database
+  // Save to database with idempotency
   let saved = 0;
+  let duplicatesSkipped = 0;
   for (const eventGroup of events) {
     try {
-      await upsertFinancialEvents(eventGroup);
-      saved++;
+      const result = await upsertFinancialEvents(eventGroup);
+      saved += result.saved;
+      duplicatesSkipped += result.duplicates;
     } catch (error) {
-      console.error(`[AmazonSync] Error saving financial events:`, error.message);
+      syncLogger.error({ err: error }, 'Error saving financial events');
     }
   }
+
+  syncLogger.info({ saved, duplicatesSkipped }, 'Financial events sync complete');
 
   return {
     success: true,
     event_groups_fetched: events.length,
-    event_groups_saved: saved,
+    events_saved: saved,
+    duplicates_skipped: duplicatesSkipped,
   };
 }
 
@@ -701,12 +840,12 @@ export async function syncCatalogItems(options = {}) {
     // Targeted sync - use provided ASINs
     asins = [...new Set(options.asins.filter(Boolean))]; // Dedupe and filter nulls
     mode = 'targeted';
-    console.log(`[AmazonSync] Syncing catalog items for ${asins.length} targeted ASIN(s)...`);
+    syncLogger.info({ asinCount: asins.length, mode }, 'Syncing catalog items (targeted)');
   } else {
     // Global sync - fetch all ASINs from listings
     const listingsResult = await query('SELECT DISTINCT asin FROM listings WHERE asin IS NOT NULL');
     asins = listingsResult.rows.map(r => r.asin).filter(Boolean);
-    console.log(`[AmazonSync] Syncing catalog items for all ${asins.length} ASIN(s)...`);
+    syncLogger.info({ asinCount: asins.length, mode }, 'Syncing catalog items (global)');
   }
 
   if (asins.length === 0) {
@@ -724,24 +863,28 @@ export async function syncCatalogItems(options = {}) {
 
   for (const asin of asins) {
     try {
-      const response = await sp.callAPI({
-        operation: 'getCatalogItem',
-        endpoint: 'catalogItems',
-        path: { asin },
-        query: {
-          marketplaceIds: marketplaceId,
-          includedData: 'attributes,dimensions,identifiers,images,productTypes,salesRanks,summaries',
-        },
-      });
+      // J.1 FIX: Use centralized rate limiter
+      const response = await rateLimiter.execute('catalogItems', 'getCatalogItem', () =>
+        sp.callAPI({
+          operation: 'getCatalogItem',
+          endpoint: 'catalogItems',
+          path: { asin },
+          query: {
+            marketplaceIds: marketplaceId,
+            includedData: 'attributes,dimensions,identifiers,images,productTypes,salesRanks,summaries',
+          },
+        })
+      );
 
       if (response) {
         await upsertCatalogItem(asin, response);
         saved++;
       }
 
-      await sleep(500); // Rate limiting
+      // J.6 FIX: Use centralized delay config
+      await sleep(SYNC_CONFIG.delays.pagination);
     } catch (error) {
-      console.log(`[AmazonSync] Skipped catalog for ${asin}: ${error.message}`);
+      syncLogger.debug({ asin, err: error.message }, 'Skipped catalog for ASIN');
     }
   }
 
@@ -777,11 +920,12 @@ export async function syncAll() {
     errors: [],
   };
 
-  console.log('[AmazonSync] === STARTING FULL AMAZON DATA SYNC (PARALLELIZED) ===');
+  // J.5 FIX: Structured logging throughout
+  syncLogger.info('Starting full Amazon data sync (parallelized)');
 
   // Phase 0: Listings Report (core data - MUST sync first)
   try {
-    console.log('[AmazonSync] Phase 0 - Syncing Listings from Report...');
+    syncLogger.info({ phase: 0 }, 'Syncing Listings from Report');
     const listingsResult = await syncListings();
     results.syncs.listings = {
       success: true,
@@ -790,12 +934,12 @@ export async function syncAll() {
       listings_updated: listingsResult.listingsUpdated,
     };
   } catch (error) {
-    console.error('[AmazonSync] Listings sync failed:', error.message);
+    syncLogger.error({ err: error, sync: 'listings' }, 'Listings sync failed');
     results.errors.push({ sync: 'listings', error: error.message });
   }
 
   // Phase 1: Parallel - Independent API endpoints
-  console.log('[AmazonSync] Phase 1 - Parallel: FBA Inventory, Orders, Financial Events...');
+  syncLogger.info({ phase: 1 }, 'Parallel: FBA Inventory, Orders, Financial Events');
   const phase1Results = await Promise.allSettled([
     syncFbaInventory().then(r => ({ name: 'fba_inventory', result: r })),
     syncOrders(30).then(r => ({ name: 'orders', result: r })),
@@ -807,13 +951,13 @@ export async function syncAll() {
       results.syncs[outcome.value.name] = outcome.value.result;
     } else {
       const syncName = outcome.reason?.name || 'unknown';
-      console.error(`[AmazonSync] ${syncName} sync failed:`, outcome.reason?.message || outcome.reason);
+      syncLogger.error({ err: outcome.reason, sync: syncName }, 'Sync failed');
       results.errors.push({ sync: syncName, error: outcome.reason?.message || String(outcome.reason) });
     }
   }
 
   // Phase 2: Parallel - Syncs that query listings table + reports
-  console.log('[AmazonSync] Phase 2 - Parallel: Pricing, Fees, Catalog, Sales...');
+  syncLogger.info({ phase: 2 }, 'Parallel: Pricing, Fees, Catalog, Sales');
   const phase2Results = await Promise.allSettled([
     syncCompetitivePricing().then(r => ({ name: 'competitive_pricing', result: r })),
     syncFbaFees().then(r => ({ name: 'fba_fees', result: r })),
@@ -826,17 +970,17 @@ export async function syncAll() {
       results.syncs[outcome.value.name] = outcome.value.result;
     } else {
       const syncName = outcome.reason?.name || 'unknown';
-      console.error(`[AmazonSync] ${syncName} sync failed:`, outcome.reason?.message || outcome.reason);
+      syncLogger.error({ err: outcome.reason, sync: syncName }, 'Sync failed');
       results.errors.push({ sync: syncName, error: outcome.reason?.message || String(outcome.reason) });
     }
   }
 
   // Phase 3: Listing Offers (most API intensive - run alone to avoid rate limits)
-  console.log('[AmazonSync] Phase 3 - Listing Offers...');
+  syncLogger.info({ phase: 3 }, 'Listing Offers');
   try {
     results.syncs.listing_offers = await syncListingOffers();
   } catch (error) {
-    console.error('[AmazonSync] Listing offers sync failed:', error.message);
+    syncLogger.error({ err: error, sync: 'listing_offers' }, 'Listing offers sync failed');
     results.errors.push({ sync: 'listing_offers', error: error.message });
   }
 
@@ -846,8 +990,7 @@ export async function syncAll() {
   const successCount = Object.keys(results.syncs).length;
   const totalCount = successCount + results.errors.length;
 
-  console.log('[AmazonSync] === FULL SYNC COMPLETE ===');
-  console.log(`[AmazonSync] Successful: ${successCount}/${totalCount}`);
+  syncLogger.info({ successCount, totalCount, success: results.success }, 'Full sync complete');
 
   return results;
 }
@@ -860,7 +1003,7 @@ export async function syncAll() {
  * Ensure all required tables exist
  */
 export async function ensureTables() {
-  console.log('[AmazonSync] Ensuring database tables exist...');
+  syncLogger.info('Ensuring database tables exist');
 
   // Amazon Orders table
   await query(`
@@ -1089,7 +1232,7 @@ export async function ensureTables() {
   await query('CREATE INDEX IF NOT EXISTS idx_amazon_financial_events_order ON amazon_financial_events(amazon_order_id)');
   await query('CREATE INDEX IF NOT EXISTS idx_amazon_catalog_items_asin ON amazon_catalog_items(asin)');
 
-  console.log('[AmazonSync] Database tables ready');
+  syncLogger.info('Database tables ready');
 }
 
 // ============================================================================
@@ -1168,6 +1311,72 @@ async function batchUpsertOrders(orders) {
     orderTotalAmounts, orderTotalCurrencies,
     numbersOfItemsShipped, numbersOfItemsUnshipped,
     buyerEmails, buyerNames, shippingAddresses, rawJsons,
+  ]);
+
+  return result.rowCount;
+}
+
+/**
+ * J.3 FIX: Batch upsert order items using UNNEST
+ * Eliminates N+1 query pattern in syncOrderItems
+ */
+async function batchUpsertOrderItems(items) {
+  if (!items || items.length === 0) return 0;
+
+  const amazonOrderIds = [];
+  const orderItemIds = [];
+  const asins = [];
+  const sellerSkus = [];
+  const titles = [];
+  const quantitiesOrdered = [];
+  const quantitiesShipped = [];
+  const itemPriceAmounts = [];
+  const itemPriceCurrencies = [];
+  const itemTaxAmounts = [];
+  const promotionDiscountAmounts = [];
+  const rawJsons = [];
+
+  for (const { orderId, item } of items) {
+    amazonOrderIds.push(orderId);
+    orderItemIds.push(item.OrderItemId);
+    asins.push(item.ASIN || null);
+    sellerSkus.push(item.SellerSKU || null);
+    titles.push(item.Title || null);
+    quantitiesOrdered.push(item.QuantityOrdered || 0);
+    quantitiesShipped.push(item.QuantityShipped || 0);
+    itemPriceAmounts.push(item.ItemPrice?.Amount || null);
+    itemPriceCurrencies.push(item.ItemPrice?.CurrencyCode || null);
+    itemTaxAmounts.push(item.ItemTax?.Amount || null);
+    promotionDiscountAmounts.push(item.PromotionDiscount?.Amount || null);
+    rawJsons.push(JSON.stringify(item));
+  }
+
+  const result = await query(`
+    INSERT INTO amazon_order_items (
+      amazon_order_id, order_item_id, asin, seller_sku, title,
+      quantity_ordered, quantity_shipped,
+      item_price_amount, item_price_currency, item_tax_amount,
+      promotion_discount_amount, raw_json, updated_at
+    )
+    SELECT * FROM UNNEST(
+      $1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[], $5::text[],
+      $6::integer[], $7::integer[],
+      $8::decimal[], $9::varchar[], $10::decimal[],
+      $11::decimal[], $12::jsonb[]
+    ) AS t(amazon_order_id, order_item_id, asin, seller_sku, title,
+           quantity_ordered, quantity_shipped,
+           item_price_amount, item_price_currency, item_tax_amount,
+           promotion_discount_amount, raw_json)
+    CROSS JOIN (SELECT CURRENT_TIMESTAMP AS updated_at) AS times
+    ON CONFLICT (order_item_id) DO UPDATE SET
+      quantity_shipped = EXCLUDED.quantity_shipped,
+      raw_json = EXCLUDED.raw_json,
+      updated_at = CURRENT_TIMESTAMP
+  `, [
+    amazonOrderIds, orderItemIds, asins, sellerSkus, titles,
+    quantitiesOrdered, quantitiesShipped,
+    itemPriceAmounts, itemPriceCurrencies, itemTaxAmounts,
+    promotionDiscountAmounts, rawJsons,
   ]);
 
   return result.rowCount;
@@ -1673,16 +1882,26 @@ async function upsertSalesTraffic(item) {
   ]);
 }
 
+/**
+ * J.4 FIX: Upsert financial events with idempotency
+ * Uses ON CONFLICT DO NOTHING with unique index on (event_type, amazon_order_id, posted_date)
+ * Returns count of saved and duplicate (skipped) events
+ */
 async function upsertFinancialEvents(eventGroup) {
+  let saved = 0;
+  let duplicates = 0;
+
   // Process shipment events
   for (const event of eventGroup.ShipmentEventList || []) {
     for (const item of event.ShipmentItemList || []) {
-      await query(`
+      // J.4 FIX: ON CONFLICT DO NOTHING for idempotency
+      const result = await query(`
         INSERT INTO amazon_financial_events (
           event_type, amazon_order_id, seller_order_id, posted_date,
           marketplace_id, transaction_type, amount, currency,
           asin, seller_sku, quantity, raw_json
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT DO NOTHING
       `, [
         'SHIPMENT',
         event.AmazonOrderId,
@@ -1697,18 +1916,25 @@ async function upsertFinancialEvents(eventGroup) {
         item.QuantityShipped,
         JSON.stringify(event),
       ]);
+      if (result.rowCount > 0) {
+        saved++;
+      } else {
+        duplicates++;
+      }
     }
   }
 
   // Process refund events
   for (const event of eventGroup.RefundEventList || []) {
     for (const item of event.ShipmentItemAdjustmentList || []) {
-      await query(`
+      // J.4 FIX: ON CONFLICT DO NOTHING for idempotency
+      const result = await query(`
         INSERT INTO amazon_financial_events (
           event_type, amazon_order_id, seller_order_id, posted_date,
           marketplace_id, transaction_type, amount, currency,
           seller_sku, quantity, raw_json
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT DO NOTHING
       `, [
         'REFUND',
         event.AmazonOrderId,
@@ -1722,8 +1948,15 @@ async function upsertFinancialEvents(eventGroup) {
         item.QuantityShipped,
         JSON.stringify(event),
       ]);
+      if (result.rowCount > 0) {
+        saved++;
+      } else {
+        duplicates++;
+      }
     }
   }
+
+  return { saved, duplicates };
 }
 
 async function upsertCatalogItem(asin, item) {
