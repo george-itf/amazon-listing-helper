@@ -16,6 +16,11 @@
 import { query, transaction } from '../database/connection.js';
 import * as economicsService from './economics.service.js';
 import { calculateDaysOfCover, calculateStockoutRisk } from './guardrails.service.js';
+import { createChildLogger } from '../lib/logger.js';
+import crypto from 'crypto';
+
+// G.4 FIX: Create service-specific logger
+const featureStoreLogger = createChildLogger({ service: 'feature-store' });
 
 /**
  * Safe parseFloat - returns defaultValue on NaN
@@ -33,7 +38,70 @@ function safeParseInt(value, defaultValue = 0) {
   return isNaN(parsed) ? defaultValue : parsed;
 }
 
-const FEATURE_VERSION = 1;
+/**
+ * G.3 FIX: Feature schema keys for versioning
+ * When this list changes, the version hash will change
+ */
+const LISTING_FEATURE_KEYS = [
+  // Economics
+  'vat_rate', 'price_inc_vat', 'price_ex_vat', 'bom_cost_ex_vat',
+  'shipping_cost_ex_vat', 'packaging_cost_ex_vat', 'amazon_fees_ex_vat',
+  'profit_ex_vat', 'margin', 'break_even_price_inc_vat',
+  // Sales/Performance
+  'units_7d', 'units_30d', 'revenue_inc_vat_7d', 'revenue_inc_vat_30d',
+  'sessions_30d', 'conversion_rate_30d', 'sales_velocity_units_per_day_30d',
+  // Inventory
+  'available_quantity', 'days_of_cover', 'lead_time_days', 'stockout_risk',
+  // Buy Box
+  'buy_box_status', 'buy_box_percentage_30d', 'buy_box_risk', 'competitor_price_position',
+  // Keepa Signals
+  'keepa_price_median_90d', 'keepa_price_p25_90d', 'keepa_price_p75_90d',
+  'keepa_volatility_90d', 'keepa_offers_count_current', 'keepa_offers_trend_30d',
+  'keepa_rank_trend_90d',
+  // Anomaly Signals
+  'sales_anomaly_score', 'conversion_anomaly_score', 'buy_box_anomaly_score',
+].sort(); // Sort for consistent hashing
+
+/**
+ * G.3 FIX: Compute feature schema version as a hash of the feature keys
+ * This ensures version changes when schema changes
+ * @returns {number} Version number derived from hash
+ */
+function computeFeatureSchemaVersion() {
+  const keyString = LISTING_FEATURE_KEYS.join(',');
+  const hash = crypto.createHash('md5').update(keyString).digest('hex');
+  // Convert first 8 hex chars to integer (modulo to keep it reasonable)
+  return parseInt(hash.substring(0, 8), 16) % 1000000;
+}
+
+// G.3 FIX: Compute version at module load (cached)
+const FEATURE_VERSION = computeFeatureSchemaVersion();
+
+/**
+ * G.4 FIX: Log missing table warnings with proper context
+ * In production, throws errors for critical tables
+ * @param {string} tableName - Name of the missing table
+ * @param {string} operation - Operation being performed
+ * @param {boolean} critical - Whether this is a critical table
+ */
+function handleMissingTable(tableName, operation, critical = false) {
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  if (isProduction && critical) {
+    featureStoreLogger.error({
+      tableName,
+      operation,
+      critical: true,
+    }, 'Critical table does not exist');
+    throw new Error(`Critical table ${tableName} does not exist`);
+  }
+
+  featureStoreLogger.warn({
+    tableName,
+    operation,
+    env: process.env.NODE_ENV,
+  }, 'Table does not exist - using fallback');
+}
 
 /**
  * Compute features for a listing
@@ -45,7 +113,8 @@ const FEATURE_VERSION = 1;
  * @returns {Promise<Object>}
  */
 export async function computeListingFeatures(listingId) {
-  console.log(`[FeatureStore] Computing features for listing ${listingId}`);
+  // G.4 FIX: Use structured logger
+  featureStoreLogger.info({ listingId, operation: 'computeListingFeatures' }, 'Computing features for listing');
 
   // A.2.4 FIX: Acquire advisory lock to prevent concurrent computation for same listing
   // Lock key: 300000000 + listingId (namespace for feature computations)
@@ -53,7 +122,8 @@ export async function computeListingFeatures(listingId) {
   const lockResult = await query('SELECT pg_try_advisory_lock($1) as acquired', [lockKey]);
 
   if (!lockResult.rows[0].acquired) {
-    console.log(`[FeatureStore] Skipping listing ${listingId} - concurrent computation in progress`);
+    // G.4 FIX: Use structured logger
+    featureStoreLogger.debug({ listingId, reason: 'concurrent_computation' }, 'Skipping - concurrent computation in progress');
     // Return existing features instead of skipping entirely
     const existing = await getLatestFeatures('LISTING', listingId);
     if (existing) {
@@ -342,7 +412,8 @@ async function doComputeListingFeatures(listingId) {
  * @returns {Promise<Object>}
  */
 export async function computeAsinFeatures(asinEntityId) {
-  console.log(`[FeatureStore] Computing features for ASIN entity ${asinEntityId}`);
+  // G.4 FIX: Use structured logger
+  featureStoreLogger.info({ asinEntityId, operation: 'computeAsinFeatures' }, 'Computing features for ASIN entity');
 
   // Get ASIN entity data (LEFT JOIN to handle entities without marketplace)
   const entityResult = await query(`
@@ -457,7 +528,8 @@ export async function saveFeatures(entityType, entityId, features) {
   if (existing) {
     const existingFeaturesJson = JSON.stringify(existing.features_json);
     if (existingFeaturesJson === newFeaturesJson) {
-      console.log(`[FeatureStore] Skipping duplicate features for ${entityType} ${entityId}`);
+      // G.4 FIX: Use structured logger
+      featureStoreLogger.debug({ entityType, entityId, reason: 'duplicate' }, 'Skipping duplicate features');
       return existing; // Return existing row, no new insert
     }
   }
@@ -473,7 +545,8 @@ export async function saveFeatures(entityType, entityId, features) {
   } catch (error) {
     // Handle missing table gracefully - return a mock result
     if (error.message?.includes('does not exist')) {
-      console.warn('[FeatureStore] feature_store table does not exist, returning unsaved features');
+      // G.4 FIX: Use handleMissingTable for proper logging
+      handleMissingTable('feature_store', 'saveFeatures', false);
       return {
         id: null,
         entity_type: entityType,
@@ -506,7 +579,8 @@ export async function getLatestFeatures(entityType, entityId) {
   } catch (error) {
     // Handle missing table gracefully
     if (error.message?.includes('does not exist')) {
-      console.warn('[FeatureStore] feature_store table does not exist');
+      // G.4 FIX: Use handleMissingTable for proper logging
+      handleMissingTable('feature_store', 'getLatestFeatures', false);
       return null;
     }
     throw error;
@@ -534,7 +608,8 @@ export async function getFeatureHistory(entityType, entityId, limit = 30) {
   } catch (error) {
     // Handle missing table gracefully
     if (error.message?.includes('does not exist')) {
-      console.warn('[FeatureStore] feature_store table does not exist');
+      // G.4 FIX: Use handleMissingTable for proper logging
+      handleMissingTable('feature_store', 'getFeatureHistory', false);
       return [];
     }
     throw error;
@@ -594,7 +669,7 @@ async function calculateSalesAnomalyScore(currentVelocity, listingId) {
 
     return Math.round(anomalyScore * 100) / 100;
   } catch (error) {
-    console.warn('[FeatureStore] Error calculating anomaly score:', error.message);
+    featureStoreLogger.warn({ err: error, sku }, 'Error calculating anomaly score');
     return 0; // Default to no anomaly on error
   }
 }

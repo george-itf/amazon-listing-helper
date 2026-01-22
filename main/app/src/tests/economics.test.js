@@ -78,22 +78,90 @@ describe('Economics Service', () => {
   });
 
   describe('calculateAmazonFeesExVat', () => {
+    // H.1 FIX: Tests now correctly pass priceIncVat (as function signature specifies)
+    // The function internally converts to priceExVat for fee calculation
     it('FBM basic referral', () => {
-      // £20.00 price, 15% referral = £3.00
-      const result = calculateAmazonFeesExVat(20.00, 'FBM', 'General');
+      // £24.00 inc VAT @ 20% = £20.00 ex VAT, 15% referral = £3.00
+      const result = calculateAmazonFeesExVat(24.00, 'FBM', 'General', 0.20);
       expect(result).toBe(3.00);
     });
 
     it('FBA includes fulfillment fee', () => {
-      // £20.00 price, 15% referral + £2.50 FBA = £5.50
-      const result = calculateAmazonFeesExVat(20.00, 'FBA', 'General');
+      // £24.00 inc VAT @ 20% = £20.00 ex VAT, 15% referral + £2.50 FBA = £5.50
+      const result = calculateAmazonFeesExVat(24.00, 'FBA', 'General', 0.20);
       expect(result).toBe(5.50);
     });
 
     it('media category adds per-item fee', () => {
-      // £20.00 price, 15% referral + £0.50 per-item = £3.50
-      const result = calculateAmazonFeesExVat(20.00, 'FBM', 'Books');
+      // £24.00 inc VAT @ 20% = £20.00 ex VAT, 15% referral + £0.50 per-item = £3.50
+      const result = calculateAmazonFeesExVat(24.00, 'FBM', 'Books', 0.20);
       expect(result).toBe(3.50);
+    });
+
+    // H.2 FIX: Add parameter tests for different VAT rates
+    describe('VAT rate parameter tests', () => {
+      it('handles 10% VAT rate', () => {
+        // £22.00 inc VAT @ 10% = £20.00 ex VAT, 15% referral = £3.00
+        const result = calculateAmazonFeesExVat(22.00, 'FBM', 'General', 0.10);
+        expect(result).toBe(3.00);
+      });
+
+      it('handles 15% VAT rate', () => {
+        // £23.00 inc VAT @ 15% = £20.00 ex VAT, 15% referral = £3.00
+        const result = calculateAmazonFeesExVat(23.00, 'FBM', 'General', 0.15);
+        expect(result).toBe(3.00);
+      });
+
+      it('handles 19% VAT rate (Germany)', () => {
+        // €23.80 inc VAT @ 19% = €20.00 ex VAT, 15% referral = €3.00
+        const result = calculateAmazonFeesExVat(23.80, 'FBM', 'General', 0.19);
+        expect(result).toBe(3.00);
+      });
+
+      it('handles 20% VAT rate (UK)', () => {
+        // £24.00 inc VAT @ 20% = £20.00 ex VAT, 15% referral = £3.00
+        const result = calculateAmazonFeesExVat(24.00, 'FBM', 'General', 0.20);
+        expect(result).toBe(3.00);
+      });
+    });
+
+    // H.3 FIX: Add edge case tests
+    describe('edge cases', () => {
+      it('handles zero price', () => {
+        const result = calculateAmazonFeesExVat(0, 'FBM', 'General', 0.20);
+        expect(result).toBe(0);
+      });
+
+      it('handles very small price', () => {
+        // £0.12 inc VAT @ 20% = £0.10 ex VAT, 15% referral = £0.02 (rounded)
+        const result = calculateAmazonFeesExVat(0.12, 'FBM', 'General', 0.20);
+        expect(result).toBe(0.02);
+      });
+
+      it('handles high VAT rate (25%)', () => {
+        // £25.00 inc VAT @ 25% = £20.00 ex VAT, 15% referral = £3.00
+        const result = calculateAmazonFeesExVat(25.00, 'FBM', 'General', 0.25);
+        expect(result).toBe(3.00);
+      });
+
+      it('handles zero VAT rate', () => {
+        // £20.00 inc VAT @ 0% = £20.00 ex VAT, 15% referral = £3.00
+        const result = calculateAmazonFeesExVat(20.00, 'FBM', 'General', 0);
+        expect(result).toBe(3.00);
+      });
+
+      it('handles large price', () => {
+        // £1200.00 inc VAT @ 20% = £1000.00 ex VAT, 15% referral = £150.00
+        const result = calculateAmazonFeesExVat(1200.00, 'FBM', 'General', 0.20);
+        expect(result).toBe(150.00);
+      });
+
+      it('FBA with high VAT rate maintains correct fee structure', () => {
+        // £25.00 inc VAT @ 25% = £20.00 ex VAT
+        // 15% referral = £3.00 + £2.50 FBA fee = £5.50
+        const result = calculateAmazonFeesExVat(25.00, 'FBA', 'General', 0.25);
+        expect(result).toBe(5.50);
+      });
     });
   });
 

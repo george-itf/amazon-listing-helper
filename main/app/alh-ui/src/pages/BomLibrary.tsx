@@ -1,4 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
+/**
+ * BOM Library Page
+ *
+ * I.1-I.4 REFACTOR:
+ * - I.1: Extracted ComponentsTable, BomsTable, ImportModal
+ * - I.2: Replaced useState with useReducer via useComponentEditor hook
+ * - I.3: Added loading state for bulk save with progress indicator
+ * - I.4: Replaced confirm() with accessible ConfirmDialog
+ */
+import { useState, useEffect } from 'react';
 import { PageHeader } from '../layouts/PageHeader';
 import {
   getComponents,
@@ -6,14 +15,12 @@ import {
   createComponent,
   deleteComponent,
   importComponents,
-  bulkUpdateComponents,
 } from '../api/boms';
 import type { Component, Bom, ImportComponentRow } from '../api/boms';
-
-interface EditingCell {
-  id: number;
-  field: keyof Component;
-}
+import { ComponentsTable } from '../components/tables/ComponentsTable';
+import { BomsTable } from '../components/tables/BomsTable';
+import { ImportModal, ConfirmDialog } from '../components/modals';
+import { useComponentEditor } from '../hooks/useComponentEditor';
 
 export function BomLibraryPage() {
   const [components, setComponents] = useState<Component[]>([]);
@@ -35,16 +42,17 @@ export function BomLibraryPage() {
 
   // Import modal
   const [showImportModal, setShowImportModal] = useState(false);
-  const [importMode, setImportMode] = useState<'csv' | 'paste'>('paste');
-  const [pasteData, setPasteData] = useState('');
   const [isImporting, setIsImporting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
-  // Inline editing
-  const [editedComponents, setEditedComponents] = useState<Map<number, Partial<Component>>>(new Map());
-  const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
-  const [hasChanges, setHasChanges] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
+  // I.4: Confirm dialog for delete
+  const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; componentId: number | null }>({
+    isOpen: false,
+    componentId: null,
+  });
+
+  // I.2: Use custom hook with useReducer for component editing
+  const editor = useComponentEditor();
 
   // Backup
   const [isBackingUp, setIsBackingUp] = useState(false);
@@ -54,14 +62,10 @@ export function BomLibraryPage() {
     setError(null);
 
     try {
-      const [comps, allBoms] = await Promise.all([
-        getComponents(),
-        getBoms(),
-      ]);
+      const [comps, allBoms] = await Promise.all([getComponents(), getBoms()]);
       setComponents(comps);
       setBoms(allBoms);
-      setEditedComponents(new Map());
-      setHasChanges(false);
+      editor.reset(); // I.2: Reset editor state on data reload
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
@@ -71,6 +75,7 @@ export function BomLibraryPage() {
 
   useEffect(() => {
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const showSuccess = (message: string) => {
@@ -127,7 +132,13 @@ export function BomLibraryPage() {
         lead_time_days: null,
       });
       setShowNewComponent(false);
-      setNewComponent({ component_sku: '', name: '', description: '', unit_cost_ex_vat: '', category: '' });
+      setNewComponent({
+        component_sku: '',
+        name: '',
+        description: '',
+        unit_cost_ex_vat: '',
+        category: '',
+      });
       showSuccess('Component created successfully');
       loadData();
     } catch (err) {
@@ -135,103 +146,13 @@ export function BomLibraryPage() {
     }
   };
 
-  // Parse paste data (tab-separated values from spreadsheet)
-  const parsePasteData = (text: string): ImportComponentRow[] => {
-    const lines = text.trim().split('\n');
-    if (lines.length === 0) return [];
-
-    // First line might be headers
-    const firstLine = lines[0].toLowerCase();
-    const hasHeaders = firstLine.includes('sku') || firstLine.includes('name') || firstLine.includes('cost');
-    const dataLines = hasHeaders ? lines.slice(1) : lines;
-
-    return dataLines.map(line => {
-      const cols = line.split('\t');
-      return {
-        component_sku: cols[0]?.trim() || '',
-        name: cols[1]?.trim() || '',
-        description: cols[2]?.trim() || undefined,
-        category: cols[3]?.trim() || undefined,
-        unit_cost_ex_vat: cols[4] ? parseFloat(cols[4].replace(/[£$,]/g, '')) : undefined,
-        supplier_sku: cols[5]?.trim() || undefined,
-      };
-    }).filter(row => row.component_sku && row.name);
-  };
-
-  // Parse CSV file
-  const parseCSV = (text: string): ImportComponentRow[] => {
-    const lines = text.trim().split('\n');
-    if (lines.length === 0) return [];
-
-    // First line is headers
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
-    const dataLines = lines.slice(1);
-
-    return dataLines.map(line => {
-      // Handle quoted values
-      const cols: string[] = [];
-      let current = '';
-      let inQuotes = false;
-      for (const char of line) {
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-          cols.push(current.trim());
-          current = '';
-        } else {
-          current += char;
-        }
-      }
-      cols.push(current.trim());
-
-      const row: ImportComponentRow = {
-        component_sku: '',
-        name: '',
-      };
-
-      headers.forEach((header, i) => {
-        const value = cols[i]?.replace(/"/g, '').trim();
-        if (header.includes('sku') && !header.includes('supplier')) {
-          row.component_sku = value || '';
-        } else if (header === 'name') {
-          row.name = value || '';
-        } else if (header.includes('description')) {
-          row.description = value || undefined;
-        } else if (header.includes('category')) {
-          row.category = value || undefined;
-        } else if (header.includes('cost') || header.includes('price')) {
-          row.unit_cost_ex_vat = value ? parseFloat(value.replace(/[£$,]/g, '')) : undefined;
-        } else if (header.includes('supplier') && header.includes('sku')) {
-          row.supplier_sku = value || undefined;
-        }
-      });
-
-      return row;
-    }).filter(row => row.component_sku && row.name);
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      setPasteData(text);
-      setImportMode('csv');
-    };
-    reader.readAsText(file);
-  };
-
-  const handleImport = async () => {
-    setError(null);
+  const handleImport = async (rows: ImportComponentRow[]) => {
+    setImportError(null);
     setIsImporting(true);
 
     try {
-      const rows = importMode === 'csv' ? parseCSV(pasteData) : parsePasteData(pasteData);
-
       if (rows.length === 0) {
-        setError('No valid data found. Ensure your data has component_sku and name columns.');
+        setImportError('No valid data found. Ensure your data has component_sku and name columns.');
         setIsImporting(false);
         return;
       }
@@ -239,86 +160,32 @@ export function BomLibraryPage() {
       const result = await importComponents(rows);
 
       if (result.errors.length > 0) {
-        setError(`Import completed with ${result.errors.length} errors: ${result.errors.map(e => `Row ${e.row}: ${e.error}`).join(', ')}`);
+        setImportError(
+          `Import completed with ${result.errors.length} errors: ${result.errors
+            .map((e) => `Row ${e.row}: ${e.error}`)
+            .join(', ')}`
+        );
       }
 
       showSuccess(`Import complete: ${result.created} created, ${result.updated} updated`);
       setShowImportModal(false);
-      setPasteData('');
       loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to import components');
+      setImportError(err instanceof Error ? err.message : 'Failed to import components');
     } finally {
       setIsImporting(false);
     }
   };
 
-  // Inline editing handlers
-  const getComponentValue = (comp: Component, field: keyof Component): string | number | null => {
-    const edited = editedComponents.get(comp.id);
-    if (edited && field in edited) {
-      return edited[field] as string | number | null;
-    }
-    return comp[field] as string | number | null;
-  };
-
-  const handleCellEdit = (id: number, field: keyof Component, value: string | number | null) => {
-    setEditedComponents(prev => {
-      const newMap = new Map(prev);
-      const existing = newMap.get(id) || {};
-      newMap.set(id, { ...existing, [field]: value });
-      return newMap;
-    });
-    setHasChanges(true);
-  };
-
-  const handleCellClick = (id: number, field: keyof Component) => {
-    setEditingCell({ id, field });
-  };
-
-  const handleCellBlur = () => {
-    setEditingCell(null);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent, id: number, field: keyof Component) => {
-    if (e.key === 'Enter') {
-      setEditingCell(null);
-    } else if (e.key === 'Escape') {
-      // Revert this cell's changes
-      setEditedComponents(prev => {
-        const newMap = new Map(prev);
-        const existing = newMap.get(id);
-        if (existing) {
-          const newExisting = { ...existing };
-          delete newExisting[field];
-          if (Object.keys(newExisting).length === 0) {
-            newMap.delete(id);
-          } else {
-            newMap.set(id, newExisting);
-          }
-        }
-        return newMap;
-      });
-      setEditingCell(null);
-    }
-  };
-
+  // I.3: Save changes with progress indicator
   const handleSaveChanges = async () => {
-    if (editedComponents.size === 0) return;
-
-    setIsSaving(true);
     setError(null);
 
     try {
-      const updates = Array.from(editedComponents.entries()).map(([id, changes]) => ({
-        id,
-        ...changes,
-      }));
-
-      const result = await bulkUpdateComponents(updates);
+      const result = await editor.saveChanges();
 
       if (result.failed > 0) {
-        setError(`${result.failed} updates failed: ${result.errors.map(e => e.error).join(', ')}`);
+        setError(`${result.failed} updates failed: ${result.errors.map((e) => e.error).join(', ')}`);
       }
 
       if (result.updated > 0) {
@@ -328,58 +195,30 @@ export function BomLibraryPage() {
       loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save changes');
-    } finally {
-      setIsSaving(false);
     }
   };
 
-  const handleDiscardChanges = () => {
-    setEditedComponents(new Map());
-    setHasChanges(false);
-    setEditingCell(null);
+  // I.4: Delete with accessible confirm dialog
+  const handleDeleteClick = (id: number) => {
+    setDeleteConfirm({ isOpen: true, componentId: id });
   };
 
-  const handleDeleteComponent = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this component?')) return;
+  const handleDeleteConfirm = async () => {
+    if (deleteConfirm.componentId === null) return;
 
     try {
-      await deleteComponent(id);
+      await deleteComponent(deleteConfirm.componentId);
       showSuccess('Component deleted');
       loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete component');
+    } finally {
+      setDeleteConfirm({ isOpen: false, componentId: null });
     }
   };
 
-  const renderEditableCell = (comp: Component, field: keyof Component, type: 'text' | 'number' = 'text') => {
-    const isEditing = editingCell?.id === comp.id && editingCell?.field === field;
-    const value = getComponentValue(comp, field);
-    const isModified = editedComponents.get(comp.id)?.[field] !== undefined;
-
-    if (isEditing) {
-      return (
-        <input
-          type={type}
-          step={type === 'number' ? '0.01' : undefined}
-          className="w-full px-2 py-1 text-sm border border-blue-500 rounded focus:outline-none focus:ring-2 focus:ring-blue-300"
-          value={value ?? ''}
-          onChange={(e) => handleCellEdit(comp.id, field, type === 'number' ? parseFloat(e.target.value) || 0 : e.target.value)}
-          onBlur={handleCellBlur}
-          onKeyDown={(e) => handleKeyDown(e, comp.id, field)}
-          autoFocus
-        />
-      );
-    }
-
-    return (
-      <span
-        onClick={() => handleCellClick(comp.id, field)}
-        className={`cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded ${isModified ? 'bg-yellow-100 font-medium' : ''}`}
-        title="Click to edit"
-      >
-        {field === 'unit_cost_ex_vat' ? `£${(Number(value) || 0).toFixed(2)}` : value || '-'}
-      </span>
-    );
+  const handleDeleteCancel = () => {
+    setDeleteConfirm({ isOpen: false, componentId: null });
   };
 
   return (
@@ -390,10 +229,7 @@ export function BomLibraryPage() {
         actions={
           <div className="flex gap-2">
             <div className="relative group">
-              <button
-                disabled={isBackingUp}
-                className="btn btn-secondary btn-sm"
-              >
+              <button disabled={isBackingUp} className="btn btn-secondary btn-sm">
                 {isBackingUp ? 'Backing up...' : 'Backup'}
               </button>
               <div className="absolute right-0 mt-1 w-40 bg-white border rounded shadow-lg hidden group-hover:block z-10">
@@ -411,16 +247,10 @@ export function BomLibraryPage() {
                 </button>
               </div>
             </div>
-            <button
-              onClick={() => setShowImportModal(true)}
-              className="btn btn-secondary btn-sm"
-            >
+            <button onClick={() => setShowImportModal(true)} className="btn btn-secondary btn-sm">
               Import Components
             </button>
-            <button
-              onClick={() => setShowNewComponent(true)}
-              className="btn btn-primary btn-sm"
-            >
+            <button onClick={() => setShowNewComponent(true)} className="btn btn-primary btn-sm">
               New Component
             </button>
           </div>
@@ -442,107 +272,36 @@ export function BomLibraryPage() {
         <button
           onClick={() => setActiveTab('boms')}
           className={`px-4 py-2 text-sm font-medium rounded-md ${
-            activeTab === 'boms'
-              ? 'bg-blue-100 text-blue-700'
-              : 'text-gray-600 hover:bg-gray-100'
+            activeTab === 'boms' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
           }`}
         >
           BOMs ({boms.length})
         </button>
       </div>
 
-      {/* Import Modal */}
-      {showImportModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <div className="p-6">
-              <h2 className="text-xl font-semibold mb-4">Import Components</h2>
+      {/* I.1: Import Modal Component */}
+      <ImportModal
+        isOpen={showImportModal}
+        onClose={() => {
+          setShowImportModal(false);
+          setImportError(null);
+        }}
+        onImport={handleImport}
+        isImporting={isImporting}
+        error={importError}
+      />
 
-              {/* Mode toggle */}
-              <div className="flex gap-4 mb-4">
-                <button
-                  onClick={() => setImportMode('paste')}
-                  className={`px-4 py-2 text-sm font-medium rounded-md ${
-                    importMode === 'paste' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
-                  }`}
-                >
-                  Paste from Spreadsheet
-                </button>
-                <button
-                  onClick={() => setImportMode('csv')}
-                  className={`px-4 py-2 text-sm font-medium rounded-md ${
-                    importMode === 'csv' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
-                  }`}
-                >
-                  Upload CSV File
-                </button>
-              </div>
-
-              {importMode === 'csv' && (
-                <div className="mb-4">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".csv"
-                    onChange={handleFileUpload}
-                    className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                  />
-                </div>
-              )}
-
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  {importMode === 'paste'
-                    ? 'Paste your data here (tab-separated, from Excel/Google Sheets):'
-                    : 'CSV content preview:'}
-                </label>
-                <textarea
-                  className="w-full h-48 px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder={`component_sku\tname\tdescription\tcategory\tunit_cost_ex_vat\tsupplier_sku
-SKU001\tWidget A\tA useful widget\tWidgets\t5.99\tSUP-001
-SKU002\tGadget B\tA cool gadget\tGadgets\t12.50\tSUP-002`}
-                  value={pasteData}
-                  onChange={(e) => setPasteData(e.target.value)}
-                />
-              </div>
-
-              <div className="text-sm text-gray-600 mb-4">
-                <p className="font-medium mb-1">Expected columns:</p>
-                <ul className="list-disc list-inside">
-                  <li><strong>component_sku</strong> (required) - Unique identifier</li>
-                  <li><strong>name</strong> (required) - Component name</li>
-                  <li>description - Optional description</li>
-                  <li>category - Optional category (default: General)</li>
-                  <li>unit_cost_ex_vat - Cost excluding VAT</li>
-                  <li>supplier_sku - Supplier's part number</li>
-                </ul>
-                <p className="mt-2 text-gray-500">
-                  Existing components (by SKU) will be updated. New SKUs will be created.
-                </p>
-              </div>
-
-              <div className="flex justify-end gap-3">
-                <button
-                  onClick={() => {
-                    setShowImportModal(false);
-                    setPasteData('');
-                  }}
-                  className="btn btn-secondary"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleImport}
-                  disabled={!pasteData.trim() || isImporting}
-                  className="btn btn-primary"
-                >
-                  {isImporting ? 'Importing...' : 'Import'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* I.4: Confirm Dialog for Delete */}
+      <ConfirmDialog
+        isOpen={deleteConfirm.isOpen}
+        title="Delete Component"
+        message="Are you sure you want to delete this component? This action cannot be undone."
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        confirmVariant="danger"
+        onConfirm={handleDeleteConfirm}
+        onCancel={handleDeleteCancel}
+      />
 
       {/* New Component Form */}
       {showNewComponent && (
@@ -576,7 +335,9 @@ SKU002\tGadget B\tA cool gadget\tGadgets\t12.50\tSUP-002`}
                   step="0.01"
                   className="input pl-7"
                   value={newComponent.unit_cost_ex_vat}
-                  onChange={(e) => setNewComponent({ ...newComponent, unit_cost_ex_vat: e.target.value })}
+                  onChange={(e) =>
+                    setNewComponent({ ...newComponent, unit_cost_ex_vat: e.target.value })
+                  }
                 />
               </div>
             </div>
@@ -604,10 +365,7 @@ SKU002\tGadget B\tA cool gadget\tGadgets\t12.50\tSUP-002`}
             <button onClick={handleCreateComponent} className="btn btn-primary btn-sm">
               Create
             </button>
-            <button
-              onClick={() => setShowNewComponent(false)}
-              className="btn btn-secondary btn-sm"
-            >
+            <button onClick={() => setShowNewComponent(false)} className="btn btn-secondary btn-sm">
               Cancel
             </button>
           </div>
@@ -616,164 +374,74 @@ SKU002\tGadget B\tA cool gadget\tGadgets\t12.50\tSUP-002`}
 
       {/* Success Message */}
       {successMessage && (
-        <div className="mb-4 p-3 bg-green-50 text-green-700 rounded text-sm">
-          {successMessage}
-        </div>
+        <div className="mb-4 p-3 bg-green-50 text-green-700 rounded text-sm">{successMessage}</div>
       )}
 
       {/* Error Message */}
-      {error && (
-        <div className="mb-4 p-3 bg-red-50 text-red-700 rounded text-sm">
-          {error}
-        </div>
-      )}
+      {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded text-sm">{error}</div>}
 
-      {/* Unsaved Changes Bar */}
-      {hasChanges && (
-        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded flex items-center justify-between">
-          <span className="text-yellow-800">
-            You have unsaved changes to {editedComponents.size} component(s)
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={handleDiscardChanges}
-              className="btn btn-secondary btn-sm"
-              disabled={isSaving}
-            >
-              Discard
-            </button>
-            <button
-              onClick={handleSaveChanges}
-              className="btn btn-primary btn-sm"
-              disabled={isSaving}
-            >
-              {isSaving ? 'Saving...' : 'Save Changes'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Components Table */}
-      {activeTab === 'components' && (
-        <div className="card">
-          {isLoading ? (
-            <p className="text-center py-12 text-gray-500">Loading...</p>
-          ) : components.length === 0 ? (
-            <div className="text-center py-12">
-              <p className="text-gray-500 mb-4">No components found</p>
+      {/* I.3: Unsaved Changes Bar with Progress */}
+      {editor.hasChanges && (
+        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
+          <div className="flex items-center justify-between">
+            <span className="text-yellow-800">
+              You have unsaved changes to {editor.editedComponentsCount} component(s)
+            </span>
+            <div className="flex gap-2">
               <button
-                onClick={() => setShowImportModal(true)}
-                className="btn btn-primary"
+                onClick={editor.discardAll}
+                className="btn btn-secondary btn-sm"
+                disabled={editor.isSaving}
               >
-                Import Components
+                Discard
+              </button>
+              <button
+                onClick={handleSaveChanges}
+                className="btn btn-primary btn-sm"
+                disabled={editor.isSaving}
+              >
+                {editor.isSaving ? 'Saving...' : 'Save Changes'}
               </button>
             </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead>
-                  <tr className="table-header">
-                    <th className="px-4 py-3">SKU</th>
-                    <th className="px-4 py-3">Name</th>
-                    <th className="px-4 py-3">Description</th>
-                    <th className="px-4 py-3 text-right">Unit Cost (ex VAT)</th>
-                    <th className="px-4 py-3 text-right">Stock</th>
-                    <th className="px-4 py-3">Lead Time</th>
-                    <th className="px-4 py-3 w-20">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {components.map((comp) => (
-                    <tr
-                      key={comp.id}
-                      className={`hover:bg-gray-50 ${editedComponents.has(comp.id) ? 'bg-yellow-50' : ''}`}
-                    >
-                      <td className="table-cell font-mono text-xs">
-                        {renderEditableCell(comp, 'component_sku')}
-                      </td>
-                      <td className="table-cell">
-                        {renderEditableCell(comp, 'name')}
-                      </td>
-                      <td className="table-cell text-gray-500">
-                        {renderEditableCell(comp, 'description')}
-                      </td>
-                      <td className="table-cell text-right">
-                        {renderEditableCell(comp, 'unit_cost_ex_vat', 'number')}
-                      </td>
-                      <td className="table-cell text-right">
-                        {comp.current_stock ?? '-'}
-                      </td>
-                      <td className="table-cell">
-                        {comp.lead_time_days ? `${comp.lead_time_days}d` : '-'}
-                      </td>
-                      <td className="table-cell">
-                        <button
-                          onClick={() => handleDeleteComponent(comp.id)}
-                          className="text-red-600 hover:text-red-800 text-sm"
-                          title="Delete component"
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="text-sm text-gray-500 mt-3 px-4">
-                Tip: Click any cell to edit. Press Enter to confirm or Escape to cancel.
-              </p>
+          </div>
+          {/* I.3: Progress indicator */}
+          {editor.isSaving && (
+            <div className="mt-2">
+              <div className="w-full bg-yellow-200 rounded-full h-1.5">
+                <div
+                  className="bg-yellow-600 h-1.5 rounded-full transition-all duration-300"
+                  style={{ width: `${editor.saveProgress}%` }}
+                />
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* BOMs Table */}
+      {/* I.1: Components Table Component */}
+      {activeTab === 'components' && (
+        <div className="card">
+          <ComponentsTable
+            components={components}
+            isLoading={isLoading}
+            getValue={editor.getValue}
+            isEditing={editor.isEditing}
+            isModified={editor.isModified}
+            startEdit={editor.startEdit}
+            cancelEdit={editor.cancelEdit}
+            editCell={editor.editCell}
+            handleKeyDown={editor.handleKeyDown}
+            editedComponentsCount={editor.editedComponentsCount}
+            onDelete={handleDeleteClick}
+            onImport={() => setShowImportModal(true)}
+          />
+        </div>
+      )}
+
+      {/* I.1: BOMs Table Component */}
       {activeTab === 'boms' && (
         <div className="card">
-          {isLoading ? (
-            <p className="text-center py-12 text-gray-500">Loading...</p>
-          ) : boms.length === 0 ? (
-            <p className="text-center py-12 text-gray-500">No BOMs found</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead>
-                  <tr className="table-header">
-                    <th className="px-4 py-3">ID</th>
-                    <th className="px-4 py-3">Scope</th>
-                    <th className="px-4 py-3">Version</th>
-                    <th className="px-4 py-3">Active</th>
-                    <th className="px-4 py-3">Lines</th>
-                    <th className="px-4 py-3 text-right">Total Cost (ex VAT)</th>
-                    <th className="px-4 py-3">Created</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {boms.map((bom) => (
-                    <tr key={bom.id} className="hover:bg-gray-50">
-                      <td className="table-cell">{bom.id}</td>
-                      <td className="table-cell">
-                        <span className="badge badge-neutral">{bom.scope_type}</span>
-                      </td>
-                      <td className="table-cell">v{bom.version}</td>
-                      <td className="table-cell">
-                        {bom.is_active ? (
-                          <span className="badge badge-success">Active</span>
-                        ) : (
-                          <span className="badge badge-neutral">Inactive</span>
-                        )}
-                      </td>
-                      <td className="table-cell">{bom.lines.length}</td>
-                      <td className="table-cell text-right">£{(Number(bom.total_cost_ex_vat) || 0).toFixed(2)}</td>
-                      <td className="table-cell text-gray-500">
-                        {new Date(bom.created_at).toLocaleDateString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <BomsTable boms={boms} isLoading={isLoading} />
         </div>
       )}
     </div>

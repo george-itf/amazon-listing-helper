@@ -32,14 +32,111 @@ const config = {
   baseDelayMs: parseInt(process.env.KEEPA_BASE_DELAY_MS || '2000', 10),
   maxDelayMs: parseInt(process.env.KEEPA_MAX_DELAY_MS || '64000', 10),
   quotaThreshold: parseInt(process.env.KEEPA_QUOTA_THRESHOLD || '10', 10), // Pause when quota below this
+  timeoutMs: parseInt(process.env.KEEPA_TIMEOUT_MS || '30000', 10), // F.2: 30s default timeout
 };
 
-// Rate limit state (in-memory)
+// Rate limit state (in-memory, persisted to DB)
 let rateLimitState = {
   tokensRemaining: null,
   resetTime: null,
   lastUpdated: null,
 };
+
+// F.1 FIX: Flag to track if state was loaded from DB
+let rateLimitStateLoaded = false;
+
+/**
+ * F.1 FIX: Load rate limit state from database on startup
+ * This ensures we don't burst after a restart
+ * @returns {Promise<void>}
+ */
+async function loadRateLimitState() {
+  if (rateLimitStateLoaded) return;
+
+  try {
+    const result = await query(`
+      SELECT tokens_remaining, reset_time, last_updated
+      FROM keepa_rate_limit_state
+      WHERE id = 1
+    `);
+
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      rateLimitState.tokensRemaining = row.tokens_remaining;
+      rateLimitState.resetTime = row.reset_time ? new Date(row.reset_time).getTime() : null;
+      rateLimitState.lastUpdated = row.last_updated ? new Date(row.last_updated).getTime() : null;
+
+      keepaLogger.info({
+        tokensRemaining: rateLimitState.tokensRemaining,
+        resetTime: rateLimitState.resetTime,
+        operation: 'loadRateLimitState',
+      }, 'Loaded rate limit state from DB');
+    }
+    rateLimitStateLoaded = true;
+  } catch (error) {
+    // Table might not exist yet - that's OK
+    if (!error.message?.includes('does not exist')) {
+      keepaLogger.warn({ error: error.message }, 'Failed to load rate limit state from DB');
+    }
+    rateLimitStateLoaded = true;
+  }
+}
+
+/**
+ * F.1 FIX: Save rate limit state to database
+ * Called after every rate limit header update
+ * @returns {Promise<void>}
+ */
+async function saveRateLimitState() {
+  try {
+    await query(`
+      INSERT INTO keepa_rate_limit_state (id, tokens_remaining, reset_time, last_updated)
+      VALUES (1, $1, $2, CURRENT_TIMESTAMP)
+      ON CONFLICT (id) DO UPDATE SET
+        tokens_remaining = EXCLUDED.tokens_remaining,
+        reset_time = EXCLUDED.reset_time,
+        last_updated = CURRENT_TIMESTAMP
+    `, [
+      rateLimitState.tokensRemaining,
+      rateLimitState.resetTime ? new Date(rateLimitState.resetTime) : null,
+    ]);
+  } catch (error) {
+    // Non-critical - log and continue
+    if (!error.message?.includes('does not exist')) {
+      keepaLogger.warn({ error: error.message }, 'Failed to save rate limit state to DB');
+    }
+  }
+}
+
+/**
+ * F.2 FIX: Fetch with timeout using AbortController
+ * @param {string} url - URL to fetch
+ * @param {Object} opts - Fetch options
+ * @param {number} [timeoutMs] - Timeout in milliseconds
+ * @returns {Promise<Response>}
+ */
+async function fetchWithTimeout(url, opts = {}, timeoutMs = config.timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...opts,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      const timeoutError = new Error(`Request timed out after ${timeoutMs}ms`);
+      timeoutError.code = 'ETIMEDOUT';
+      timeoutError.isTimeout = true;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 /**
  * Sleep utility
@@ -97,17 +194,24 @@ function isRetryableError(error, statusCode) {
 
 /**
  * Parse rate limit headers from Keepa response
+ * F.1 FIX: Now persists state to DB after update
  * @param {Response} response - Fetch response object
  */
-function parseRateLimitHeaders(response) {
+async function parseRateLimitHeaders(response) {
   const remaining = response.headers.get('X-Rl-RemainingTokens') ||
                     response.headers.get('X-Rate-Limit-Remaining');
   const reset = response.headers.get('X-Rl-Reset') ||
                 response.headers.get('Retry-After');
 
+  let stateChanged = false;
+
   if (remaining !== null) {
     rateLimitState.tokensRemaining = parseInt(remaining, 10);
     rateLimitState.lastUpdated = Date.now();
+    stateChanged = true;
+
+    // Update Prometheus metric
+    keepaTokensRemaining.set(rateLimitState.tokensRemaining);
   }
 
   if (reset !== null) {
@@ -115,22 +219,39 @@ function parseRateLimitHeaders(response) {
     const resetValue = parseInt(reset, 10);
     if (!isNaN(resetValue)) {
       rateLimitState.resetTime = Date.now() + (resetValue * 1000);
+      stateChanged = true;
     }
+  }
+
+  // F.1 FIX: Persist to DB after state change
+  if (stateChanged) {
+    // Fire and forget - don't block the response
+    saveRateLimitState().catch(() => {});
   }
 }
 
 /**
  * Check if we should preemptively throttle based on quota
+ * F.1 FIX: Loads state from DB on first call
+ * F.3 FIX: Uses keepaLogger instead of console.log
  * @returns {Promise<void>}
  */
 async function checkQuotaAndThrottle() {
+  // F.1 FIX: Ensure state is loaded from DB on startup
+  await loadRateLimitState();
+
   if (rateLimitState.tokensRemaining !== null &&
       rateLimitState.tokensRemaining < config.quotaThreshold) {
     const waitTime = rateLimitState.resetTime
       ? Math.max(0, rateLimitState.resetTime - Date.now())
       : 30000; // Default 30s wait
 
-    console.log(`[Keepa] Quota low (${rateLimitState.tokensRemaining}), waiting ${waitTime}ms`);
+    // F.3 FIX: Use structured logger
+    keepaLogger.warn({
+      tokensRemaining: rateLimitState.tokensRemaining,
+      waitTimeMs: Math.min(waitTime, 60000),
+      operation: 'checkQuotaAndThrottle',
+    }, 'Quota low, throttling requests');
     await sleep(Math.min(waitTime, 60000)); // Cap at 60s
   }
 }
@@ -189,10 +310,11 @@ export async function fetchKeepaData(asins, options = {}) {
       // Check quota before making request
       await checkQuotaAndThrottle();
 
-      const response = await fetch(`${KEEPA_API_BASE}/product?${params.toString()}`);
+      // F.2 FIX: Use fetchWithTimeout instead of raw fetch
+      const response = await fetchWithTimeout(`${KEEPA_API_BASE}/product?${params.toString()}`);
 
-      // Parse rate limit headers
-      parseRateLimitHeaders(response);
+      // Parse rate limit headers (F.1 FIX: now async for DB persistence)
+      await parseRateLimitHeaders(response);
 
       lastStatusCode = response.status;
 
@@ -658,13 +780,15 @@ export async function getOrCreateAsinEntity(asin, marketplaceId, data = {}) {
  * @returns {Promise<Object>}
  */
 export async function syncKeepaAsin(asin, marketplaceId, options = {}) {
-  console.log(`[Keepa] Syncing ASIN ${asin} for marketplace ${marketplaceId}`);
+  // F.3 FIX: Use structured logger
+  keepaLogger.info({ asin, marketplaceId, operation: 'syncKeepaAsin' }, 'Syncing ASIN');
 
   // Check cache unless skipCache is true
   if (!options.skipCache) {
     const cached = await getCachedSnapshot(asin, marketplaceId);
     if (cached) {
-      console.log(`[Keepa] Using cached snapshot for ${asin} (age: ${Date.now() - new Date(cached.captured_at).getTime()}ms)`);
+      // F.3 FIX: Use structured logger
+      keepaLogger.debug({ asin, cacheAgeMs: Date.now() - new Date(cached.captured_at).getTime() }, 'Using cached snapshot');
       return {
         asin_entity_id: cached.asin_entity_id,
         snapshot_id: cached.id,
@@ -684,7 +808,8 @@ export async function syncKeepaAsin(asin, marketplaceId, options = {}) {
     parsedData = parseKeepaResponse(rawData);
   } else {
     // Stub mode - create mock data for development
-    console.log('[Keepa] No API key - using stub data');
+    // F.3 FIX: Use structured logger
+    keepaLogger.warn({ asin, operation: 'syncKeepaAsin' }, 'No API key - using stub data');
     rawData = { products: [], stub: true };
     parsedData = { found: false, metrics: null, stub: true };
   }
@@ -727,13 +852,18 @@ export async function syncKeepaAsinsBatched(asins, marketplaceId, options = {}) 
     return results;
   }
 
-  console.log(`[Keepa] Batch syncing ${asins.length} ASINs for marketplace ${marketplaceId}`);
+  // F.3 FIX: Use structured logger
+  keepaLogger.info({ asinCount: asins.length, marketplaceId, operation: 'syncKeepaAsinsBatched' }, 'Batch syncing ASINs');
 
   // Check which ASINs need refresh (not in cache)
   let asinsToFetch = asins;
   if (!options.skipCache) {
     asinsToFetch = await getAsinsNeedingRefresh(asins, marketplaceId);
-    console.log(`[Keepa] ${asins.length - asinsToFetch.length} ASINs served from cache, ${asinsToFetch.length} need fetch`);
+    // F.3 FIX: Use structured logger
+    keepaLogger.debug({
+      cachedCount: asins.length - asinsToFetch.length,
+      fetchCount: asinsToFetch.length,
+    }, 'Cache check complete');
 
     // Get cached results
     for (const asin of asins) {
@@ -789,13 +919,15 @@ export async function syncKeepaAsinsBatched(asins, marketplaceId, options = {}) 
         });
 
       } catch (error) {
-        console.error(`[Keepa] Error saving ${asin}: ${error.message}`);
+        // F.3 FIX: Use structured logger
+        keepaLogger.error({ asin, error: error.message }, 'Error saving ASIN data');
         results.set(asin, { error: error.message, failed: true });
       }
     }
   } else if (asinsToFetch.length > 0) {
     // No credentials - stub mode
-    console.log('[Keepa] No API key - using stub data for remaining ASINs');
+    // F.3 FIX: Use structured logger
+    keepaLogger.warn({ asinCount: asinsToFetch.length }, 'No API key - using stub data for remaining ASINs');
     for (const asin of asinsToFetch) {
       results.set(asin, { found: false, metrics: null, stub: true });
     }
