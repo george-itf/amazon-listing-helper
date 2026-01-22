@@ -17,15 +17,24 @@ import { query, transaction } from '../database/connection.js';
  * @returns {Promise<Object[]>}
  */
 export async function findAll({ activeOnly = true, limit = 100, offset = 0 } = {}) {
-  const whereClause = activeOnly ? 'WHERE is_active = true' : '';
-  const result = await query(`
-    SELECT * FROM suppliers
-    ${whereClause}
-    ORDER BY name ASC
-    LIMIT $1 OFFSET $2
-  `, [limit, offset]);
+  try {
+    const whereClause = activeOnly ? 'WHERE is_active = true' : '';
+    const result = await query(`
+      SELECT * FROM suppliers
+      ${whereClause}
+      ORDER BY name ASC
+      LIMIT $1 OFFSET $2
+    `, [limit, offset]);
 
-  return result.rows;
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Suppliers] suppliers table does not exist');
+      return [];
+    }
+    throw error;
+  }
 }
 
 /**
@@ -34,11 +43,20 @@ export async function findAll({ activeOnly = true, limit = 100, offset = 0 } = {
  * @returns {Promise<Object|null>}
  */
 export async function findById(id) {
-  const result = await query(
-    'SELECT * FROM suppliers WHERE id = $1',
-    [id]
-  );
-  return result.rows[0] || null;
+  try {
+    const result = await query(
+      'SELECT * FROM suppliers WHERE id = $1',
+      [id]
+    );
+    return result.rows[0] || null;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Suppliers] suppliers table does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -150,9 +168,18 @@ export async function hardDelete(id) {
  * @returns {Promise<number>}
  */
 export async function count(activeOnly = true) {
-  const whereClause = activeOnly ? 'WHERE is_active = true' : '';
-  const result = await query(`SELECT COUNT(*) as count FROM suppliers ${whereClause}`);
-  return parseInt(result.rows[0].count, 10);
+  try {
+    const whereClause = activeOnly ? 'WHERE is_active = true' : '';
+    const result = await query(`SELECT COUNT(*) as count FROM suppliers ${whereClause}`);
+    return parseInt(result.rows[0].count, 10);
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[Suppliers] suppliers table does not exist');
+      return 0;
+    }
+    throw error;
+  }
 }
 
 export default {

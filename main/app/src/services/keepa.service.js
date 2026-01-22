@@ -316,15 +316,24 @@ export async function fetchKeepaDataBatched(asins, options = {}) {
  * @returns {Promise<Object|null>} Cached snapshot if valid, null otherwise
  */
 export async function getCachedSnapshot(asin, marketplaceId, ttlMs = config.cacheTtlMs) {
-  const result = await query(`
-    SELECT * FROM keepa_snapshots
-    WHERE asin = $1 AND marketplace_id = $2
-      AND captured_at > NOW() - INTERVAL '1 millisecond' * $3
-    ORDER BY captured_at DESC
-    LIMIT 1
-  `, [asin, marketplaceId, ttlMs]);
+  try {
+    const result = await query(`
+      SELECT * FROM keepa_snapshots
+      WHERE asin = $1 AND marketplace_id = $2
+        AND captured_at > NOW() - INTERVAL '1 millisecond' * $3
+      ORDER BY captured_at DESC
+      LIMIT 1
+    `, [asin, marketplaceId, ttlMs]);
 
-  return result.rows[0] || null;
+    return result.rows[0] || null;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      keepaLogger.warn('keepa_snapshots table does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -337,14 +346,23 @@ export async function getCachedSnapshot(asin, marketplaceId, ttlMs = config.cach
 export async function getAsinsNeedingRefresh(asins, marketplaceId, ttlMs = config.cacheTtlMs) {
   if (asins.length === 0) return [];
 
-  const result = await query(`
-    SELECT DISTINCT asin FROM keepa_snapshots
-    WHERE asin = ANY($1) AND marketplace_id = $2
-      AND captured_at > NOW() - INTERVAL '1 millisecond' * $3
-  `, [asins, marketplaceId, ttlMs]);
+  try {
+    const result = await query(`
+      SELECT DISTINCT asin FROM keepa_snapshots
+      WHERE asin = ANY($1) AND marketplace_id = $2
+        AND captured_at > NOW() - INTERVAL '1 millisecond' * $3
+    `, [asins, marketplaceId, ttlMs]);
 
-  const cachedAsins = new Set(result.rows.map(r => r.asin));
-  return asins.filter(asin => !cachedAsins.has(asin));
+    const cachedAsins = new Set(result.rows.map(r => r.asin));
+    return asins.filter(asin => !cachedAsins.has(asin));
+  } catch (error) {
+    // Handle missing table gracefully - all ASINs need refresh
+    if (error.message?.includes('does not exist')) {
+      keepaLogger.warn('keepa_snapshots table does not exist');
+      return asins;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -551,22 +569,31 @@ function calculateTrend(csvData, days = 90) {
  * @param {Object} rawData
  * @param {Object} parsedData
  * @param {number} [asinEntityId]
- * @returns {Promise<Object>}
+ * @returns {Promise<Object|null>}
  */
 export async function saveKeepaSnapshot(asin, marketplaceId, rawData, parsedData, asinEntityId = null) {
-  const result = await query(`
-    INSERT INTO keepa_snapshots (asin, marketplace_id, asin_entity_id, raw_json, parsed_json, captured_at)
-    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-    RETURNING *
-  `, [
-    asin,
-    marketplaceId,
-    asinEntityId,
-    JSON.stringify(rawData),
-    JSON.stringify(parsedData),
-  ]);
+  try {
+    const result = await query(`
+      INSERT INTO keepa_snapshots (asin, marketplace_id, asin_entity_id, raw_json, parsed_json, captured_at)
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+      RETURNING *
+    `, [
+      asin,
+      marketplaceId,
+      asinEntityId,
+      JSON.stringify(rawData),
+      JSON.stringify(parsedData),
+    ]);
 
-  return result.rows[0];
+    return result.rows[0];
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      keepaLogger.warn('keepa_snapshots table does not exist - snapshot not saved');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -574,41 +601,50 @@ export async function saveKeepaSnapshot(asin, marketplaceId, rawData, parsedData
  * @param {string} asin
  * @param {number} marketplaceId
  * @param {Object} [data] - Optional data to update
- * @returns {Promise<Object>}
+ * @returns {Promise<Object|null>}
  */
 export async function getOrCreateAsinEntity(asin, marketplaceId, data = {}) {
-  // Try to get existing
-  const existing = await query(`
-    SELECT * FROM asin_entities
-    WHERE asin = $1 AND marketplace_id = $2
-  `, [asin, marketplaceId]);
+  try {
+    // Try to get existing
+    const existing = await query(`
+      SELECT * FROM asin_entities
+      WHERE asin = $1 AND marketplace_id = $2
+    `, [asin, marketplaceId]);
 
-  if (existing.rows.length > 0) {
-    // Update if new data provided
-    if (Object.keys(data).length > 0) {
-      const result = await query(`
-        UPDATE asin_entities
-        SET title = COALESCE($3, title),
-            brand = COALESCE($4, brand),
-            category = COALESCE($5, category),
-            main_image_url = COALESCE($6, main_image_url),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE asin = $1 AND marketplace_id = $2
-        RETURNING *
-      `, [asin, marketplaceId, data.title, data.brand, data.category, data.mainImageUrl]);
-      return result.rows[0];
+    if (existing.rows.length > 0) {
+      // Update if new data provided
+      if (Object.keys(data).length > 0) {
+        const result = await query(`
+          UPDATE asin_entities
+          SET title = COALESCE($3, title),
+              brand = COALESCE($4, brand),
+              category = COALESCE($5, category),
+              main_image_url = COALESCE($6, main_image_url),
+              updated_at = CURRENT_TIMESTAMP
+          WHERE asin = $1 AND marketplace_id = $2
+          RETURNING *
+        `, [asin, marketplaceId, data.title, data.brand, data.category, data.mainImageUrl]);
+        return result.rows[0];
+      }
+      return existing.rows[0];
     }
-    return existing.rows[0];
+
+    // Create new
+    const result = await query(`
+      INSERT INTO asin_entities (asin, marketplace_id, title, brand, category, main_image_url)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [asin, marketplaceId, data.title || null, data.brand || null, data.category || null, data.mainImageUrl || null]);
+
+    return result.rows[0];
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      keepaLogger.warn('asin_entities table does not exist');
+      return null;
+    }
+    throw error;
   }
-
-  // Create new
-  const result = await query(`
-    INSERT INTO asin_entities (asin, marketplace_id, title, brand, category, main_image_url)
-    VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING *
-  `, [asin, marketplaceId, data.title || null, data.brand || null, data.category || null, data.mainImageUrl || null]);
-
-  return result.rows[0];
 }
 
 /**
@@ -775,14 +811,23 @@ export async function syncKeepaAsinsBatched(asins, marketplaceId, options = {}) 
  * @returns {Promise<Object|null>}
  */
 export async function getLatestKeepaSnapshot(asin, marketplaceId) {
-  const result = await query(`
-    SELECT * FROM keepa_snapshots
-    WHERE asin = $1 AND marketplace_id = $2
-    ORDER BY captured_at DESC
-    LIMIT 1
-  `, [asin, marketplaceId]);
+  try {
+    const result = await query(`
+      SELECT * FROM keepa_snapshots
+      WHERE asin = $1 AND marketplace_id = $2
+      ORDER BY captured_at DESC
+      LIMIT 1
+    `, [asin, marketplaceId]);
 
-  return result.rows[0] || null;
+    return result.rows[0] || null;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      keepaLogger.warn('keepa_snapshots table does not exist');
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -793,15 +838,24 @@ export async function getLatestKeepaSnapshot(asin, marketplaceId) {
  * @returns {Promise<Object[]>}
  */
 export async function getKeepaSnapshotHistory(asin, marketplaceId, limit = 30) {
-  const result = await query(`
-    SELECT id, asin, parsed_json, captured_at
-    FROM keepa_snapshots
-    WHERE asin = $1 AND marketplace_id = $2
-    ORDER BY captured_at DESC
-    LIMIT $3
-  `, [asin, marketplaceId, limit]);
+  try {
+    const result = await query(`
+      SELECT id, asin, parsed_json, captured_at
+      FROM keepa_snapshots
+      WHERE asin = $1 AND marketplace_id = $2
+      ORDER BY captured_at DESC
+      LIMIT $3
+    `, [asin, marketplaceId, limit]);
 
-  return result.rows;
+    return result.rows;
+  } catch (error) {
+    // Handle missing table gracefully
+    if (error.message?.includes('does not exist')) {
+      keepaLogger.warn('keepa_snapshots table does not exist');
+      return [];
+    }
+    throw error;
+  }
 }
 
 /**
