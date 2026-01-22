@@ -307,7 +307,7 @@ export async function registerV2Routes(fastify) {
       let sql = `
         SELECT
           l.id,
-          COALESCE(l.seller_sku, l.sku) as seller_sku,
+          l.seller_sku,
           l.asin,
           l.title,
           l.status,
