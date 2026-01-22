@@ -125,9 +125,13 @@ export async function getVersionHistory(listingId) {
  * Create a new BOM version
  * This deactivates any existing active BOM and creates a new version.
  *
+ * Supports auto-creating custom components:
+ * - If line has valid component_id → use it
+ * - If line has component_sku but no valid component_id → look up by SKU or create new component
+ *
  * @param {number} listingId
  * @param {Object} data
- * @param {Object[]} data.lines - Array of { component_id, quantity, wastage_rate?, notes? }
+ * @param {Object[]} data.lines - Array of { component_id?, component_sku?, name?, unit_cost_ex_vat?, quantity, wastage_rate?, notes? }
  * @param {string} [data.notes]
  * @returns {Promise<Object>}
  */
@@ -156,17 +160,60 @@ export async function createVersion(listingId, data) {
 
     const bom = bomResult.rows[0];
 
-    // Insert lines (batch validation + batch insert to avoid N+1)
+    // Insert lines (with auto-create for custom components)
     if (data.lines && data.lines.length > 0) {
-      // Extract all component IDs for batch validation
-      const componentIds = data.lines.map(l => l.component_id);
+      // First pass: resolve all component IDs (create custom components if needed)
+      const resolvedLines = [];
 
-      // Batch validate: get all valid component IDs in one query
-      const validComponentsResult = await client.query(
-        'SELECT id FROM components WHERE id = ANY($1)',
-        [componentIds]
-      );
-      const validComponentIds = new Set(validComponentsResult.rows.map(r => r.id));
+      for (const line of data.lines) {
+        let componentId = line.component_id;
+
+        // Check if component_id is valid (positive integer that exists)
+        if (componentId && Number.isInteger(componentId) && componentId > 0) {
+          const existsResult = await client.query(
+            'SELECT id FROM components WHERE id = $1',
+            [componentId]
+          );
+          if (existsResult.rows.length > 0) {
+            // Valid existing component
+            resolvedLines.push({ ...line, component_id: componentId });
+            continue;
+          }
+        }
+
+        // Component doesn't exist - try to resolve by SKU or create new
+        const sku = line.component_sku;
+        if (sku) {
+          // Look up by SKU first
+          const skuResult = await client.query(
+            'SELECT id FROM components WHERE component_sku = $1',
+            [sku]
+          );
+
+          if (skuResult.rows.length > 0) {
+            // Found by SKU
+            resolvedLines.push({ ...line, component_id: skuResult.rows[0].id });
+            continue;
+          }
+
+          // Create new component if we have enough data
+          const name = line.name || line.component_name || sku;
+          const unitCost = line.unit_cost_ex_vat ?? 0;
+
+          const createResult = await client.query(`
+            INSERT INTO components (component_sku, name, unit_cost_ex_vat, category, is_active)
+            VALUES ($1, $2, $3, 'Custom', true)
+            RETURNING id
+          `, [sku, name, unitCost]);
+
+          console.log(`[BOM] Auto-created custom component: ${sku} (id=${createResult.rows[0].id})`);
+          resolvedLines.push({ ...line, component_id: createResult.rows[0].id });
+          continue;
+        }
+
+        // No way to resolve this component
+        throw new Error(`Cannot resolve component: no valid component_id or component_sku provided`);
+      }
 
       // Validate all lines before inserting
       const bomIds = [];
@@ -175,12 +222,7 @@ export async function createVersion(listingId, data) {
       const wastageRates = [];
       const notes = [];
 
-      for (const line of data.lines) {
-        // Validate component exists
-        if (!validComponentIds.has(line.component_id)) {
-          throw new Error(`Component not found: ${line.component_id}`);
-        }
-
+      for (const line of resolvedLines) {
         // Validate quantity
         if (!line.quantity || line.quantity <= 0) {
           throw new Error(`Invalid quantity for component ${line.component_id}`);
