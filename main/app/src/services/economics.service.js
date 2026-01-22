@@ -28,9 +28,33 @@ function safeParseFloat(value) {
  * @returns {number}
  */
 function roundMoney(value) {
-  if (isNaN(value)) return 0;  // Guard against NaN propagation
+  if (isNaN(value) || !isFinite(value)) return 0;  // Guard against NaN and Infinity propagation
   const result = Math.round(value * 100) / 100;
-  return result === 0 ? 0 : result;  // Normalize -0 to 0
+  // Use Object.is() to detect negative zero (strict equality doesn't catch it)
+  return Object.is(result, -0) ? 0 : result;
+}
+
+/**
+ * Round percentage/margin to specified decimal places (default 4 = 0.01% precision)
+ * Used for margin, percentages, and ratios - NOT for currency
+ * @param {number} value
+ * @param {number} decimalPlaces - Default 4 (e.g., 0.3333 = 33.33%)
+ * @returns {number}
+ */
+export function roundPercentage(value, decimalPlaces = 4) {
+  if (isNaN(value) || !isFinite(value)) return 0;
+  const multiplier = Math.pow(10, decimalPlaces);
+  const result = Math.round(value * multiplier) / multiplier;
+  return Object.is(result, -0) ? 0 : result;
+}
+
+/**
+ * Format margin for API response display
+ * @param {number} margin - Raw margin value (e.g., 0.3333)
+ * @returns {number} - Rounded margin (e.g., 0.3333)
+ */
+export function formatMarginForDisplay(margin) {
+  return roundPercentage(margin, 4);
 }
 
 /**
@@ -286,7 +310,8 @@ export async function calculateEconomics(listingId, scenario = {}) {
 
   const netRevenueExVat = priceExVat;
   const profitExVat = roundMoney(netRevenueExVat - totalCostExVat);
-  const margin = netRevenueExVat > 0 ? roundMoney(profitExVat / netRevenueExVat * 10000) / 10000 : 0;
+  // Store raw margin value (full precision) - only round for display
+  const margin = netRevenueExVat > 0 ? profitExVat / netRevenueExVat : 0;
   const breakEvenPriceIncVat = calculateBreakEvenPriceIncVat(totalCostExVat, vatRate);
 
   return {
@@ -334,7 +359,7 @@ export async function previewPriceChange(listingId, newPriceIncVat) {
     diff: {
       price_inc_vat: roundMoney(proposed.price_inc_vat - current.price_inc_vat),
       profit_ex_vat: roundMoney(proposed.profit_ex_vat - current.profit_ex_vat),
-      margin: roundMoney((proposed.margin - current.margin) * 10000) / 10000,
+      margin: roundPercentage(proposed.margin - current.margin),
     },
   };
 }
