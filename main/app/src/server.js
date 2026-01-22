@@ -223,6 +223,10 @@ await fastify.register(rateLimit, {
 fastify.addHook('onRequest', async (request, reply) => {
   if (request.url.startsWith('/api/v2/')) {
     await authenticationHook(request, reply);
+    // If auth hook sent a response (401), stop processing
+    if (reply.sent) {
+      return;
+    }
   }
 });
 
