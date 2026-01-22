@@ -1,8 +1,41 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { PageHeader } from '../layouts/PageHeader';
 import { RiskBadge } from '../components/badges';
 import { getRecommendations, acceptRecommendation, rejectRecommendation, snoozeRecommendation } from '../api/recommendations';
 import type { Recommendation } from '../types';
+import {
+  getRecommendationTitle,
+  getRecommendationDescription,
+  getRecommendationActionText,
+  getRecommendationEntityName,
+} from '../types/recommendations';
+
+// Map confidence to severity for display
+function confidenceToSeverity(confidence: string): 'LOW' | 'MEDIUM' | 'HIGH' {
+  return confidence as 'LOW' | 'MEDIUM' | 'HIGH';
+}
+
+// Get icon for recommendation type
+function getRecommendationIcon(type: string): string {
+  if (type.includes('PRICE_DECREASE')) return '↓';
+  if (type.includes('PRICE_INCREASE')) return '↑';
+  if (type.includes('STOCK')) return '📦';
+  if (type.includes('MARGIN')) return '⚠️';
+  if (type.includes('ANOMALY')) return '🔍';
+  if (type.includes('OPPORTUNITY')) return '💡';
+  return '📋';
+}
+
+// Get type category for grouping
+function getTypeCategory(type: string): string {
+  if (type.includes('PRICE')) return 'Price';
+  if (type.includes('STOCK')) return 'Inventory';
+  if (type.includes('MARGIN')) return 'Margin';
+  if (type.includes('ANOMALY')) return 'Anomaly';
+  if (type.includes('OPPORTUNITY')) return 'Opportunity';
+  return 'Other';
+}
 
 export function RecommendationsPage() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
@@ -116,45 +149,94 @@ export function RecommendationsPage() {
         {!isLoading && !error && recommendations.length === 0 && (
           <div className="text-center py-12 text-gray-500">
             <p>No recommendations found</p>
+            <p className="text-sm mt-2">
+              Recommendations are generated automatically based on your listings data.
+            </p>
           </div>
         )}
 
         {!isLoading && !error && recommendations.length > 0 && (
           <div className="space-y-4">
             {recommendations.map((rec) => (
-              <div key={rec.id} className="p-4 border border-gray-200 rounded-lg">
+              <div key={rec.id} className="p-4 border border-gray-200 rounded-lg hover:border-gray-300 transition-colors">
                 <div className="flex items-start justify-between mb-2">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-medium">{rec.title}</h3>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xl" title={getTypeCategory(rec.recommendation_type)}>
+                        {getRecommendationIcon(rec.recommendation_type)}
+                      </span>
+                      <h3 className="font-medium">{getRecommendationTitle(rec)}</h3>
                       <RiskBadge
-                        level={rec.severity === 'CRITICAL' ? 'HIGH' : rec.severity}
-                        label={rec.severity}
+                        level={confidenceToSeverity(rec.confidence)}
+                        label={rec.confidence}
                       />
                       <span className={`badge ${
                         rec.status === 'PENDING' ? 'badge-warning' :
                         rec.status === 'ACCEPTED' ? 'badge-success' :
                         rec.status === 'REJECTED' ? 'badge-danger' :
+                        rec.status === 'SUPERSEDED' ? 'badge-neutral' :
                         'badge-neutral'
                       }`}>
                         {rec.status}
                       </span>
                     </div>
-                    <p className="text-sm text-gray-600 mt-1">{rec.description}</p>
+
+                    {/* Entity Link */}
+                    <div className="text-sm text-gray-500 mt-1">
+                      {rec.entity_type === 'LISTING' ? (
+                        <Link
+                          to={`/listings/${rec.entity_id}`}
+                          className="text-blue-600 hover:underline"
+                        >
+                          {getRecommendationEntityName(rec)}
+                        </Link>
+                      ) : (
+                        <span>{getRecommendationEntityName(rec)}</span>
+                      )}
+                    </div>
+
+                    <p className="text-sm text-gray-600 mt-2">{getRecommendationDescription(rec)}</p>
                   </div>
                 </div>
 
-                {/* Evidence */}
+                {/* Action & Evidence */}
                 <div className="mt-3 p-3 bg-gray-50 rounded text-sm">
-                  <p className="font-medium text-gray-700 mb-1">Evidence</p>
-                  <p className="text-gray-600">{rec.action_text}</p>
-                  {rec.confidence && (
-                    <p className="text-gray-500 mt-1">
-                      Confidence: {(rec.confidence * 100).toFixed(0)}%
-                    </p>
+                  <p className="font-medium text-gray-700 mb-1">Suggested Action</p>
+                  <p className="text-gray-600">{getRecommendationActionText(rec)}</p>
+
+                  {/* Impact Summary */}
+                  {rec.impact_json && (
+                    <div className="mt-2 pt-2 border-t border-gray-200">
+                      <p className="font-medium text-gray-700 mb-1">Expected Impact</p>
+                      <div className="flex flex-wrap gap-3 text-xs text-gray-600">
+                        {rec.impact_json.estimated_margin_change !== undefined && (
+                          <span>
+                            Margin: {rec.impact_json.estimated_margin_change > 0 ? '+' : ''}
+                            {(rec.impact_json.estimated_margin_change * 100).toFixed(1)}%
+                          </span>
+                        )}
+                        {rec.impact_json.estimated_profit_change !== undefined && (
+                          <span>
+                            Profit: {rec.impact_json.estimated_profit_change > 0 ? '+' : ''}
+                            £{rec.impact_json.estimated_profit_change.toFixed(2)}
+                          </span>
+                        )}
+                        {rec.impact_json.buy_box_recovery_likelihood && (
+                          <span>Buy Box Recovery: {rec.impact_json.buy_box_recovery_likelihood}</span>
+                        )}
+                        {rec.impact_json.urgency && (
+                          <span className="text-orange-600">Urgency: {rec.impact_json.urgency}</span>
+                        )}
+                      </div>
+                    </div>
                   )}
-                  <p className="text-xs text-gray-400 mt-2">
-                    Computed at: {new Date(rec.evidence_json.computed_at).toLocaleString()}
+
+                  {/* Confidence Score */}
+                  <p className="text-gray-500 mt-2">
+                    Confidence: {(rec.confidence_score * 100).toFixed(0)}%
+                  </p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Generated: {new Date(rec.generated_at || rec.created_at).toLocaleString()}
                   </p>
                 </div>
 
@@ -179,6 +261,14 @@ export function RecommendationsPage() {
                     >
                       Snooze
                     </button>
+                    {rec.entity_type === 'LISTING' && (
+                      <Link
+                        to={`/listings/${rec.entity_id}`}
+                        className="btn btn-secondary btn-sm"
+                      >
+                        View Listing
+                      </Link>
+                    )}
                   </div>
                 )}
               </div>
@@ -194,7 +284,7 @@ export function RecommendationsPage() {
             <div className="fixed inset-0 bg-black/30" onClick={() => setSnoozeTarget(null)} />
             <div className="relative bg-white rounded-lg shadow-xl max-w-sm w-full p-6">
               <h2 className="text-lg font-semibold mb-4">Snooze Recommendation</h2>
-              <p className="text-sm text-gray-600 mb-4">{snoozeTarget.title}</p>
+              <p className="text-sm text-gray-600 mb-4">{getRecommendationTitle(snoozeTarget)}</p>
               <div className="space-y-2">
                 <button
                   onClick={() => handleSnooze(snoozeTarget, 24)}

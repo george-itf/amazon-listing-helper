@@ -15,6 +15,11 @@ import {
 } from '../api/boms';
 import type { ListingWithFeatures, EconomicsResponse, Recommendation } from '../types';
 import type { Bom, Component } from '../api/boms';
+import {
+  getRecommendationTitle,
+  getRecommendationDescription,
+  getRecommendationActionText,
+} from '../types/recommendations';
 
 export function ListingDetailPage() {
   const { listingId } = useParams<{ listingId: string }>();
@@ -510,20 +515,30 @@ export function ListingDetailPage() {
               {recommendations.map((rec) => (
                 <div key={rec.id} className="p-3 bg-gray-50 rounded-lg">
                   <div className="flex items-start justify-between">
-                    <div>
-                      <p className="font-medium">{rec.title}</p>
-                      <p className="text-sm text-gray-600">{rec.description}</p>
+                    <div className="flex-1 mr-3">
+                      <p className="font-medium">{getRecommendationTitle(rec)}</p>
+                      <p className="text-sm text-gray-600">{getRecommendationDescription(rec)}</p>
+                      <p className="text-sm text-blue-600 mt-1">{getRecommendationActionText(rec)}</p>
                     </div>
-                    <RiskBadge
-                      level={rec.severity === 'CRITICAL' ? 'HIGH' : rec.severity}
-                      label={rec.severity}
-                    />
+                    <div className="flex flex-col items-end gap-1">
+                      <RiskBadge
+                        level={rec.confidence as 'LOW' | 'MEDIUM' | 'HIGH'}
+                        label={rec.confidence}
+                      />
+                      <span className={`text-xs px-2 py-0.5 rounded ${
+                        rec.status === 'PENDING' ? 'bg-yellow-100 text-yellow-700' :
+                        rec.status === 'ACCEPTED' ? 'bg-green-100 text-green-700' :
+                        rec.status === 'REJECTED' ? 'bg-red-100 text-red-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>
+                        {rec.status}
+                      </span>
+                    </div>
                   </div>
-                  {rec.evidence_json?.computed_at && (
-                    <p className="text-xs text-gray-400 mt-2">
-                      Evidence computed at: {new Date(rec.evidence_json.computed_at).toLocaleString()}
-                    </p>
-                  )}
+                  <div className="text-xs text-gray-400 mt-2 flex justify-between">
+                    <span>Confidence: {(rec.confidence_score * 100).toFixed(0)}%</span>
+                    <span>Generated: {new Date(rec.generated_at || rec.created_at).toLocaleString()}</span>
+                  </div>
                 </div>
               ))}
             </div>
