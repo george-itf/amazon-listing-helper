@@ -113,21 +113,22 @@ export async function queueStaleKeepaJobs() {
 
   try {
     // Find listings without recent Keepa data
+    // NOTE: keepa_snapshots uses captured_at column per 003_slice_c_schema.sql
     const result = await safeQuery(`
       SELECT l.id as listing_id, l.asin
       FROM listings l
       LEFT JOIN LATERAL (
-        SELECT observed_at
+        SELECT captured_at
         FROM keepa_snapshots ks
         WHERE ks.asin = l.asin
-        ORDER BY ks.observed_at DESC
+        ORDER BY ks.captured_at DESC
         LIMIT 1
       ) latest_ks ON true
       WHERE l.status = 'active'
         AND l.asin IS NOT NULL
         AND (
-          latest_ks.observed_at IS NULL
-          OR latest_ks.observed_at < NOW() - INTERVAL '${KEEPA_STALENESS_DAYS} days'
+          latest_ks.captured_at IS NULL
+          OR latest_ks.captured_at < NOW() - INTERVAL '${KEEPA_STALENESS_DAYS} days'
         )
     `, [], 'find_stale_keepa');
 

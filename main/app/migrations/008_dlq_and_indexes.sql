@@ -28,8 +28,9 @@ CREATE INDEX IF NOT EXISTS idx_dlq_unresolved ON job_dead_letters(resolved_at) W
 -- B.1: Performance indexes for common query patterns
 
 -- Composite index for listing scores (used in ranking queries)
+-- NOTE: Expression indexes require the full expression in parentheses before sort direction
 CREATE INDEX IF NOT EXISTS idx_listing_scores_composite
-  ON feature_store(entity_id, (features_json->>'margin')::numeric DESC)
+  ON feature_store(entity_id, ((features_json->>'margin')::numeric) DESC)
   WHERE entity_type = 'LISTING';
 
 -- Listings by status and update time (used in sync/refresh queries)

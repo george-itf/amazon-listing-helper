@@ -61,16 +61,21 @@ async function migrateListings() {
   let count = 0;
   for (const item of data.items) {
     try {
+      // NOTE: Uses new column names per 001_slice_a_schema.sql:
+      // - seller_sku (was: sku)
+      // - price_inc_vat (was: price)
+      // - available_quantity (was: quantity)
+      // - fulfillmentChannel (was: fulfillment)
       const sql = `
-        INSERT INTO listings (sku, asin, title, price, quantity, status, fulfillment, "openDate", "imageUrl")
+        INSERT INTO listings (seller_sku, asin, title, price_inc_vat, available_quantity, status, "fulfillmentChannel", "openDate", "imageUrl")
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (sku) DO UPDATE SET
+        ON CONFLICT (seller_sku) DO UPDATE SET
           asin = EXCLUDED.asin,
           title = EXCLUDED.title,
-          price = EXCLUDED.price,
-          quantity = EXCLUDED.quantity,
+          price_inc_vat = EXCLUDED.price_inc_vat,
+          available_quantity = EXCLUDED.available_quantity,
           status = EXCLUDED.status,
-          fulfillment = EXCLUDED.fulfillment,
+          "fulfillmentChannel" = EXCLUDED."fulfillmentChannel",
           "openDate" = EXCLUDED."openDate",
           "imageUrl" = EXCLUDED."imageUrl",
           "updatedAt" = NOW()
@@ -78,19 +83,19 @@ async function migrateListings() {
       `;
 
       await query(sql, [
-        item.sku,
+        item.sku || item.seller_sku,
         item.asin,
         item.title,
-        item.price || null,
-        item.quantity || 0,
+        item.price || item.price_inc_vat || null,
+        item.quantity || item.available_quantity || 0,
         item.status?.toLowerCase() || 'active',
-        item.fulfillment || 'FBM',
+        item.fulfillment || item.fulfillmentChannel || 'FBM',
         parseDate(item.openDate),
         item.imageUrl || null,
       ]);
       count++;
     } catch (error) {
-      console.log(`  ⚠️  Error migrating listing ${item.sku}: ${error.message}`);
+      console.log(`  ⚠️  Error migrating listing ${item.sku || item.seller_sku}: ${error.message}`);
     }
   }
 
@@ -108,10 +113,10 @@ async function migrateScores() {
   }
 
   // Get listing ID lookup
-  const listingsResult = await query('SELECT id, sku FROM listings');
+  const listingsResult = await query('SELECT id, seller_sku FROM listings');
   const listingMap = {};
   for (const row of listingsResult.rows) {
-    listingMap[row.sku] = row.id;
+    listingMap[row.seller_sku] = row.id;
   }
 
   let count = 0;
@@ -189,10 +194,10 @@ async function migrateTasks() {
   }
 
   // Get listing ID lookup
-  const listingsResult = await query('SELECT id, sku FROM listings');
+  const listingsResult = await query('SELECT id, seller_sku FROM listings');
   const listingMap = {};
   for (const row of listingsResult.rows) {
-    listingMap[row.sku] = row.id;
+    listingMap[row.seller_sku] = row.id;
   }
 
   let count = 0;
@@ -247,10 +252,10 @@ async function migrateAlerts() {
   }
 
   // Get listing ID lookup by SKU
-  const listingsResult = await query('SELECT id, sku FROM listings');
+  const listingsResult = await query('SELECT id, seller_sku FROM listings');
   const listingMap = {};
   for (const row of listingsResult.rows) {
-    listingMap[row.sku] = row.id;
+    listingMap[row.seller_sku] = row.id;
   }
 
   let count = 0;
