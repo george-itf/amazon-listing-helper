@@ -14,14 +14,18 @@
  * - COMPUTE_FEATURES_ASIN: Computes and stores ASIN features
  * - GENERATE_RECOMMENDATIONS_LISTING: Generates listing recommendations
  * - GENERATE_RECOMMENDATIONS_ASIN: Generates ASIN recommendations
+ * - SYNC_AMAZON_OFFER: Syncs listing offers via amazonSync.syncListingOffers()
+ * - SYNC_AMAZON_SALES: Syncs sales/traffic via amazonSync.syncSalesAndTraffic()
+ * - SYNC_AMAZON_CATALOG: Syncs catalog items via amazonSync.syncCatalogItems()
  *
- * STUBBED (returns simulated success):
- * - SYNC_AMAZON_OFFER: Would sync offer data from SP-API (not yet implemented)
- * - SYNC_AMAZON_SALES: Would sync sales data from SP-API (not yet implemented)
- * - SYNC_AMAZON_CATALOG: Would sync catalog data from SP-API (not yet implemented)
+ * AMAZON SYNC JOB DETAILS:
+ * - If listing_id is set: targeted sync for that listing's ASIN only
+ * - If input_json.asins is set: targeted sync for those specific ASINs
+ * - Otherwise: global sync for all ASINs in listings table
+ * - With no SP-API credentials: returns simulated success (no throw)
  *
  * DEVELOPMENT MODE:
- * - If SP-API credentials are not configured, PUBLISH_* jobs return simulated success
+ * - If SP-API credentials are not configured, sync and publish jobs return simulated success
  * - This allows local development without Amazon seller account
  *
  * @module JobWorker
@@ -978,56 +982,129 @@ async function processComputeFeaturesAsin(job) {
 }
 
 /**
- * Process SYNC_AMAZON_* jobs (stub implementation)
- * @param {Object} job
- * @returns {Promise<Object>}
+ * Process SYNC_AMAZON_* jobs
+ *
+ * IMPLEMENTED JOB TYPES:
+ * - SYNC_AMAZON_OFFER   -> calls amazonSync.syncListingOffers()
+ * - SYNC_AMAZON_SALES   -> calls amazonSync.syncSalesAndTraffic()
+ * - SYNC_AMAZON_CATALOG -> calls amazonSync.syncCatalogItems()
+ *
+ * TARGETED SYNC:
+ * - If job.listing_id is set, syncs only that listing's ASIN
+ * - If job.input_json.asins is set (array), syncs those ASINs
+ * - Otherwise, runs global sync (all ASINs)
+ *
+ * @param {Object} job - The job object
+ * @returns {Promise<Object>} Sync result
  */
 async function processSyncAmazon(job) {
   const listingId = job.listing_id;
   const jobType = job.job_type;
+  const inputJson = job.input_json || {};
+  const startTime = Date.now();
 
-  workerLogger.info(` Processing ${jobType} for listing ${listingId}`);
+  workerLogger.info(`[SyncAmazon] Processing ${jobType} (job_id=${job.id}, listing_id=${listingId || 'none'})`);
 
-  // Check if we have SP-API credentials
+  // GATE 1: Check if we have SP-API credentials
   if (!hasSpApiCredentials()) {
-    workerLogger.info(` No SP-API credentials - simulating ${jobType}`);
+    workerLogger.info(`[SyncAmazon] No SP-API credentials - simulating ${jobType}`);
     return {
       success: true,
       simulated: true,
-      message: `${jobType} simulated (no SP-API credentials)`,
+      message: `${jobType} simulated (no SP-API credentials configured)`,
     };
   }
 
-  // TODO: Implement actual SP-API calls
-  // For now, return success with simulation flag
-  switch (jobType) {
-    case 'SYNC_AMAZON_OFFER':
-      // Would call SP-API to get current offer data
-      return {
-        success: true,
-        simulated: true,
-        message: 'Offer sync not yet implemented',
-      };
+  // Dynamically import amazon-data-sync (same pattern as routes)
+  const amazonSync = await import('../amazon-data-sync.js');
 
-    case 'SYNC_AMAZON_SALES':
-      // Would call SP-API to get sales data
-      return {
-        success: true,
-        simulated: true,
-        message: 'Sales sync not yet implemented',
-      };
+  // Ensure required tables exist
+  await amazonSync.ensureTables();
 
-    case 'SYNC_AMAZON_CATALOG':
-      // Would call SP-API to get catalog data
-      return {
-        success: true,
-        simulated: true,
-        message: 'Catalog sync not yet implemented',
-      };
+  // Determine target ASINs for targeted sync
+  let targetAsins = null;
 
-    default:
-      throw new Error(`Unknown Amazon sync type: ${jobType}`);
+  // Priority 1: Explicit ASINs in input_json
+  if (inputJson.asins && Array.isArray(inputJson.asins) && inputJson.asins.length > 0) {
+    targetAsins = [...new Set(inputJson.asins.filter(Boolean))];
+    workerLogger.info(`[SyncAmazon] Using ${targetAsins.length} ASIN(s) from input_json`);
   }
+  // Priority 2: Look up ASIN from listing_id
+  else if (listingId) {
+    const listingResult = await safeQuery(
+      'SELECT asin FROM listings WHERE id = $1',
+      [listingId],
+      'get_listing_asin'
+    );
+
+    if (!listingResult || listingResult.rows.length === 0) {
+      workerLogger.info(`[SyncAmazon] Listing ${listingId} not found - skipping`);
+      return {
+        success: true,
+        skipped: true,
+        message: `Listing ${listingId} not found; nothing to sync`,
+      };
+    }
+
+    const asin = listingResult.rows[0].asin;
+    if (!asin) {
+      workerLogger.info(`[SyncAmazon] Listing ${listingId} has no ASIN - skipping`);
+      return {
+        success: true,
+        skipped: true,
+        message: `Listing ${listingId} has no ASIN; nothing to sync`,
+      };
+    }
+
+    targetAsins = [asin];
+    workerLogger.info(`[SyncAmazon] Targeting ASIN ${asin} from listing ${listingId}`);
+  }
+
+  // Build options for targeted sync
+  const syncOptions = targetAsins ? { asins: targetAsins } : {};
+  const syncMode = targetAsins ? 'targeted' : 'global';
+
+  workerLogger.info(`[SyncAmazon] Executing ${jobType} in ${syncMode} mode...`);
+
+  let result;
+
+  try {
+    switch (jobType) {
+      case 'SYNC_AMAZON_OFFER':
+        result = await amazonSync.syncListingOffers(syncOptions);
+        break;
+
+      case 'SYNC_AMAZON_SALES': {
+        const daysBack = inputJson.daysBack || 30;
+        result = await amazonSync.syncSalesAndTraffic(daysBack, syncOptions);
+        break;
+      }
+
+      case 'SYNC_AMAZON_CATALOG':
+        result = await amazonSync.syncCatalogItems(syncOptions);
+        break;
+
+      default:
+        throw new Error(`Unknown Amazon sync type: ${jobType}`);
+    }
+  } catch (error) {
+    const durationMs = Date.now() - startTime;
+    workerLogger.error(`[SyncAmazon] ${jobType} failed after ${durationMs}ms:`, error.message);
+
+    // Re-throw to let job retry logic handle it
+    throw error;
+  }
+
+  const durationMs = Date.now() - startTime;
+  workerLogger.info(`[SyncAmazon] ${jobType} completed in ${durationMs}ms:`, JSON.stringify(result));
+
+  return {
+    ...result,
+    job_id: job.id,
+    job_type: jobType,
+    duration_ms: durationMs,
+    ...(targetAsins && { target_asins: targetAsins }),
+  };
 }
 
 // ============================================================================

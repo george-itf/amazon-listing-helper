@@ -274,16 +274,40 @@ export async function syncCompetitivePricing() {
 
 /**
  * Sync listing offers (other sellers' prices)
+ *
+ * @param {Object} [options] - Optional parameters
+ * @param {string[]} [options.asins] - Specific ASINs to sync (if omitted, syncs all ASINs from listings table)
+ * @returns {Promise<Object>} Sync results with asins_checked, offers_saved, and mode
  */
-export async function syncListingOffers() {
+export async function syncListingOffers(options = {}) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log('[AmazonSync] Syncing listing offers...');
+  // Determine ASIN list: use provided override or fetch all from listings
+  let asins;
+  let mode = 'global';
 
-  // Get all ASINs from listings
-  const listingsResult = await query('SELECT DISTINCT asin FROM listings WHERE asin IS NOT NULL');
-  const asins = listingsResult.rows.map(r => r.asin).filter(Boolean);
+  if (options.asins && Array.isArray(options.asins) && options.asins.length > 0) {
+    // Targeted sync - use provided ASINs
+    asins = [...new Set(options.asins.filter(Boolean))]; // Dedupe and filter nulls
+    mode = 'targeted';
+    console.log(`[AmazonSync] Syncing listing offers for ${asins.length} targeted ASIN(s)...`);
+  } else {
+    // Global sync - fetch all ASINs from listings
+    const listingsResult = await query('SELECT DISTINCT asin FROM listings WHERE asin IS NOT NULL');
+    asins = listingsResult.rows.map(r => r.asin).filter(Boolean);
+    console.log(`[AmazonSync] Syncing listing offers for all ${asins.length} ASIN(s)...`);
+  }
+
+  if (asins.length === 0) {
+    return {
+      success: true,
+      asins_checked: 0,
+      offers_saved: 0,
+      mode,
+      message: 'No ASINs to sync',
+    };
+  }
 
   const marketplaceId = getDefaultMarketplaceId();
   let totalOffers = 0;
@@ -318,6 +342,8 @@ export async function syncListingOffers() {
     success: true,
     asins_checked: asins.length,
     offers_saved: totalOffers,
+    mode,
+    ...(mode === 'targeted' && { target_asins: asins }),
   };
 }
 
@@ -474,8 +500,13 @@ export async function syncFbaInventoryReport() {
 
 /**
  * Sync sales and traffic report (Business Reports data)
+ *
+ * @param {number} [daysBack=30] - Number of days to fetch
+ * @param {Object} [options] - Optional parameters
+ * @param {string[]} [options.asins] - Specific ASINs to save (filters results after fetch; if omitted, saves all)
+ * @returns {Promise<Object>} Sync results with records_fetched, records_saved, and mode
  */
-export async function syncSalesAndTraffic(daysBack = 30) {
+export async function syncSalesAndTraffic(daysBack = 30, options = {}) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
@@ -483,6 +514,16 @@ export async function syncSalesAndTraffic(daysBack = 30) {
 
   const endDate = new Date();
   const startDate = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000);
+
+  // Determine if we're doing targeted filtering
+  let targetAsins = null;
+  let mode = 'global';
+
+  if (options.asins && Array.isArray(options.asins) && options.asins.length > 0) {
+    targetAsins = new Set(options.asins.filter(Boolean));
+    mode = 'targeted';
+    console.log(`[AmazonSync] Will filter to ${targetAsins.size} targeted ASIN(s)`);
+  }
 
   try {
     const content = await requestAndDownloadReport(sp, 'GET_SALES_AND_TRAFFIC_REPORT', {
@@ -493,15 +534,28 @@ export async function syncSalesAndTraffic(daysBack = 30) {
     // This report is JSON format
     const data = JSON.parse(content);
 
+    // Get all items from report
+    let items = data.salesAndTrafficByAsin || [];
+    const totalFetched = items.length;
+
+    // Filter to target ASINs if specified
+    if (targetAsins && targetAsins.size > 0) {
+      items = items.filter(item => {
+        const itemAsin = item.parentAsin || item.childAsin;
+        return targetAsins.has(itemAsin);
+      });
+      console.log(`[AmazonSync] Filtered from ${totalFetched} to ${items.length} records for targeted ASINs`);
+    }
+
     let saved = 0;
-    if (data.salesAndTrafficByAsin && data.salesAndTrafficByAsin.length > 0) {
-      // Batch upsert all sales/traffic data (eliminates N+1)
+    if (items.length > 0) {
+      // Batch upsert filtered sales/traffic data (eliminates N+1)
       try {
-        saved = await batchUpsertSalesTraffic(data.salesAndTrafficByAsin);
+        saved = await batchUpsertSalesTraffic(items);
         console.log(`[AmazonSync] Batch upserted ${saved} sales/traffic records`);
       } catch (error) {
         console.error(`[AmazonSync] Batch upsert failed, falling back to sequential:`, error.message);
-        for (const item of data.salesAndTrafficByAsin) {
+        for (const item of items) {
           try {
             await upsertSalesTraffic(item);
             saved++;
@@ -514,8 +568,12 @@ export async function syncSalesAndTraffic(daysBack = 30) {
 
     return {
       success: true,
-      records_fetched: data.salesAndTrafficByAsin?.length || 0,
+      records_fetched: totalFetched,
+      records_filtered: items.length,
       records_saved: saved,
+      days_back: daysBack,
+      mode,
+      ...(mode === 'targeted' && { target_asins: [...targetAsins] }),
     };
   } catch (error) {
     console.error('[AmazonSync] Sales & traffic report failed:', error.message);
@@ -625,17 +683,41 @@ export async function syncFinancialEvents(daysBack = 30) {
 // ============================================================================
 
 /**
- * Sync catalog data for all ASINs
+ * Sync catalog data for ASINs
+ *
+ * @param {Object} [options] - Optional parameters
+ * @param {string[]} [options.asins] - Specific ASINs to sync (if omitted, syncs all ASINs from listings table)
+ * @returns {Promise<Object>} Sync results with asins_processed, items_saved, and mode
  */
-export async function syncCatalogItems() {
+export async function syncCatalogItems(options = {}) {
   const sp = getSpClient();
   if (!sp) throw new Error('SP-API not configured');
 
-  console.log('[AmazonSync] Syncing catalog items...');
+  // Determine ASIN list: use provided override or fetch all from listings
+  let asins;
+  let mode = 'global';
 
-  // Get all ASINs from listings
-  const listingsResult = await query('SELECT DISTINCT asin FROM listings WHERE asin IS NOT NULL');
-  const asins = listingsResult.rows.map(r => r.asin).filter(Boolean);
+  if (options.asins && Array.isArray(options.asins) && options.asins.length > 0) {
+    // Targeted sync - use provided ASINs
+    asins = [...new Set(options.asins.filter(Boolean))]; // Dedupe and filter nulls
+    mode = 'targeted';
+    console.log(`[AmazonSync] Syncing catalog items for ${asins.length} targeted ASIN(s)...`);
+  } else {
+    // Global sync - fetch all ASINs from listings
+    const listingsResult = await query('SELECT DISTINCT asin FROM listings WHERE asin IS NOT NULL');
+    asins = listingsResult.rows.map(r => r.asin).filter(Boolean);
+    console.log(`[AmazonSync] Syncing catalog items for all ${asins.length} ASIN(s)...`);
+  }
+
+  if (asins.length === 0) {
+    return {
+      success: true,
+      asins_processed: 0,
+      items_saved: 0,
+      mode,
+      message: 'No ASINs to sync',
+    };
+  }
 
   const marketplaceId = getDefaultMarketplaceId();
   let saved = 0;
@@ -667,6 +749,8 @@ export async function syncCatalogItems() {
     success: true,
     asins_processed: asins.length,
     items_saved: saved,
+    mode,
+    ...(mode === 'targeted' && { target_asins: asins }),
   };
 }
 
