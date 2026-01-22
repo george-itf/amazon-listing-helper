@@ -36,7 +36,8 @@ export async function getActiveBom(listingId) {
             'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat,
             'notes', bl.notes
           ) ORDER BY c.name
-        ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines
+        ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines,
+        COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost_ex_vat
       FROM boms b
       LEFT JOIN bom_lines bl ON bl.bom_id = b.id
       LEFT JOIN components c ON c.id = bl.component_id
@@ -77,7 +78,8 @@ export async function findById(bomId) {
           'line_cost_ex_vat', bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat,
           'notes', bl.notes
         ) ORDER BY c.name
-      ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines
+      ) FILTER (WHERE bl.id IS NOT NULL), '[]') as lines,
+      COALESCE(SUM(bl.quantity * (1 + bl.wastage_rate) * c.unit_cost_ex_vat), 0) as total_cost_ex_vat
     FROM boms b
     LEFT JOIN bom_lines bl ON bl.bom_id = b.id
     LEFT JOIN components c ON c.id = bl.component_id
