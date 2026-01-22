@@ -34,23 +34,24 @@ import { getSafeErrorMessage } from './lib/error-handler.js';
 initSentry();
 
 // ============================================================================
-// SECURITY: API Key Authentication (A.1.2 fix)
+// SECURITY: API Key Authentication (Optional)
 // ============================================================================
 
-// A.1.2: In production, API_KEY MUST be set - fail fast at startup
+// API_KEY is OPTIONAL - if set, requires authentication for API endpoints
+// If not set, API is open (suitable for internal tools served to authenticated users)
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const API_KEY = process.env.API_KEY;
 
-if (NODE_ENV === 'production' && !API_KEY) {
-  logger.error('FATAL: API_KEY environment variable is required in production mode');
-  logger.error('Set API_KEY to a secure random value to enable authentication');
-  process.exit(1);
-}
-
-// Log warning once at startup if API_KEY is missing in non-production
-if (!API_KEY && NODE_ENV !== 'production') {
-  logger.warn('WARNING: API_KEY not configured - authentication is disabled');
-  logger.warn('This is acceptable for development but NOT for production');
+// Log authentication status at startup
+if (API_KEY) {
+  logger.info('API authentication enabled - API_KEY is configured');
+  logger.info('API requests require Authorization: Bearer <key> or X-API-Key header');
+} else {
+  logger.warn('API authentication disabled - API_KEY not configured');
+  logger.warn('All API endpoints are publicly accessible');
+  if (NODE_ENV === 'production') {
+    logger.warn('⚠️  Consider setting API_KEY in production for external API access');
+  }
 }
 
 /**
@@ -223,6 +224,10 @@ await fastify.register(rateLimit, {
 fastify.addHook('onRequest', async (request, reply) => {
   if (request.url.startsWith('/api/v2/')) {
     await authenticationHook(request, reply);
+    // If auth hook sent a response (401), stop processing
+    if (reply.sent) {
+      return;
+    }
   }
 });
 
