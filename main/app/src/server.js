@@ -367,7 +367,11 @@ const start = async () => {
 // Graceful shutdown
 const gracefulShutdown = async (signal) => {
   logger.info({ signal }, 'Shutting down gracefully...');
-  stopWorker();
+
+  // CRITICAL: Must await worker shutdown to prevent job loss
+  // Pass true to wait for in-progress jobs to complete
+  await stopWorker(true);
+
   await fastify.close();
   await sentryFlush(); // Flush Sentry events before exit
   await closePool();
