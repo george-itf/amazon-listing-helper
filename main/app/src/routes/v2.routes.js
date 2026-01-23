@@ -4557,7 +4557,7 @@ export async function registerV2Routes(fastify) {
           SELECT job_type, MAX(finished_at) as last_success
           FROM jobs
           WHERE status = 'SUCCEEDED'
-            AND job_type LIKE 'SYNC_%'
+            AND job_type::text LIKE 'SYNC_%'
           GROUP BY job_type
         `);
         for (const row of syncResult.rows) {
