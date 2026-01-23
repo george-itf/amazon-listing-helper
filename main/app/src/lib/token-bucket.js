@@ -1,0 +1,369 @@
+/**
+ * Token Bucket Rate Limiter
+ *
+ * Implements the token bucket algorithm for rate limiting API calls.
+ * Designed for Keepa's 20 tokens/minute limit but generic enough for any API.
+ *
+ * Features:
+ * - Token bucket with configurable capacity and refill rate
+ * - Persistent state (saves/loads from database)
+ * - Staggered request scheduling to avoid bursts
+ * - Support for waiting until tokens are available
+ *
+ * @module TokenBucket
+ */
+
+import { query } from '../database/connection.js';
+
+/**
+ * Token Bucket Rate Limiter
+ */
+export class TokenBucket {
+  /**
+   * Create a new token bucket
+   *
+   * @param {Object} config
+   * @param {string} config.name - Unique name for this bucket (for persistence)
+   * @param {number} config.capacity - Maximum tokens the bucket can hold
+   * @param {number} config.refillRate - Tokens added per second
+   * @param {number} [config.initialTokens] - Starting tokens (default: capacity)
+   * @param {boolean} [config.persist=true] - Whether to persist state to database
+   */
+  constructor(config) {
+    this.name = config.name;
+    this.capacity = config.capacity;
+    this.refillRate = config.refillRate;
+    this.tokens = config.initialTokens ?? config.capacity;
+    this.lastRefillTime = Date.now();
+    this.persist = config.persist !== false;
+    this.stateLoaded = false;
+
+    // For metrics
+    this.totalRequests = 0;
+    this.totalWaitTime = 0;
+    this.throttledRequests = 0;
+  }
+
+  /**
+   * Refill tokens based on elapsed time
+   * @private
+   */
+  _refill() {
+    const now = Date.now();
+    const elapsedMs = now - this.lastRefillTime;
+    const elapsedSeconds = elapsedMs / 1000;
+
+    // Calculate tokens to add
+    const tokensToAdd = elapsedSeconds * this.refillRate;
+
+    // Update tokens (capped at capacity)
+    this.tokens = Math.min(this.capacity, this.tokens + tokensToAdd);
+    this.lastRefillTime = now;
+  }
+
+  /**
+   * Try to acquire a token without waiting
+   *
+   * @param {number} [count=1] - Number of tokens to acquire
+   * @returns {boolean} True if tokens were acquired
+   */
+  tryAcquire(count = 1) {
+    this._refill();
+
+    if (this.tokens >= count) {
+      this.tokens -= count;
+      this.totalRequests++;
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Acquire tokens, waiting if necessary
+   *
+   * @param {number} [count=1] - Number of tokens to acquire
+   * @param {number} [maxWaitMs=60000] - Maximum time to wait (default: 60s)
+   * @returns {Promise<boolean>} True if tokens were acquired
+   */
+  async acquire(count = 1, maxWaitMs = 60000) {
+    this._refill();
+
+    // If we have enough tokens, acquire immediately
+    if (this.tokens >= count) {
+      this.tokens -= count;
+      this.totalRequests++;
+      return true;
+    }
+
+    // Calculate wait time
+    const tokensNeeded = count - this.tokens;
+    const waitTimeMs = (tokensNeeded / this.refillRate) * 1000;
+
+    // Check if wait time exceeds maximum
+    if (waitTimeMs > maxWaitMs) {
+      return false;
+    }
+
+    // Wait for tokens to become available
+    this.throttledRequests++;
+    const waitStartTime = Date.now();
+
+    await this._sleep(Math.ceil(waitTimeMs));
+
+    // Refill and acquire
+    this._refill();
+    this.tokens -= count;
+    this.totalRequests++;
+    this.totalWaitTime += Date.now() - waitStartTime;
+
+    return true;
+  }
+
+  /**
+   * Get time until a token will be available
+   *
+   * @param {number} [count=1] - Number of tokens needed
+   * @returns {number} Milliseconds until token available (0 if available now)
+   */
+  getWaitTime(count = 1) {
+    this._refill();
+
+    if (this.tokens >= count) {
+      return 0;
+    }
+
+    const tokensNeeded = count - this.tokens;
+    return Math.ceil((tokensNeeded / this.refillRate) * 1000);
+  }
+
+  /**
+   * Get current token count
+   * @returns {number}
+   */
+  getTokens() {
+    this._refill();
+    return this.tokens;
+  }
+
+  /**
+   * Get metrics
+   * @returns {Object}
+   */
+  getMetrics() {
+    return {
+      name: this.name,
+      tokens: this.getTokens(),
+      capacity: this.capacity,
+      refillRate: this.refillRate,
+      totalRequests: this.totalRequests,
+      throttledRequests: this.throttledRequests,
+      totalWaitTime: this.totalWaitTime,
+      avgWaitTime: this.throttledRequests > 0 ? this.totalWaitTime / this.throttledRequests : 0,
+    };
+  }
+
+  /**
+   * Load state from database
+   * @returns {Promise<boolean>}
+   */
+  async loadState() {
+    if (!this.persist || this.stateLoaded) {
+      return true;
+    }
+
+    try {
+      const result = await query(`
+        SELECT tokens, last_refill_time
+        FROM rate_limit_buckets
+        WHERE name = $1
+      `, [this.name]);
+
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        this.tokens = parseFloat(row.tokens);
+        this.lastRefillTime = new Date(row.last_refill_time).getTime();
+        this._refill(); // Apply any tokens that accumulated while offline
+      }
+
+      this.stateLoaded = true;
+      return true;
+    } catch (error) {
+      // Table might not exist - create it
+      if (error.message?.includes('does not exist')) {
+        try {
+          await this._ensureTable();
+          this.stateLoaded = true;
+          return true;
+        } catch {
+          // Non-critical - continue without persistence
+        }
+      }
+      console.warn(`[TokenBucket] Failed to load state for ${this.name}:`, error.message);
+      this.stateLoaded = true;
+      return false;
+    }
+  }
+
+  /**
+   * Save state to database
+   * @returns {Promise<boolean>}
+   */
+  async saveState() {
+    if (!this.persist) {
+      return true;
+    }
+
+    try {
+      await query(`
+        INSERT INTO rate_limit_buckets (name, tokens, last_refill_time, updated_at)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+        ON CONFLICT (name) DO UPDATE SET
+          tokens = EXCLUDED.tokens,
+          last_refill_time = EXCLUDED.last_refill_time,
+          updated_at = CURRENT_TIMESTAMP
+      `, [this.name, this.tokens, new Date(this.lastRefillTime)]);
+
+      return true;
+    } catch (error) {
+      if (error.message?.includes('does not exist')) {
+        try {
+          await this._ensureTable();
+          return this.saveState(); // Retry
+        } catch {
+          // Non-critical
+        }
+      }
+      console.warn(`[TokenBucket] Failed to save state for ${this.name}:`, error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Ensure the rate_limit_buckets table exists
+   * @private
+   */
+  async _ensureTable() {
+    await query(`
+      CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+        name VARCHAR(100) PRIMARY KEY,
+        tokens NUMERIC(10, 4) NOT NULL,
+        last_refill_time TIMESTAMP NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  }
+
+  /**
+   * Sleep for a given duration
+   * @private
+   * @param {number} ms
+   * @returns {Promise<void>}
+   */
+  _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+/**
+ * Keepa-specific rate limiter
+ * Pre-configured for Keepa's 20 tokens/minute limit
+ */
+export class KeepaRateLimiter extends TokenBucket {
+  constructor() {
+    super({
+      name: 'keepa_api',
+      capacity: 20,                    // Max 20 tokens
+      refillRate: 20 / 60,             // 20 tokens per 60 seconds = 0.333 tokens/second
+      initialTokens: 20,               // Start with full bucket
+      persist: true,
+    });
+  }
+
+  /**
+   * Acquire tokens for a Keepa API request
+   * Accounts for the number of ASINs in the batch (1 token per ASIN)
+   *
+   * @param {number} asinCount - Number of ASINs in the request
+   * @param {number} [maxWaitMs=120000] - Max wait time (default: 2 minutes)
+   * @returns {Promise<boolean>}
+   */
+  async acquireForAsins(asinCount, maxWaitMs = 120000) {
+    // Keepa charges 1 token per ASIN
+    const tokensNeeded = asinCount;
+
+    // Load state on first use
+    if (!this.stateLoaded) {
+      await this.loadState();
+    }
+
+    const acquired = await this.acquire(tokensNeeded, maxWaitMs);
+
+    // Save state after each request
+    if (acquired) {
+      // Fire and forget - don't block on save
+      this.saveState().catch(() => {});
+    }
+
+    return acquired;
+  }
+
+  /**
+   * Update tokens from Keepa response headers
+   *
+   * @param {number} tokensRemaining - Tokens remaining from X-Rl-RemainingTokens header
+   * @param {number} [resetTimeSeconds] - Seconds until reset from header
+   */
+  updateFromHeaders(tokensRemaining, resetTimeSeconds = null) {
+    // Trust the API's reported remaining tokens
+    if (tokensRemaining !== null && tokensRemaining !== undefined) {
+      this.tokens = Math.min(tokensRemaining, this.capacity);
+      this.lastRefillTime = Date.now();
+    }
+
+    // Save updated state
+    this.saveState().catch(() => {});
+  }
+
+  /**
+   * Calculate optimal batch size based on available tokens
+   *
+   * @param {number} totalAsins - Total ASINs to process
+   * @param {number} maxBatchSize - Maximum batch size (Keepa's limit is 10)
+   * @returns {number} Optimal batch size
+   */
+  getOptimalBatchSize(totalAsins, maxBatchSize = 10) {
+    const availableTokens = Math.floor(this.getTokens());
+
+    if (availableTokens >= maxBatchSize) {
+      return Math.min(maxBatchSize, totalAsins);
+    }
+
+    if (availableTokens > 0) {
+      return Math.min(availableTokens, totalAsins, maxBatchSize);
+    }
+
+    // No tokens available - return max batch size to wait just once
+    return Math.min(maxBatchSize, totalAsins);
+  }
+}
+
+// Singleton instance for Keepa
+let keepaRateLimiterInstance = null;
+
+/**
+ * Get the singleton Keepa rate limiter instance
+ * @returns {KeepaRateLimiter}
+ */
+export function getKeepaRateLimiter() {
+  if (!keepaRateLimiterInstance) {
+    keepaRateLimiterInstance = new KeepaRateLimiter();
+  }
+  return keepaRateLimiterInstance;
+}
+
+export default {
+  TokenBucket,
+  KeepaRateLimiter,
+  getKeepaRateLimiter,
+};
