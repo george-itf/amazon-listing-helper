@@ -6,6 +6,7 @@ import {
   ListingDetailPage,
   RecommendationsPage,
   AttentionQueuePage,
+  SettingsPage,
   AsinAnalyzerPage,
   BomLibraryPage,
   NotFoundPage,
@@ -35,6 +36,9 @@ function App() {
 
           {/* BOM Library */}
           <Route path="/bom" element={<BomLibraryPage />} />
+
+          {/* Settings */}
+          <Route path="/settings" element={<SettingsPage />} />
 
           {/* 404 */}
           <Route path="*" element={<NotFoundPage />} />

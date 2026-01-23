@@ -4364,6 +4364,137 @@ export async function registerV2Routes(fastify) {
   });
 
   /**
+   * GET /api/v2/operator-status
+   * Comprehensive operator dashboard data
+   * Includes health, job queue, sync status, and publish mode
+   */
+  fastify.get('/api/v2/operator-status', async (request, reply) => {
+    const { query: dbQuery, testConnection } = await import('../database/connection.js');
+    const { getCredentialsStatus, getPublishStatus } = await import('../credentials-provider.js');
+
+    try {
+      // Database health
+      let dbHealthy = false;
+      try {
+        dbHealthy = await testConnection();
+      } catch (error) {
+        // Database unavailable
+      }
+
+      // Keepa rate limit status
+      let keepaStatus = { status: 'unknown', credits_remaining: null, rate_limit_reset: null };
+      try {
+        const { getRateLimitStatus } = await import('../services/keepa.service.js');
+        const rateLimit = getRateLimitStatus();
+        keepaStatus = {
+          status: rateLimit ? 'ok' : 'unknown',
+          credits_remaining: rateLimit?.tokensRemaining ?? null,
+          rate_limit_reset: rateLimit?.resetTime ?? null,
+          last_request: rateLimit?.lastRequestTime ?? null,
+        };
+      } catch (error) {
+        // Keepa service might not be initialized
+      }
+
+      // Job queue statistics
+      let jobStats = { pending: 0, running: 0, failed_24h: 0, succeeded_24h: 0 };
+      try {
+        const statsResult = await dbQuery(`
+          SELECT
+            COALESCE(SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END), 0) as pending,
+            COALESCE(SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END), 0) as running,
+            COALESCE(SUM(CASE WHEN status = 'FAILED' AND finished_at > CURRENT_TIMESTAMP - INTERVAL '24 hours' THEN 1 ELSE 0 END), 0) as failed_24h,
+            COALESCE(SUM(CASE WHEN status = 'SUCCEEDED' AND finished_at > CURRENT_TIMESTAMP - INTERVAL '24 hours' THEN 1 ELSE 0 END), 0) as succeeded_24h
+          FROM jobs
+        `);
+        if (statsResult.rows[0]) {
+          jobStats = {
+            pending: parseInt(statsResult.rows[0].pending, 10),
+            running: parseInt(statsResult.rows[0].running, 10),
+            failed_24h: parseInt(statsResult.rows[0].failed_24h, 10),
+            succeeded_24h: parseInt(statsResult.rows[0].succeeded_24h, 10),
+          };
+        }
+      } catch (error) {
+        // Jobs table might not exist
+      }
+
+      // Sync status - last successful sync times by type
+      let syncStatus = {};
+      try {
+        const syncResult = await dbQuery(`
+          SELECT job_type, MAX(finished_at) as last_success
+          FROM jobs
+          WHERE status = 'SUCCEEDED'
+            AND job_type LIKE 'SYNC_%'
+          GROUP BY job_type
+        `);
+        for (const row of syncResult.rows) {
+          syncStatus[row.job_type] = row.last_success;
+        }
+      } catch (error) {
+        // Jobs table might not exist
+      }
+
+      // SP-API status
+      const credentials = getCredentialsStatus();
+      let spApiLastCall = null;
+      try {
+        const spApiResult = await dbQuery(`
+          SELECT MAX(finished_at) as last_call
+          FROM jobs
+          WHERE status = 'SUCCEEDED'
+            AND job_type IN ('SYNC_AMAZON_OFFER', 'SYNC_AMAZON_SALES', 'SYNC_AMAZON_CATALOG', 'PUBLISH_PRICE_CHANGE', 'PUBLISH_STOCK_CHANGE')
+        `);
+        spApiLastCall = spApiResult.rows[0]?.last_call ?? null;
+      } catch (error) {
+        // Jobs table might not exist
+      }
+
+      // Publish mode
+      const publishStatus = getPublishStatus();
+
+      // Get settings
+      let publishMode = 'simulate';
+      try {
+        const settingsResult = await dbQuery(`SELECT value FROM settings WHERE key = 'publish_mode'`);
+        if (settingsResult.rows[0]) {
+          publishMode = JSON.parse(settingsResult.rows[0].value);
+        }
+      } catch (error) {
+        // Settings might not exist
+      }
+
+      return wrapResponse({
+        timestamp: new Date().toISOString(),
+        database: {
+          status: dbHealthy ? 'connected' : 'error',
+        },
+        sp_api: {
+          status: credentials.spApi ? 'connected' : 'not_configured',
+          configured: credentials.spApi,
+          last_successful_call: spApiLastCall,
+        },
+        keepa: {
+          status: credentials.keepa ? 'connected' : 'not_configured',
+          configured: credentials.keepa,
+          ...keepaStatus,
+        },
+        job_queue: jobStats,
+        sync_status: syncStatus,
+        publish: {
+          mode: publishMode,
+          write_enabled: publishStatus.enabled && publishStatus.write_mode === 'live',
+          ready_for_live: publishStatus.ready_for_live,
+        },
+      });
+    } catch (error) {
+      httpLogger.error('[API] GET /operator-status error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
    * GET /api/v2/health/schema
    * Database schema health check - identifies missing tables
    */
