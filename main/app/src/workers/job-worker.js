@@ -1272,6 +1272,16 @@ async function processJobs() {
         recordJobEvent({ type: job.job_type, status: 'success', durationMs });
         workerLogger.info({ jobId: job.id, jobType: job.job_type, durationMs }, 'Job succeeded');
 
+        // Update linked recommendation to APPLIED if this was a publish job
+        if (job.job_type === 'PUBLISH_PRICE_CHANGE' || job.job_type === 'PUBLISH_STOCK_CHANGE') {
+          try {
+            const recommendationService = await import('../services/recommendation.service.js');
+            await recommendationService.markRecommendationApplied(job.id);
+          } catch (recError) {
+            workerLogger.warn({ jobId: job.id, err: recError }, 'Failed to update recommendation status');
+          }
+        }
+
       } catch (error) {
         // Clear tracking
         currentJobPromise = null;
@@ -1296,6 +1306,16 @@ async function processJobs() {
         // A.3.2 FIX: Insert into DLQ if max attempts exceeded
         if (updatedJob && updatedJob.status === 'FAILED') {
           await insertIntoDLQ(updatedJob, error.message, error.stack);
+
+          // Update linked recommendation to FAILED if this was a publish job
+          if (job.job_type === 'PUBLISH_PRICE_CHANGE' || job.job_type === 'PUBLISH_STOCK_CHANGE') {
+            try {
+              const recommendationService = await import('../services/recommendation.service.js');
+              await recommendationService.markRecommendationFailed(job.id, error.message);
+            } catch (recError) {
+              workerLogger.warn({ jobId: job.id, err: recError }, 'Failed to update recommendation status to FAILED');
+            }
+          }
         }
       }
     }
