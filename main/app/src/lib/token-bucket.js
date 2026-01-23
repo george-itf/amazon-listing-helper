@@ -275,9 +275,13 @@ export class KeepaRateLimiter extends TokenBucket {
       name: 'keepa_api',
       capacity: 20,                    // Max 20 tokens
       refillRate: 20 / 60,             // 20 tokens per 60 seconds = 0.333 tokens/second
-      initialTokens: 20,               // Start with full bucket
+      initialTokens: 0,                // Start EMPTY - conservative to avoid 429 on startup
       persist: true,
     });
+
+    // Track consecutive 429 errors for exponential backoff
+    this.consecutive429Count = 0;
+    this.lastRequestTime = 0;
   }
 
   /**
@@ -319,10 +323,101 @@ export class KeepaRateLimiter extends TokenBucket {
     if (tokensRemaining !== null && tokensRemaining !== undefined) {
       this.tokens = Math.min(tokensRemaining, this.capacity);
       this.lastRefillTime = Date.now();
+
+      // Reset consecutive 429 count on successful header update
+      this.consecutive429Count = 0;
     }
 
     // Save updated state
     this.saveState().catch(() => {});
+  }
+
+  /**
+   * Handle a 429 rate limit error from Keepa
+   * Sets tokens to 0 and calculates required wait time
+   *
+   * @param {Object} options - Options from the error response
+   * @param {number} [options.tokensRemaining] - X-Rl-RemainingTokens header value
+   * @param {number} [options.retryAfterSeconds] - Retry-After header value in seconds
+   * @param {number} [options.tokensNeeded=1] - Tokens needed for the failed request
+   * @returns {{ waitMs: number, shouldRetry: boolean }} Wait time and retry recommendation
+   */
+  handleRateLimitError(options = {}) {
+    const {
+      tokensRemaining = 0,
+      retryAfterSeconds = null,
+      tokensNeeded = 1,
+    } = options;
+
+    // Track consecutive 429s for exponential backoff
+    this.consecutive429Count++;
+
+    // Set tokens to actual remaining (usually 0 on 429)
+    this.tokens = Math.min(tokensRemaining, this.capacity);
+    this.lastRefillTime = Date.now();
+
+    // Calculate base wait time
+    let waitMs;
+
+    if (retryAfterSeconds !== null && retryAfterSeconds > 0) {
+      // Use Retry-After header if provided
+      waitMs = retryAfterSeconds * 1000;
+    } else {
+      // Calculate based on tokens needed and refill rate
+      const baseWaitMs = (tokensNeeded / this.refillRate) * 1000;
+
+      // Apply exponential backoff based on consecutive 429s
+      // 1st: 1x, 2nd: 2x, 3rd: 4x, etc. (capped at 8x = ~4 minutes for 10 tokens)
+      const backoffMultiplier = Math.min(Math.pow(2, this.consecutive429Count - 1), 8);
+      waitMs = baseWaitMs * backoffMultiplier;
+    }
+
+    // Add 10% jitter to avoid thundering herd
+    const jitter = waitMs * 0.1 * Math.random();
+    waitMs = Math.ceil(waitMs + jitter);
+
+    // Cap maximum wait at 5 minutes
+    const maxWaitMs = 5 * 60 * 1000;
+    waitMs = Math.min(waitMs, maxWaitMs);
+
+    // Recommend retry if we haven't hit too many consecutive 429s
+    const shouldRetry = this.consecutive429Count <= 5;
+
+    // Save updated state
+    this.saveState().catch(() => {});
+
+    console.log(`[KeepaRateLimiter] 429 received. Consecutive: ${this.consecutive429Count}, Wait: ${waitMs}ms, Retry: ${shouldRetry}`);
+
+    return { waitMs, shouldRetry };
+  }
+
+  /**
+   * Wait until tokens are available (blocking)
+   * Use this after a 429 to ensure we don't immediately retry
+   *
+   * @param {number} tokensNeeded - Tokens needed for next request
+   * @returns {Promise<void>}
+   */
+  async waitForTokens(tokensNeeded = 1) {
+    this._refill();
+
+    if (this.tokens >= tokensNeeded) {
+      return; // Already have enough
+    }
+
+    const tokensToWait = tokensNeeded - this.tokens;
+    const waitMs = Math.ceil((tokensToWait / this.refillRate) * 1000);
+
+    console.log(`[KeepaRateLimiter] Waiting ${waitMs}ms for ${tokensToWait} tokens`);
+    await this._sleep(waitMs);
+    this._refill();
+  }
+
+  /**
+   * Reset 429 counter (call after successful request)
+   */
+  resetErrorCount() {
+    this.consecutive429Count = 0;
   }
 
   /**

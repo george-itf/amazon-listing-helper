@@ -204,6 +204,12 @@ async function getAsinsToIngest(marketplaceId) {
 /**
  * Fetch Keepa data for a batch of ASINs
  *
+ * Implements robust rate limiting with:
+ * - Token bucket pre-check (wait for tokens before request)
+ * - 429 response handling with exponential backoff
+ * - Retry logic for failed batches
+ * - Header-based token synchronization
+ *
  * @param {string[]} asins - ASINs to fetch
  * @param {string} ingestionJobId - Ingestion job UUID
  * @param {number} marketplaceId - Marketplace ID
@@ -220,6 +226,7 @@ async function fetchKeepaDataBatch(asins, ingestionJobId, marketplaceId) {
 
   const apiKey = getKeepaApiKey();
   const KEEPA_API_BASE = 'https://api.keepa.com';
+  const MAX_RETRIES_PER_BATCH = 3;
 
   // Split into batches
   const batches = [];
@@ -231,76 +238,135 @@ async function fetchKeepaDataBatch(asins, ingestionJobId, marketplaceId) {
 
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex];
+    let retryCount = 0;
+    let batchSuccess = false;
 
-    try {
-      // Acquire rate limit tokens
-      const acquired = await rateLimiter.acquireForAsins(batch.length);
-      if (!acquired) {
-        logger.warn({ batchIndex, batchSize: batch.length }, 'Failed to acquire rate limit tokens');
-        continue;
-      }
+    while (!batchSuccess && retryCount < MAX_RETRIES_PER_BATCH) {
+      try {
+        // CRITICAL: Wait for tokens BEFORE making request
+        // This ensures we don't hit Keepa when we don't have tokens
+        await rateLimiter.waitForTokens(batch.length);
 
-      // Build URL
-      const params = new URLSearchParams({
-        key: apiKey,
-        domain: CONFIG.keepaDomainId.toString(),
-        asin: batch.join(','),
-        stats: CONFIG.keepaStatsWindow.toString(),
-        history: '1',
-        offers: '20',
-      });
+        // Acquire rate limit tokens (should succeed after waitForTokens)
+        const acquired = await rateLimiter.acquireForAsins(batch.length);
+        if (!acquired) {
+          logger.warn({
+            batchIndex,
+            batchSize: batch.length,
+            retryCount,
+          }, 'Failed to acquire rate limit tokens after waiting - will retry');
+          retryCount++;
+          continue;
+        }
 
-      // Fetch with timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), CONFIG.keepaTimeoutMs);
+        // Build URL
+        const params = new URLSearchParams({
+          key: apiKey,
+          domain: CONFIG.keepaDomainId.toString(),
+          asin: batch.join(','),
+          stats: CONFIG.keepaStatsWindow.toString(),
+          history: '1',
+          offers: '20',
+        });
 
-      const response = await fetch(`${KEEPA_API_BASE}/product?${params.toString()}`, {
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
+        // Fetch with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), CONFIG.keepaTimeoutMs);
 
-      // Update rate limiter from headers
-      const remaining = response.headers.get('X-Rl-RemainingTokens');
-      if (remaining !== null) {
-        rateLimiter.updateFromHeaders(parseInt(remaining, 10));
-      }
+        const response = await fetch(`${KEEPA_API_BASE}/product?${params.toString()}`, {
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        logger.error({ batchIndex, status: response.status }, 'Keepa API error');
-        continue;
-      }
+        // Always try to read remaining tokens from headers
+        const remaining = response.headers.get('X-Rl-RemainingTokens');
+        const retryAfterHeader = response.headers.get('Retry-After');
 
-      const data = await response.json();
+        // Handle rate limit (429) error with proper backoff
+        if (response.status === 429) {
+          const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null;
+          const tokensRemaining = remaining !== null ? parseInt(remaining, 10) : 0;
 
-      if (data.products && Array.isArray(data.products)) {
-        for (const product of data.products) {
-          if (product.asin) {
-            results.set(product.asin, { products: [product] });
+          const { waitMs, shouldRetry } = rateLimiter.handleRateLimitError({
+            tokensRemaining,
+            retryAfterSeconds,
+            tokensNeeded: batch.length,
+          });
 
-            // Save raw payload
-            await rawPayloadRepo.insert({
-              asin: product.asin,
-              marketplace_id: marketplaceId,
-              source: 'keepa',
-              ingestion_job_id: ingestionJobId,
-              payload: { products: [product] },
-            });
+          logger.warn({
+            batchIndex,
+            retryCount,
+            waitMs,
+            shouldRetry,
+            tokensRemaining,
+            retryAfterSeconds,
+          }, 'Keepa 429 rate limit - backing off');
+
+          if (shouldRetry && retryCount < MAX_RETRIES_PER_BATCH - 1) {
+            await sleep(waitMs);
+            retryCount++;
+            continue; // Retry this batch
+          } else {
+            logger.error({ batchIndex }, 'Keepa rate limit - max retries exceeded, skipping batch');
+            break; // Skip this batch
           }
         }
-      }
 
-      logger.debug({ batchIndex, successCount: results.size }, 'Keepa batch completed');
+        // Update rate limiter from headers on success
+        if (remaining !== null) {
+          rateLimiter.updateFromHeaders(parseInt(remaining, 10));
+        }
 
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        logger.error({ batchIndex }, 'Keepa request timed out');
-      } else {
-        logger.error({ batchIndex, error: error.message }, 'Keepa fetch error');
+        if (!response.ok) {
+          logger.error({
+            batchIndex,
+            status: response.status,
+            statusText: response.statusText,
+          }, 'Keepa API error (non-429)');
+          break; // Don't retry non-429 errors
+        }
+
+        const data = await response.json();
+
+        if (data.products && Array.isArray(data.products)) {
+          for (const product of data.products) {
+            if (product.asin) {
+              results.set(product.asin, { products: [product] });
+
+              // Save raw payload
+              await rawPayloadRepo.insert({
+                asin: product.asin,
+                marketplace_id: marketplaceId,
+                source: 'keepa',
+                ingestion_job_id: ingestionJobId,
+                payload: { products: [product] },
+              });
+            }
+          }
+        }
+
+        // Success - reset error count and mark batch complete
+        rateLimiter.resetErrorCount();
+        batchSuccess = true;
+        logger.debug({ batchIndex, successCount: results.size }, 'Keepa batch completed');
+
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          logger.error({ batchIndex, retryCount }, 'Keepa request timed out');
+        } else {
+          logger.error({ batchIndex, retryCount, error: error.message }, 'Keepa fetch error');
+        }
+
+        retryCount++;
+        if (retryCount < MAX_RETRIES_PER_BATCH) {
+          // Exponential backoff for network errors
+          const backoffMs = Math.min(1000 * Math.pow(2, retryCount), 30000);
+          await sleep(backoffMs);
+        }
       }
-      // Continue with next batch
     }
 
-    // Small delay between batches
+    // Small delay between batches (even on success) to be respectful
     if (batchIndex < batches.length - 1) {
       await sleep(500);
     }

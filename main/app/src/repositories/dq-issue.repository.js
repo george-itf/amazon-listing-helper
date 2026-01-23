@@ -135,13 +135,16 @@ export async function bulkCreate(issues) {
         asin, marketplace_id, asin_entity_id, ingestion_job_id, snapshot_id,
         issue_type, field_name, severity, status, message, details
       )
-      SELECT * FROM UNNEST(
+      SELECT
+        asin, marketplace_id, asin_entity_id, ingestion_job_id, snapshot_id,
+        issue_type, field_name, severity, 'OPEN'::dq_status, message, details
+      FROM UNNEST(
         $1::text[], $2::integer[], $3::integer[], $4::uuid[], $5::integer[],
-        $6::text[], $7::text[], $8::dq_severity[], 'OPEN'::dq_status,
+        $6::text[], $7::text[], $8::dq_severity[],
         $9::text[], $10::jsonb[]
       ) AS t(
         asin, marketplace_id, asin_entity_id, ingestion_job_id, snapshot_id,
-        issue_type, field_name, severity, status, message, details
+        issue_type, field_name, severity, message, details
       )
       RETURNING id
     `, [
