@@ -29,6 +29,104 @@ import SellingPartner from 'amazon-sp-api';
 
 const logger = createChildLogger({ service: 'asin-ingestion' });
 
+// =============================================================================
+// SP-API BATCH NORMALIZER - Defensive input handling for identifiers
+// =============================================================================
+
+/**
+ * ASIN validation regex - standard 10-character alphanumeric
+ * @type {RegExp}
+ */
+const ASIN_REGEX = /^[A-Z0-9]{10}$/i;
+
+/**
+ * Normalize and validate a batch of ASINs for SP-API searchCatalogItems.
+ *
+ * Accepts: array of strings, comma-separated string, or mixed input.
+ * Returns: { valid: boolean, identifiers: string, asinArray: string[], skipped: string[] }
+ *
+ * SP-API searchCatalogItems requires:
+ * - identifiers: comma-separated string (NOT array)
+ * - identifiersType: 'ASIN' (required when using identifiers)
+ * - marketplaceIds: comma-separated string
+ *
+ * @param {string|string[]|null|undefined} input - Raw batch input
+ * @param {Object} options - Configuration options
+ * @param {number} [options.maxSize=20] - Max identifiers per batch (SP-API limit)
+ * @returns {{ valid: boolean, identifiers: string, asinArray: string[], skipped: string[], error?: string }}
+ */
+export function normalizeSpApiIdentifiers(input, options = {}) {
+  const { maxSize = 20 } = options;
+
+  // Handle null/undefined/empty
+  if (input == null) {
+    return { valid: false, identifiers: '', asinArray: [], skipped: [], error: 'Input is null or undefined' };
+  }
+
+  // Convert to array
+  let rawArray;
+  if (typeof input === 'string') {
+    // Split comma-separated string
+    rawArray = input.split(',').map(s => s.trim());
+  } else if (Array.isArray(input)) {
+    rawArray = input;
+  } else {
+    return { valid: false, identifiers: '', asinArray: [], skipped: [], error: `Invalid input type: ${typeof input}` };
+  }
+
+  // Filter, dedupe, validate ASINs
+  const seen = new Set();
+  const validAsins = [];
+  const skipped = [];
+
+  for (const item of rawArray) {
+    // Skip non-strings, empty, whitespace-only
+    if (typeof item !== 'string' || !item.trim()) {
+      if (item !== '' && item != null) skipped.push(String(item));
+      continue;
+    }
+
+    const asin = item.trim().toUpperCase();
+
+    // Skip duplicates
+    if (seen.has(asin)) {
+      continue;
+    }
+
+    // Validate ASIN format
+    if (!ASIN_REGEX.test(asin)) {
+      skipped.push(asin);
+      continue;
+    }
+
+    seen.add(asin);
+    validAsins.push(asin);
+  }
+
+  // Check for empty result
+  if (validAsins.length === 0) {
+    return { valid: false, identifiers: '', asinArray: [], skipped, error: 'No valid ASINs after filtering' };
+  }
+
+  // Slice to max size
+  const slicedAsins = validAsins.slice(0, maxSize);
+  if (validAsins.length > maxSize) {
+    logger.warn({
+      requested: validAsins.length,
+      maxSize,
+      sliced: slicedAsins.length,
+    }, 'ASIN batch exceeds maxSize, slicing');
+  }
+
+  // Return comma-separated string (SP-API requirement)
+  return {
+    valid: true,
+    identifiers: slicedAsins.join(','),
+    asinArray: slicedAsins,
+    skipped,
+  };
+}
+
 // Configuration
 const CONFIG = {
   // Keepa settings
@@ -237,26 +335,63 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
     credentials: config.credentials,
   });
 
-  logger.info({ asinCount: asins.length }, 'Fetching SP-API data');
+  // Pre-validate all ASINs
+  const normalizedAll = normalizeSpApiIdentifiers(asins, { maxSize: asins.length });
+  if (!normalizedAll.valid) {
+    logger.error({ error: normalizedAll.error, skipped: normalizedAll.skipped }, 'No valid ASINs to fetch from SP-API');
+    return results;
+  }
 
-  // Fetch catalog items (up to 20 at a time)
+  const validAsins = normalizedAll.asinArray;
+  const batchCount = Math.ceil(validAsins.length / 20);
+
+  logger.info({
+    asinCount: validAsins.length,
+    batchCount,
+    skippedCount: normalizedAll.skipped.length,
+  }, 'Fetching SP-API data');
+
+  // Fetch catalog items (up to 20 at a time per SP-API limit)
   const catalogBatchSize = 20;
-  for (let i = 0; i < asins.length; i += catalogBatchSize) {
-    const batch = asins.slice(i, i + catalogBatchSize);
+  for (let i = 0; i < validAsins.length; i += catalogBatchSize) {
+    const batchSlice = validAsins.slice(i, i + catalogBatchSize);
+
+    // Normalize this specific batch (defensive - already validated above)
+    const normalized = normalizeSpApiIdentifiers(batchSlice, { maxSize: catalogBatchSize });
+
+    if (!normalized.valid) {
+      logger.warn({
+        batchStart: i,
+        error: normalized.error,
+      }, 'SP-API batch skipped - invalid identifiers');
+      continue;
+    }
+
+    // Log outgoing request for debugging (non-sensitive)
+    logger.debug({
+      batchStart: i,
+      identifiersCount: normalized.asinArray.length,
+      firstIdentifier: normalized.asinArray[0],
+      lastIdentifier: normalized.asinArray[normalized.asinArray.length - 1],
+      marketplaceIds: amazonMarketplaceId,
+    }, 'SP-API searchCatalogItems request');
 
     try {
       // Get catalog items
-      // Note: 'attributes' is NOT valid for searchCatalogItems - only for getCatalogItem
-      // Valid values: identifiers, images, productTypes, salesRanks, summaries, variations
-      // Note: identifiers must be an array, not a comma-separated string
+      // CRITICAL FIX: SP-API searchCatalogItems requires:
+      // - identifiers: comma-separated STRING (not array)
+      // - identifiersType: 'ASIN' (required with identifiers)
+      // - marketplaceIds: comma-separated STRING (not array)
+      // - includedData: comma-separated STRING (not array)
+      // Valid includedData values: identifiers, images, productTypes, salesRanks, summaries, variations
       const catalogResponse = await sp.callAPI({
         operation: 'searchCatalogItems',
         endpoint: 'catalogItems',
         query: {
-          identifiers: batch,
-          identifiersType: 'ASIN',
-          marketplaceIds: [amazonMarketplaceId],
-          includedData: ['identifiers', 'images', 'salesRanks', 'productTypes', 'summaries'],
+          identifiers: normalized.identifiers,          // comma-separated string
+          identifiersType: 'ASIN',                      // required when using identifiers
+          marketplaceIds: amazonMarketplaceId,          // single marketplace ID string
+          includedData: 'identifiers,images,salesRanks,productTypes,summaries',  // comma-separated string
         },
       });
 
@@ -267,10 +402,27 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
             results.set(itemAsin, { catalogItem: item });
           }
         }
+        logger.debug({
+          batchStart: i,
+          itemsReturned: catalogResponse.items.length,
+        }, 'SP-API batch success');
+      } else {
+        logger.warn({
+          batchStart: i,
+          responseKeys: Object.keys(catalogResponse || {}),
+        }, 'SP-API returned no items array');
       }
 
     } catch (error) {
-      logger.error({ batchStart: i, error: error.message }, 'SP-API catalog fetch error');
+      // Enhanced error logging with context for debugging
+      logger.error({
+        batchStart: i,
+        identifiersCount: normalized.asinArray.length,
+        firstIdentifier: normalized.asinArray[0],
+        error: error.message,
+        errorCode: error.code,
+        statusCode: error.statusCode,
+      }, 'SP-API catalog fetch error');
     }
 
     await sleep(100); // Rate limit delay
