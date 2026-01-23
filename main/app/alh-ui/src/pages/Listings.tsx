@@ -4,6 +4,7 @@ import { ListingsTable } from '../components/tables/ListingsTable';
 import { PriceEditModal } from '../components/modals/PriceEditModal';
 import { getListingsWithFeatures } from '../api/listings';
 import { syncListingsFromAmazon, testSpApiConnection, getSyncStatus } from '../api/sync';
+import { InfoTooltip } from '../components/ui';
 import type { ListingWithFeatures } from '../types';
 
 // Search icon component
@@ -239,7 +240,10 @@ export function ListingsPage() {
           className={`card card-clickable text-left ${kpiFilter === null ? '' : ''}`}
           aria-pressed={kpiFilter === null}
         >
-          <p className="text-sm text-gray-500">Total Listings</p>
+          <p className="text-sm text-gray-500">
+            Total Listings
+            <InfoTooltip content="Total number of listings synced from Amazon" position="top" />
+          </p>
           <p className="text-2xl font-semibold">{stats.total}</p>
         </button>
         <button
@@ -250,7 +254,10 @@ export function ListingsPage() {
           className={`card card-clickable text-left ${statusFilter === 'ACTIVE' && !kpiFilter ? 'card-clickable-active' : ''}`}
           aria-pressed={statusFilter === 'ACTIVE' && !kpiFilter}
         >
-          <p className="text-sm text-gray-500">Active</p>
+          <p className="text-sm text-gray-500">
+            Active
+            <InfoTooltip content="Listings currently available for sale on Amazon" position="top" />
+          </p>
           <p className="text-2xl font-semibold text-green-600">{stats.active}</p>
         </button>
         <button
@@ -258,7 +265,10 @@ export function ListingsPage() {
           className={`card card-clickable text-left ${kpiFilter === 'BUY_BOX_WON' ? 'card-clickable-active' : ''}`}
           aria-pressed={kpiFilter === 'BUY_BOX_WON'}
         >
-          <p className="text-sm text-gray-500">Buy Box Won</p>
+          <p className="text-sm text-gray-500">
+            Buy Box Won
+            <InfoTooltip content="Listings where you currently own the Buy Box, giving you the default purchase option" position="top" />
+          </p>
           <p className="text-2xl font-semibold text-blue-600">{stats.buyBoxWon}</p>
         </button>
         <button
@@ -266,7 +276,10 @@ export function ListingsPage() {
           className={`card card-clickable text-left ${kpiFilter === 'AT_RISK' ? 'card-clickable-active' : ''}`}
           aria-pressed={kpiFilter === 'AT_RISK'}
         >
-          <p className="text-sm text-gray-500">At Risk</p>
+          <p className="text-sm text-gray-500">
+            At Risk
+            <InfoTooltip content="Listings with Buy Box risk, stockout risk, or margin below 15%" position="top" />
+          </p>
           <p className="text-2xl font-semibold text-red-600">{stats.atRisk}</p>
         </button>
       </div>

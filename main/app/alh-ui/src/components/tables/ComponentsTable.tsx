@@ -2,7 +2,11 @@
  * I.1 FIX: Extracted ComponentsTable component
  *
  * Displays a list of components with inline editing capability.
+ * Supports keyboard navigation: Arrow keys to move between rows,
+ * Enter to start editing the name field.
  */
+import { useRef, useCallback } from 'react';
+import type { KeyboardEvent } from 'react';
 import type { Component } from '../../api/boms';
 
 interface ComponentsTableProps {
@@ -17,6 +21,9 @@ interface ComponentsTableProps {
   editCell: (id: number, field: keyof Component, value: string | number | null) => void;
   handleKeyDown: (e: React.KeyboardEvent, id: number, field: keyof Component) => void;
   editedComponentsCount: number;
+  // Selection
+  selectedIds?: Set<number>;
+  onSelectionChange?: (selectedIds: Set<number>) => void;
   // Actions
   onDelete: (id: number) => void;
   onImport: () => void;
@@ -33,9 +40,109 @@ export function ComponentsTable({
   editCell,
   handleKeyDown,
   editedComponentsCount,
+  selectedIds = new Set(),
+  onSelectionChange,
   onDelete,
   onImport,
 }: ComponentsTableProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const focusedIndexRef = useRef<number>(-1);
+
+  // Selection handlers
+  const handleSelectAll = useCallback(() => {
+    if (!onSelectionChange) return;
+    if (selectedIds.size === components.length) {
+      // Deselect all
+      onSelectionChange(new Set());
+    } else {
+      // Select all
+      onSelectionChange(new Set(components.map((c) => c.id)));
+    }
+  }, [components, selectedIds, onSelectionChange]);
+
+  const handleSelectRow = useCallback(
+    (id: number) => {
+      if (!onSelectionChange) return;
+      const newSelection = new Set(selectedIds);
+      if (newSelection.has(id)) {
+        newSelection.delete(id);
+      } else {
+        newSelection.add(id);
+      }
+      onSelectionChange(newSelection);
+    },
+    [selectedIds, onSelectionChange]
+  );
+
+  const isAllSelected = components.length > 0 && selectedIds.size === components.length;
+  const isSomeSelected = selectedIds.size > 0 && selectedIds.size < components.length;
+
+  // Handle keyboard navigation at table level
+  const handleTableKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLDivElement>) => {
+      if (components.length === 0) return;
+
+      // Don't interfere with input editing
+      if ((e.target as HTMLElement).tagName === 'INPUT') return;
+
+      let newIndex = focusedIndexRef.current;
+      let handled = false;
+
+      switch (e.key) {
+        case 'ArrowDown':
+          newIndex = Math.min(focusedIndexRef.current + 1, components.length - 1);
+          if (focusedIndexRef.current === -1) newIndex = 0;
+          handled = true;
+          break;
+
+        case 'ArrowUp':
+          newIndex = Math.max(focusedIndexRef.current - 1, 0);
+          handled = true;
+          break;
+
+        case 'Home':
+          newIndex = 0;
+          handled = true;
+          break;
+
+        case 'End':
+          newIndex = components.length - 1;
+          handled = true;
+          break;
+
+        case 'Enter':
+          if (focusedIndexRef.current >= 0) {
+            // Start editing the name field of the focused row
+            startEdit(components[focusedIndexRef.current].id, 'name');
+            handled = true;
+          }
+          break;
+      }
+
+      if (handled) {
+        e.preventDefault();
+        focusedIndexRef.current = newIndex;
+
+        // Update visual focus
+        const rows = containerRef.current?.querySelectorAll('tbody tr');
+        rows?.forEach((row, idx) => {
+          if (idx === newIndex) {
+            (row as HTMLElement).focus();
+            row.classList.add('ring-2', 'ring-inset', 'ring-blue-500');
+            row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          } else {
+            row.classList.remove('ring-2', 'ring-inset', 'ring-blue-500');
+          }
+        });
+      }
+    },
+    [components, startEdit]
+  );
+
+  const handleRowFocus = useCallback((index: number) => {
+    focusedIndexRef.current = index;
+  }, []);
+
   const renderEditableCell = (
     comp: Component,
     field: keyof Component,
@@ -97,24 +204,49 @@ export function ComponentsTable({
   }
 
   return (
-    <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+    <div
+      ref={containerRef}
+      className="overflow-x-auto max-h-[600px] overflow-y-auto"
+      role="grid"
+      tabIndex={0}
+      onKeyDown={handleTableKeyDown}
+      aria-label="Components table. Use arrow keys to navigate, Enter to edit."
+    >
       <table className="min-w-full divide-y divide-gray-200">
         <thead className="table-header-sticky">
           <tr className="table-header">
-            <th className="px-4 py-3">SKU</th>
-            <th className="px-4 py-3">Name</th>
-            <th className="px-4 py-3">Description</th>
-            <th className="px-4 py-3 text-right">Unit Cost (ex VAT)</th>
-            <th className="px-4 py-3 text-right">Stock</th>
-            <th className="px-4 py-3">Lead Time</th>
-            <th className="px-4 py-3 w-20">Actions</th>
+            {onSelectionChange && (
+              <th className="px-4 py-3 w-10" scope="col">
+                <input
+                  type="checkbox"
+                  checked={isAllSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = isSomeSelected;
+                  }}
+                  onChange={handleSelectAll}
+                  className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 focus:ring-2"
+                  aria-label={isAllSelected ? 'Deselect all' : 'Select all'}
+                />
+              </th>
+            )}
+            <th className="px-4 py-3" scope="col">SKU</th>
+            <th className="px-4 py-3" scope="col">Name</th>
+            <th className="px-4 py-3" scope="col">Description</th>
+            <th className="px-4 py-3 text-right" scope="col">Unit Cost (ex VAT)</th>
+            <th className="px-4 py-3 text-right" scope="col">Stock</th>
+            <th className="px-4 py-3" scope="col">Lead Time</th>
+            <th className="px-4 py-3 w-20" scope="col">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
           {components.map((comp, index) => (
             <tr
               key={comp.id}
-              className={`hover:bg-gray-100 ${
+              tabIndex={-1}
+              role="row"
+              onFocus={() => handleRowFocus(index)}
+              className={`hover:bg-gray-100 cursor-pointer focus:outline-none ${
+                selectedIds.has(comp.id) ? 'bg-blue-50' :
                 editedComponentsCount > 0 &&
                 isModified(comp.id, 'component_sku') ||
                 isModified(comp.id, 'name') ||
@@ -124,6 +256,18 @@ export function ComponentsTable({
                   : index % 2 === 1 ? 'bg-gray-50/50' : ''
               }`}
             >
+              {onSelectionChange && (
+                <td className="table-cell">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(comp.id)}
+                    onChange={() => handleSelectRow(comp.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 focus:ring-2"
+                    aria-label={`Select ${comp.name || comp.component_sku}`}
+                  />
+                </td>
+              )}
               <td className="table-cell font-mono text-xs">
                 {renderEditableCell(comp, 'component_sku')}
               </td>
@@ -152,8 +296,11 @@ export function ComponentsTable({
         </tbody>
       </table>
       <p className="text-sm text-gray-500 mt-3 px-4">
-        Tip: Click any cell to edit. Press Enter to confirm or Escape to cancel.
+        Tip: Use arrow keys to navigate rows. Click any cell or press Enter to edit. Press Escape to cancel.
       </p>
+      <div className="sr-only" aria-live="polite">
+        Use arrow keys to navigate rows. Press Enter to start editing.
+      </div>
     </div>
   );
 }

@@ -1,8 +1,9 @@
 import { useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ListingWithFeatures } from '../../types';
 import { BuyBoxBadge, RiskBadge } from '../badges';
+import { useTableKeyboardNavigation } from '../../hooks';
 
 interface ListingsTableProps {
   listings: ListingWithFeatures[];
@@ -38,6 +39,15 @@ const MAX_VISIBLE_HEIGHT = 600; // Max height for virtualized container
 
 export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
+
+  // Keyboard navigation hook
+  const { tableProps, getRowProps, containerRef } = useTableKeyboardNavigation({
+    items: listings,
+    onActivate: (listing) => {
+      navigate(`/listings/${listing.id}`);
+    },
+  });
 
   // D.2 FIX: Use virtualization for large lists
   const rowVirtualizer = useVirtualizer({
@@ -58,35 +68,44 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
   // For small lists, use simple rendering without virtualization
   if (listings.length < VIRTUALIZATION_THRESHOLD) {
     return (
-      <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+      <div
+        ref={containerRef}
+        className="overflow-x-auto max-h-[600px] overflow-y-auto"
+        {...tableProps}
+      >
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="table-header-sticky">
             <tr className="table-header">
-              <th className="px-4 py-3">SKU</th>
-              <th className="px-4 py-3">ASIN</th>
-              <th className="px-4 py-3">Title</th>
-              <th className="px-4 py-3 text-right">Qty</th>
-              <th className="px-4 py-3 text-right">Price (inc VAT)</th>
-              <th className="px-4 py-3">Buy Box</th>
-              <th className="px-4 py-3 text-right">Profit</th>
-              <th className="px-4 py-3 text-right">Margin</th>
-              <th className="px-4 py-3 text-right">Units (7d)</th>
-              <th className="px-4 py-3 text-right">Days Cover</th>
-              <th className="px-4 py-3">Risks</th>
-              <th className="px-4 py-3">Actions</th>
+              <th className="px-4 py-3" scope="col">SKU</th>
+              <th className="px-4 py-3" scope="col">ASIN</th>
+              <th className="px-4 py-3" scope="col">Title</th>
+              <th className="px-4 py-3 text-right" scope="col">Qty</th>
+              <th className="px-4 py-3 text-right" scope="col">Price (inc VAT)</th>
+              <th className="px-4 py-3" scope="col">Buy Box</th>
+              <th className="px-4 py-3 text-right" scope="col">Profit</th>
+              <th className="px-4 py-3 text-right" scope="col">Margin</th>
+              <th className="px-4 py-3 text-right" scope="col">Units (7d)</th>
+              <th className="px-4 py-3 text-right" scope="col">Days Cover</th>
+              <th className="px-4 py-3" scope="col">Risks</th>
+              <th className="px-4 py-3" scope="col">Actions</th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {listings.map((listing) => (
+            {listings.map((listing, index) => (
               <ListingRow
                 key={listing.id}
                 listing={listing}
+                index={index}
+                rowProps={getRowProps(index)}
                 onEditPrice={onEditPrice}
                 onEditStock={onEditStock}
               />
             ))}
           </tbody>
         </table>
+        <div className="sr-only" aria-live="polite">
+          Use arrow keys to navigate rows. Press Enter to view listing details.
+        </div>
       </div>
     );
   }
@@ -164,13 +183,33 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
 // Extracted row component for reuse
 interface ListingRowProps {
   listing: ListingWithFeatures;
+  index?: number;
+  rowProps?: {
+    id: string;
+    role: 'row';
+    tabIndex: number;
+    'aria-selected': boolean;
+    'data-row-index'?: number;
+    onClick: () => void;
+    onDoubleClick: () => void;
+    className: string;
+  };
   onEditPrice?: (listing: ListingWithFeatures) => void;
   onEditStock?: (listing: ListingWithFeatures) => void;
 }
 
-function ListingRow({ listing, onEditPrice, onEditStock }: ListingRowProps) {
+function ListingRow({ listing, index, rowProps, onEditPrice, onEditStock }: ListingRowProps) {
+  const baseClassName = 'hover:bg-gray-50 cursor-pointer';
+  const combinedClassName = rowProps?.className
+    ? `${baseClassName} ${rowProps.className}`
+    : baseClassName;
+
   return (
-    <tr className="hover:bg-gray-50">
+    <tr
+      {...rowProps}
+      className={combinedClassName}
+      data-row-index={index}
+    >
       <ListingRowContent listing={listing} onEditPrice={onEditPrice} onEditStock={onEditStock} />
     </tr>
   );

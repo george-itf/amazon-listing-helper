@@ -30,14 +30,15 @@ import { ComponentsTable } from '../components/tables/ComponentsTable';
 import { BomsTable } from '../components/tables/BomsTable';
 import { ImportModal, ConfirmDialog } from '../components/modals';
 import { useComponentEditor } from '../hooks/useComponentEditor';
+import { Pagination, useToast } from '../components/ui';
 
 export function BomLibraryPage() {
+  const toast = useToast();
   const [components, setComponents] = useState<Component[]>([]);
   const [boms, setBoms] = useState<Bom[]>([]);
   const [activeTab, setActiveTab] = useState<'components' | 'boms'>('components');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // New component form
   const [showNewComponent, setShowNewComponent] = useState(false);
@@ -55,13 +56,21 @@ export function BomLibraryPage() {
   const [importError, setImportError] = useState<string | null>(null);
 
   // I.4: Confirm dialog for delete
-  const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; componentId: number | null }>({
+  const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; componentId: number | null; isBulk: boolean }>({
     isOpen: false,
     componentId: null,
+    isBulk: false,
   });
+
+  // Bulk selection state
+  const [selectedComponentIds, setSelectedComponentIds] = useState<Set<number>>(new Set());
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
   // I.2: Use custom hook with useReducer for component editing
   const editor = useComponentEditor();
@@ -77,6 +86,25 @@ export function BomLibraryPage() {
         c.description?.toLowerCase().includes(query)
     );
   }, [components, searchQuery]);
+
+  // Paginated components
+  const paginatedComponents = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSize;
+    return filteredComponents.slice(startIndex, startIndex + pageSize);
+  }, [filteredComponents, currentPage, pageSize]);
+
+  const totalPages = Math.ceil(filteredComponents.length / pageSize);
+
+  // Reset to page 1 when search changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery]);
+
+  // Handle page size change
+  const handlePageSizeChange = (newSize: number) => {
+    setPageSize(newSize);
+    setCurrentPage(1);
+  };
 
   // Backup
   const [isBackingUp, setIsBackingUp] = useState(false);
@@ -101,11 +129,6 @@ export function BomLibraryPage() {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const showSuccess = (message: string) => {
-    setSuccessMessage(message);
-    setTimeout(() => setSuccessMessage(null), 5000);
-  };
 
   const handleBackup = async (type: 'boms' | 'full') => {
     setIsBackingUp(true);
@@ -135,9 +158,9 @@ export function BomLibraryPage() {
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
 
-      showSuccess(`${type === 'full' ? 'Full' : 'BOM'} backup downloaded successfully`);
+      toast.success('Backup Complete', `${type === 'full' ? 'Full' : 'BOM'} backup downloaded successfully`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Backup failed');
+      toast.error('Backup Failed', err instanceof Error ? err.message : 'Failed to create backup');
     } finally {
       setIsBackingUp(false);
     }
@@ -145,7 +168,7 @@ export function BomLibraryPage() {
 
   const handleCreateComponent = async () => {
     if (!newComponent.component_sku || !newComponent.name || !newComponent.unit_cost_ex_vat) {
-      setError('Please fill in all required fields');
+      toast.warning('Missing Fields', 'Please fill in all required fields');
       return;
     }
 
@@ -167,10 +190,10 @@ export function BomLibraryPage() {
         unit_cost_ex_vat: '',
         category: '',
       });
-      showSuccess('Component created successfully');
+      toast.success('Component Created', `Component ${newComponent.component_sku} created successfully`);
       loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create component');
+      toast.error('Creation Failed', err instanceof Error ? err.message : 'Failed to create component');
     }
   };
 
@@ -188,14 +211,14 @@ export function BomLibraryPage() {
       const result = await importComponents(rows);
 
       if (result.errors.length > 0) {
-        setImportError(
-          `Import completed with ${result.errors.length} errors: ${result.errors
-            .map((e) => `Row ${e.row}: ${e.error}`)
-            .join(', ')}`
+        toast.warning(
+          'Import Completed with Errors',
+          `${result.errors.length} row(s) failed to import`
         );
+      } else {
+        toast.success('Import Complete', `${result.created} created, ${result.updated} updated`);
       }
 
-      showSuccess(`Import complete: ${result.created} created, ${result.updated} updated`);
       setShowImportModal(false);
       loadData();
     } catch (err) {
@@ -213,40 +236,69 @@ export function BomLibraryPage() {
       const result = await editor.saveChanges();
 
       if (result.failed > 0) {
-        setError(`${result.failed} updates failed: ${result.errors.map((e) => e.error).join(', ')}`);
-      }
-
-      if (result.updated > 0) {
-        showSuccess(`${result.updated} components updated successfully`);
+        toast.warning('Partial Save', `${result.updated} updated, ${result.failed} failed`);
+      } else if (result.updated > 0) {
+        toast.success('Changes Saved', `${result.updated} component(s) updated successfully`);
       }
 
       loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save changes');
+      toast.error('Save Failed', err instanceof Error ? err.message : 'Failed to save changes');
     }
   };
 
   // I.4: Delete with accessible confirm dialog
   const handleDeleteClick = (id: number) => {
-    setDeleteConfirm({ isOpen: true, componentId: id });
+    setDeleteConfirm({ isOpen: true, componentId: id, isBulk: false });
+  };
+
+  // Bulk delete
+  const handleBulkDeleteClick = () => {
+    if (selectedComponentIds.size === 0) return;
+    setDeleteConfirm({ isOpen: true, componentId: null, isBulk: true });
   };
 
   const handleDeleteConfirm = async () => {
-    if (deleteConfirm.componentId === null) return;
-
     try {
-      await deleteComponent(deleteConfirm.componentId);
-      showSuccess('Component deleted');
+      if (deleteConfirm.isBulk) {
+        // Bulk delete
+        const deletePromises = Array.from(selectedComponentIds).map((id) => deleteComponent(id));
+        const results = await Promise.allSettled(deletePromises);
+        const succeeded = results.filter((r) => r.status === 'fulfilled').length;
+        const failed = results.filter((r) => r.status === 'rejected').length;
+
+        if (failed > 0) {
+          toast.warning('Partial Delete', `${succeeded} deleted, ${failed} failed`);
+        } else {
+          toast.success('Components Deleted', `${succeeded} component(s) removed`);
+        }
+        setSelectedComponentIds(new Set());
+      } else if (deleteConfirm.componentId !== null) {
+        // Single delete
+        await deleteComponent(deleteConfirm.componentId);
+        toast.success('Component Deleted', 'The component has been removed');
+        // Remove from selection if selected
+        if (selectedComponentIds.has(deleteConfirm.componentId)) {
+          const newSelection = new Set(selectedComponentIds);
+          newSelection.delete(deleteConfirm.componentId);
+          setSelectedComponentIds(newSelection);
+        }
+      }
       loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete component');
+      toast.error('Delete Failed', err instanceof Error ? err.message : 'Failed to delete component');
     } finally {
-      setDeleteConfirm({ isOpen: false, componentId: null });
+      setDeleteConfirm({ isOpen: false, componentId: null, isBulk: false });
     }
   };
 
   const handleDeleteCancel = () => {
-    setDeleteConfirm({ isOpen: false, componentId: null });
+    setDeleteConfirm({ isOpen: false, componentId: null, isBulk: false });
+  };
+
+  // Clear selection when data changes
+  const handleSelectionChange = (newSelection: Set<number>) => {
+    setSelectedComponentIds(newSelection);
   };
 
   return (
@@ -369,9 +421,13 @@ export function BomLibraryPage() {
       {/* I.4: Confirm Dialog for Delete */}
       <ConfirmDialog
         isOpen={deleteConfirm.isOpen}
-        title="Delete Component"
-        message="Are you sure you want to delete this component? This action cannot be undone."
-        confirmLabel="Delete"
+        title={deleteConfirm.isBulk ? 'Delete Components' : 'Delete Component'}
+        message={
+          deleteConfirm.isBulk
+            ? `Are you sure you want to delete ${selectedComponentIds.size} component(s)? This action cannot be undone.`
+            : 'Are you sure you want to delete this component? This action cannot be undone.'
+        }
+        confirmLabel={deleteConfirm.isBulk ? `Delete ${selectedComponentIds.size}` : 'Delete'}
         cancelLabel="Cancel"
         confirmVariant="danger"
         onConfirm={handleDeleteConfirm}
@@ -447,12 +503,7 @@ export function BomLibraryPage() {
         </div>
       )}
 
-      {/* Success Message */}
-      {successMessage && (
-        <div className="mb-4 p-3 bg-green-50 text-green-700 rounded text-sm">{successMessage}</div>
-      )}
-
-      {/* Error Message */}
+      {/* Error Message (for form validation errors) */}
       {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded text-sm">{error}</div>}
 
       {/* I.3: Unsaved Changes Bar with Progress */}
@@ -493,23 +544,61 @@ export function BomLibraryPage() {
         </div>
       )}
 
+      {/* Bulk Action Bar */}
+      {activeTab === 'components' && selectedComponentIds.size > 0 && (
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
+          <span className="text-blue-800 font-medium">
+            {selectedComponentIds.size} component{selectedComponentIds.size !== 1 ? 's' : ''} selected
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSelectedComponentIds(new Set())}
+              className="btn btn-secondary btn-sm"
+            >
+              Clear Selection
+            </button>
+            <button
+              onClick={handleBulkDeleteClick}
+              className="btn btn-danger btn-sm"
+            >
+              Delete Selected
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* I.1: Components Table Component */}
       {activeTab === 'components' && (
-        <div className="card">
-          <ComponentsTable
-            components={filteredComponents}
-            isLoading={isLoading}
-            getValue={editor.getValue}
-            isEditing={editor.isEditing}
-            isModified={editor.isModified}
-            startEdit={editor.startEdit}
-            cancelEdit={editor.cancelEdit}
-            editCell={editor.editCell}
-            handleKeyDown={editor.handleKeyDown}
-            editedComponentsCount={editor.editedComponentsCount}
-            onDelete={handleDeleteClick}
-            onImport={() => setShowImportModal(true)}
-          />
+        <div className="card p-0">
+          <div className="p-4">
+            <ComponentsTable
+              components={paginatedComponents}
+              isLoading={isLoading}
+              getValue={editor.getValue}
+              isEditing={editor.isEditing}
+              isModified={editor.isModified}
+              startEdit={editor.startEdit}
+              cancelEdit={editor.cancelEdit}
+              editCell={editor.editCell}
+              handleKeyDown={editor.handleKeyDown}
+              editedComponentsCount={editor.editedComponentsCount}
+              selectedIds={selectedComponentIds}
+              onSelectionChange={handleSelectionChange}
+              onDelete={handleDeleteClick}
+              onImport={() => setShowImportModal(true)}
+            />
+          </div>
+          {filteredComponents.length > 0 && (
+            <Pagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={filteredComponents.length}
+              pageSize={pageSize}
+              pageSizeOptions={[10, 25, 50, 100]}
+              onPageChange={setCurrentPage}
+              onPageSizeChange={handlePageSizeChange}
+            />
+          )}
         </div>
       )}
 

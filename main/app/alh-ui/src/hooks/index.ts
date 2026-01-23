@@ -4,3 +4,5 @@ export type {
   ComponentEditorAction,
   EditingCell,
 } from './useComponentEditor';
+
+export { useTableKeyboardNavigation } from './useTableKeyboardNavigation';
