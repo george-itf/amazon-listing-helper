@@ -20,8 +20,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { query, transaction } from '../database/connection.js';
 import * as rawPayloadRepo from '../repositories/raw-payload.repository.js';
+import * as dqIssueRepo from '../repositories/dq-issue.repository.js';
 import * as asinDataService from '../services/asin-data.service.js';
-import { getKeepaRateLimiter } from '../lib/token-bucket.js';
+import { getKeepaRateLimiter, getSpApiRateLimiter } from '../lib/token-bucket.js';
 import { createChildLogger } from '../lib/logger.js';
 import { hasKeepaCredentials, getKeepaApiKey } from '../credentials-provider.js';
 import { hasSpApiCredentials, getSpApiClientConfig, getDefaultMarketplaceId, getSellerId } from '../credentials-provider.js';
@@ -329,17 +330,19 @@ async function fetchKeepaDataBatch(asins, ingestionJobId, marketplaceId) {
         const data = await response.json();
 
         if (data.products && Array.isArray(data.products)) {
+          const capturedAt = new Date(); // Record exact capture time for freshness tracking
           for (const product of data.products) {
             if (product.asin) {
               results.set(product.asin, { products: [product] });
 
-              // Save raw payload
+              // Save raw payload with captured_at for freshness tracking
               await rawPayloadRepo.insert({
                 asin: product.asin,
                 marketplace_id: marketplaceId,
                 source: 'keepa',
                 ingestion_job_id: ingestionJobId,
                 payload: { products: [product] },
+                captured_at: capturedAt,
               });
             }
           }
@@ -371,6 +374,17 @@ async function fetchKeepaDataBatch(asins, ingestionJobId, marketplaceId) {
       await sleep(500);
     }
   }
+
+  // Log rate limiter metrics at end of batch
+  const limiterMetrics = rateLimiter.getMetrics();
+  logger.info({
+    totalAsins: asins.length,
+    successCount: results.size,
+    batchCount: batches.length,
+    tokensRemaining: limiterMetrics.tokens,
+    totalWaitTimeMs: limiterMetrics.totalWaitTime,
+    throttledRequests: limiterMetrics.throttledRequests,
+  }, 'Keepa fetch completed with rate limiter');
 
   return results;
 }
@@ -424,9 +438,14 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
   // This pattern is proven to work in amazon-data-sync.js
   let successCount = 0;
   let errorCount = 0;
+  let throttleCount = 0;
+  const spApiLimiter = getSpApiRateLimiter();
 
   for (let i = 0; i < validAsins.length; i++) {
     const asin = validAsins[i];
+
+    // Acquire rate limit token before making request
+    await spApiLimiter.acquireForRequest('getCatalogItem');
 
     try {
       // Use getCatalogItem (singular) - proven working pattern from amazon-data-sync.js
@@ -443,10 +462,24 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
       if (catalogResponse) {
         results.set(asin, { catalogItem: catalogResponse });
         successCount++;
+        spApiLimiter.resetThrottleCount();
       }
 
     } catch (error) {
       errorCount++;
+
+      // Handle 429 throttle
+      if (error.code === 'QuotaExceeded' || error.statusCode === 429) {
+        throttleCount++;
+        const { waitMs, shouldRetry } = spApiLimiter.handleThrottle(error.retryAfter);
+        if (shouldRetry) {
+          logger.warn({ asin, waitMs }, 'SP-API throttled, waiting before retry');
+          await sleep(waitMs);
+          i--; // Retry this ASIN
+          continue;
+        }
+      }
+
       // Only log first few errors to avoid log spam
       if (errorCount <= 5) {
         logger.debug({
@@ -457,9 +490,6 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
       }
     }
 
-    // Rate limit: small delay between requests
-    await sleep(50);
-
     // Log progress every 20 ASINs
     if ((i + 1) % 20 === 0 || i === validAsins.length - 1) {
       logger.debug({
@@ -467,6 +497,7 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
         total: validAsins.length,
         successCount,
         errorCount,
+        throttleCount,
       }, 'SP-API catalog fetch progress');
     }
   }
@@ -480,6 +511,9 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
   // For each ASIN, try to get pricing and inventory
   for (const asin of asins) {
     const payload = results.get(asin) || {};
+
+    // Acquire rate limit token before pricing request
+    await spApiLimiter.acquireForRequest('getCompetitivePricing');
 
     try {
       // Get competitive pricing
@@ -495,8 +529,16 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
 
       if (pricingResponse) {
         payload.pricing = pricingResponse;
+        spApiLimiter.resetThrottleCount();
       }
     } catch (error) {
+      // Handle 429 throttle for pricing
+      if (error.code === 'QuotaExceeded' || error.statusCode === 429) {
+        const { waitMs } = spApiLimiter.handleThrottle(error.retryAfter);
+        logger.warn({ asin, waitMs }, 'SP-API pricing throttled');
+        await sleep(waitMs);
+        // Don't retry pricing - just skip it
+      }
       // Pricing might not be available for all ASINs
       logger.debug({ asin, error: error.message }, 'SP-API pricing fetch skipped');
     }
@@ -509,12 +551,21 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
         source: 'sp_api',
         ingestion_job_id: ingestionJobId,
         payload,
+        captured_at: new Date(), // Record capture time for freshness tracking
       });
       results.set(asin, payload);
     }
-
-    await sleep(50); // Rate limit delay
   }
+
+  // Log rate limiter metrics at end of batch
+  const limiterMetrics = spApiLimiter.getMetrics();
+  logger.info({
+    totalAsins: asins.length,
+    successCount,
+    errorCount,
+    throttleCount,
+    totalWaitTimeMs: limiterMetrics.totalWaitTimeMs,
+  }, 'SP-API fetch completed with rate limiter');
 
   return results;
 }
@@ -522,18 +573,62 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
 /**
  * Run the transform for all ASINs in an ingestion job
  *
+ * IMPORTANT: This function now compares the target ASIN list (what we intended to fetch)
+ * against the raw_payloads that actually landed. Any "vanishing" ASINs (in target but
+ * not in raw_payloads) get a DQ issue created and are counted as failed.
+ *
  * @param {string} ingestionJobId - Ingestion job UUID
  * @param {number} marketplaceId - Marketplace ID
- * @returns {Promise<{succeeded: number, failed: number}>}
+ * @param {string[]} targetAsins - Original list of ASINs we intended to ingest
+ * @returns {Promise<{succeeded: number, failed: number, missing: string[]}>}
  */
-async function runTransform(ingestionJobId, marketplaceId) {
+async function runTransform(ingestionJobId, marketplaceId, targetAsins = []) {
   // Get all unique ASINs from raw payloads
   const asinsToTransform = await rawPayloadRepo.getDistinctAsinsForJob(ingestionJobId);
+  const receivedAsins = new Set(asinsToTransform.map(r => r.asin));
 
   let succeeded = 0;
   let failed = 0;
 
-  logger.info({ asinCount: asinsToTransform.length, ingestionJobId }, 'Starting transform');
+  // CRITICAL: Detect "vanishing" ASINs - those we targeted but got no raw payloads for
+  const targetSet = new Set(targetAsins);
+  const missingAsins = targetAsins.filter(asin => !receivedAsins.has(asin));
+
+  if (missingAsins.length > 0) {
+    logger.warn({
+      missingCount: missingAsins.length,
+      missing: missingAsins.slice(0, 10), // Log first 10
+      ingestionJobId,
+    }, 'Detected vanishing ASINs - no raw payloads received');
+
+    // Create DQ issues for missing ASINs
+    const missingIssues = missingAsins.map(asin => ({
+      asin,
+      marketplace_id: marketplaceId,
+      ingestion_job_id: ingestionJobId,
+      issue_type: dqIssueRepo.DQ_ISSUE_TYPE.API_ERROR,
+      field_name: 'raw_payload',
+      severity: dqIssueRepo.DQ_SEVERITY.CRITICAL,
+      message: 'ASIN was targeted for ingestion but no raw payloads were received from any source',
+      details: {
+        targeted: true,
+        keepa_received: false,
+        spapi_received: false,
+      },
+    }));
+
+    await dqIssueRepo.bulkCreate(missingIssues);
+
+    // Count missing ASINs as failed
+    failed += missingAsins.length;
+  }
+
+  logger.info({
+    asinCount: asinsToTransform.length,
+    targetCount: targetAsins.length,
+    missingCount: missingAsins.length,
+    ingestionJobId,
+  }, 'Starting transform');
 
   for (const { asin, marketplace_id } of asinsToTransform) {
     try {
@@ -556,7 +651,7 @@ async function runTransform(ingestionJobId, marketplaceId) {
         // Table might not exist
       }
 
-      // Run transform
+      // Run transform - pass captured_at times for freshness tracking
       const result = await asinDataService.transformAndSave(
         asin,
         marketplace_id,
@@ -566,6 +661,8 @@ async function runTransform(ingestionJobId, marketplaceId) {
         {
           asinEntityId,
           ourSellerId: getSellerId(),
+          keepaCapturedAt: keepaPayload?.captured_at || null,
+          spApiCapturedAt: spApiPayload?.captured_at || null,
         }
       );
 
@@ -581,13 +678,50 @@ async function runTransform(ingestionJobId, marketplaceId) {
     }
   }
 
-  logger.info({ succeeded, failed, ingestionJobId }, 'Transform completed');
+  logger.info({ succeeded, failed, missingCount: missingAsins.length, ingestionJobId }, 'Transform completed');
 
-  return { succeeded, failed };
+  return { succeeded, failed, missing: missingAsins };
+}
+
+// Advisory lock ID for ingestion cycle (consistent across all instances)
+// Using a fixed int for pg_try_advisory_lock - this ensures only one instance runs at a time
+const INGESTION_LOCK_ID = 8675309; // "ASIN_INGEST" as a memorable number
+
+/**
+ * Try to acquire a DB advisory lock for ingestion
+ * Returns true if lock acquired, false if another instance holds it
+ *
+ * @returns {Promise<boolean>}
+ */
+async function tryAcquireIngestionLock() {
+  try {
+    const result = await query('SELECT pg_try_advisory_lock($1) AS acquired', [INGESTION_LOCK_ID]);
+    return result.rows[0]?.acquired === true;
+  } catch (error) {
+    logger.error({ error: error.message }, 'Failed to acquire ingestion lock');
+    return false;
+  }
+}
+
+/**
+ * Release the DB advisory lock for ingestion
+ *
+ * @returns {Promise<void>}
+ */
+async function releaseIngestionLock() {
+  try {
+    await query('SELECT pg_advisory_unlock($1)', [INGESTION_LOCK_ID]);
+  } catch (error) {
+    logger.error({ error: error.message }, 'Failed to release ingestion lock');
+  }
 }
 
 /**
  * Run a full ingestion cycle
+ *
+ * Uses a PostgreSQL advisory lock to ensure only one ingestion cycle runs at a time
+ * across all service instances. If another instance is already running, this returns
+ * immediately with a "skipped" status.
  *
  * @returns {Promise<Object>} Ingestion result
  */
@@ -596,7 +730,20 @@ export async function runIngestionCycle() {
   const ingestionJobId = uuidv4();
   const marketplaceId = CONFIG.defaultMarketplaceId;
 
-  logger.info({ ingestionJobId, marketplaceId }, 'Starting ingestion cycle');
+  // CONCURRENCY GUARD: Try to acquire advisory lock
+  // Only one instance can run ingestion at a time
+  const lockAcquired = await tryAcquireIngestionLock();
+  if (!lockAcquired) {
+    logger.info({ ingestionJobId, marketplaceId }, 'Ingestion cycle skipped - another instance is running');
+    return {
+      ingestion_job_id: null,
+      status: 'SKIPPED',
+      reason: 'Another ingestion cycle is already running',
+      duration_ms: Date.now() - startTime,
+    };
+  }
+
+  logger.info({ ingestionJobId, marketplaceId }, 'Starting ingestion cycle (lock acquired)');
 
   // Create ingestion job record
   const ingestionJob = await asinDataService.createIngestionJob('FULL_REFRESH', {
@@ -644,11 +791,17 @@ export async function runIngestionCycle() {
       spApiCount: spApiResults.size,
     }, 'Raw data fetch completed');
 
-    // Run transform
-    const transformResult = await runTransform(ingestionJob.id, marketplaceId);
+    // Run transform - pass target ASINs to detect "vanishing" ASINs
+    const transformResult = await runTransform(ingestionJob.id, marketplaceId, asins);
 
-    // Update job status
-    const status = transformResult.failed > 0 ? 'PARTIAL' : 'SUCCEEDED';
+    // Determine job status based on outcomes:
+    // - SUCCEEDED: all target ASINs were processed successfully
+    // - PARTIAL: some ASINs succeeded, some failed (including vanishing ASINs)
+    // - FAILED: no ASINs succeeded (would be caught by outer try/catch)
+    const hasVanishing = transformResult.missing && transformResult.missing.length > 0;
+    const hasFailures = transformResult.failed > 0;
+    const status = (hasFailures || hasVanishing) ? 'PARTIAL' : 'SUCCEEDED';
+
     await asinDataService.updateIngestionJob(ingestionJob.id, status, {
       asin_count: asins.length,
       asins_succeeded: transformResult.succeeded,
@@ -662,6 +815,7 @@ export async function runIngestionCycle() {
       asin_count: asins.length,
       succeeded: transformResult.succeeded,
       failed: transformResult.failed,
+      missing: transformResult.missing?.length || 0,
       duration_ms: Date.now() - startTime,
     };
 
@@ -680,6 +834,10 @@ export async function runIngestionCycle() {
     });
 
     throw error;
+  } finally {
+    // ALWAYS release the advisory lock, even on error
+    await releaseIngestionLock();
+    logger.debug('Ingestion lock released');
   }
 }
 

@@ -470,6 +470,10 @@ export function runDqChecks(data, asin, marketplaceId, ingestionJobId) {
  * Transform raw payloads into a snapshot
  * Main transformation pipeline
  *
+ * IMPORTANT: All persistence operations (snapshot insert, DQ issues, current upsert)
+ * are wrapped in a single transaction to ensure atomicity. If any write fails,
+ * all writes are rolled back.
+ *
  * @param {string} asin - ASIN
  * @param {number} marketplaceId - Marketplace ID
  * @param {string} ingestionJobId - Ingestion job UUID
@@ -478,6 +482,8 @@ export function runDqChecks(data, asin, marketplaceId, ingestionJobId) {
  * @param {Object} [options] - Transform options
  * @param {string} [options.ourSellerId] - Our Amazon seller ID
  * @param {number} [options.asinEntityId] - Existing ASIN entity ID
+ * @param {Date} [options.keepaCapturedAt] - When Keepa payload was captured (for freshness)
+ * @param {Date} [options.spApiCapturedAt] - When SP-API payload was captured (for freshness)
  * @returns {Promise<Object>} Transform result with snapshot and DQ issues
  */
 export async function transformAndSave(
@@ -489,6 +495,15 @@ export async function transformAndSave(
   options = {}
 ) {
   const startTime = Date.now();
+
+  // FRESHNESS FIX: snapshot_time should be the max of payload capture times,
+  // NOT the transform time. This ensures late transforms don't mark old data as fresh.
+  const capturedTimes = [];
+  if (options.keepaCapturedAt) capturedTimes.push(new Date(options.keepaCapturedAt));
+  if (options.spApiCapturedAt) capturedTimes.push(new Date(options.spApiCapturedAt));
+  const snapshotTime = capturedTimes.length > 0
+    ? new Date(Math.max(...capturedTimes.map(d => d.getTime())))
+    : new Date(); // Fallback to now if no capture times provided
 
   // Flatten data from each source
   const keepaFlat = flattenKeepaData(keepaRaw);
@@ -525,37 +540,56 @@ export async function transformAndSave(
     keepa_raw: keepaRaw,
     fingerprint_hash: fingerprintHash,
     transform_version: TRANSFORM_VERSION,
-    snapshot_time: new Date(),
+    snapshot_time: snapshotTime, // Use max(captured_at) from payloads, not transform time
   };
 
-  // Save snapshot (append-only)
-  const snapshot = await asinSnapshotRepo.insert(snapshotData);
+  // Execute all persistence in a single transaction for atomicity
+  // If any write fails, all are rolled back
+  let snapshot = null;
 
-  // Save DQ issues
-  if (dqIssues.length > 0) {
-    // Add snapshot_id to issues
-    const issuesWithSnapshot = dqIssues.map(issue => ({
-      ...issue,
-      snapshot_id: snapshot?.id || null,
-    }));
-    await dqIssueRepo.bulkCreate(issuesWithSnapshot);
-  }
+  try {
+    snapshot = await transaction(async (client) => {
+      // 1. Insert snapshot (append-only)
+      const snap = await asinSnapshotRepo.insert(snapshotData, { client });
 
-  // Upsert current view if snapshot was saved
-  if (snapshot) {
-    const currentData = {
-      ...snapshotData,
-      latest_snapshot_id: snapshot.id,
-      last_ingestion_job_id: ingestionJobId,
-      last_snapshot_time: snapshot.snapshot_time,
-    };
-    await asinCurrentRepo.upsert(currentData);
+      if (!snap) {
+        // Table might not exist - return null but don't throw
+        return null;
+      }
 
-    // Auto-resolve any previous stale data issues
-    await dqIssueRepo.autoResolve(asin, marketplaceId, [
-      dqIssueRepo.DQ_ISSUE_TYPE.STALE_DATA,
-      dqIssueRepo.DQ_ISSUE_TYPE.API_ERROR,
-    ]);
+      // 2. Insert DQ issues with snapshot_id
+      if (dqIssues.length > 0) {
+        const issuesWithSnapshot = dqIssues.map(issue => ({
+          ...issue,
+          snapshot_id: snap.id,
+        }));
+        await dqIssueRepo.bulkCreate(issuesWithSnapshot, { client });
+      }
+
+      // 3. Upsert current view
+      const currentData = {
+        ...snapshotData,
+        latest_snapshot_id: snap.id,
+        last_ingestion_job_id: ingestionJobId,
+        last_snapshot_time: snap.snapshot_time,
+      };
+      await asinCurrentRepo.upsert(currentData, { client });
+
+      // 4. Auto-resolve stale data issues
+      await dqIssueRepo.autoResolve(asin, marketplaceId, [
+        dqIssueRepo.DQ_ISSUE_TYPE.STALE_DATA,
+        dqIssueRepo.DQ_ISSUE_TYPE.API_ERROR,
+      ], { client });
+
+      return snap;
+    });
+  } catch (error) {
+    // Log but don't throw - allow the caller to handle partial success
+    logger.error({
+      asin,
+      marketplaceId,
+      error: error.message,
+    }, 'Transform transaction failed - rolled back');
   }
 
   const durationMs = Date.now() - startTime;

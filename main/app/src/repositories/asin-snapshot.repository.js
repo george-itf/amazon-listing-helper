@@ -14,6 +14,7 @@
 
 import { query, transaction } from '../database/connection.js';
 import { generateFingerprint } from '../lib/fingerprint.js';
+import { toInteger, toNumber, toBoolean, toDate, toNullish } from '../lib/coerce.js';
 
 // Current transform version - increment when transform logic changes
 export const TRANSFORM_VERSION = 1;
@@ -22,9 +23,12 @@ export const TRANSFORM_VERSION = 1;
  * Insert a new ASIN snapshot (append-only)
  *
  * @param {Object} data - Snapshot data
+ * @param {Object} [options] - Options
+ * @param {pg.PoolClient} [options.client] - Optional transaction client for atomic operations
  * @returns {Promise<Object|null>} Created snapshot or null if table doesn't exist
  */
-export async function insert(data) {
+export async function insert(data, options = {}) {
+  const { client = null } = options;
   try {
     // Generate fingerprint if not provided
     const fingerprintHash = data.fingerprint_hash || generateFingerprint({
@@ -67,46 +71,46 @@ export async function insert(data) {
     `, [
       data.asin,
       data.marketplace_id,
-      data.asin_entity_id || null,
+      toNullish(data.asin_entity_id),
       data.ingestion_job_id,
-      data.title || null,
-      data.brand || null,
-      data.category_path || null,
-      data.price_inc_vat || null,
-      data.price_ex_vat || null,
-      data.list_price || null,
-      data.buy_box_price || null,
-      data.buy_box_seller_id || null,
-      data.buy_box_is_fba || null,
-      data.seller_count || null,
-      data.total_stock || null,
-      data.fulfillment_channel || null,
-      data.units_7d || null,
-      data.units_30d || null,
-      data.units_90d || null,
-      data.days_of_cover || null,
-      data.keepa_has_data || false,
-      data.keepa_last_update || null,
-      data.keepa_price_p25_90d || null,
-      data.keepa_price_median_90d || null,
-      data.keepa_price_p75_90d || null,
-      data.keepa_lowest_90d || null,
-      data.keepa_highest_90d || null,
-      data.keepa_sales_rank_latest || null,
-      data.keepa_new_offers || null,
-      data.keepa_used_offers || null,
-      data.gross_margin_pct || null,
-      data.profit_per_unit || null,
-      data.breakeven_price || null,
-      data.is_buy_box_lost || null,
-      data.is_out_of_stock || null,
-      data.price_volatility_score || null,
+      toNullish(data.title),
+      toNullish(data.brand),
+      toNullish(data.category_path),
+      toNumber(data.price_inc_vat),
+      toNumber(data.price_ex_vat),
+      toNumber(data.list_price),
+      toNumber(data.buy_box_price),
+      toNullish(data.buy_box_seller_id),
+      toBoolean(data.buy_box_is_fba),       // CRITICAL: preserves false
+      toInteger(data.seller_count),          // CRITICAL: preserves 0
+      toInteger(data.total_stock),           // CRITICAL: preserves 0
+      toNullish(data.fulfillment_channel),
+      toInteger(data.units_7d),              // CRITICAL: preserves 0
+      toInteger(data.units_30d),             // CRITICAL: preserves 0
+      toInteger(data.units_90d),             // CRITICAL: preserves 0
+      toNumber(data.days_of_cover),
+      toBoolean(data.keepa_has_data) ?? false,
+      toDate(data.keepa_last_update),
+      toInteger(data.keepa_price_p25_90d),
+      toInteger(data.keepa_price_median_90d),
+      toInteger(data.keepa_price_p75_90d),
+      toInteger(data.keepa_lowest_90d),
+      toInteger(data.keepa_highest_90d),
+      toInteger(data.keepa_sales_rank_latest),
+      toInteger(data.keepa_new_offers),      // CRITICAL: preserves 0
+      toInteger(data.keepa_used_offers),     // CRITICAL: preserves 0
+      toNumber(data.gross_margin_pct),
+      toNumber(data.profit_per_unit),
+      toNumber(data.breakeven_price),
+      toBoolean(data.is_buy_box_lost),       // CRITICAL: preserves false
+      toBoolean(data.is_out_of_stock),       // CRITICAL: preserves false
+      toNumber(data.price_volatility_score),
       data.amazon_raw ? JSON.stringify(data.amazon_raw) : null,
       data.keepa_raw ? JSON.stringify(data.keepa_raw) : null,
       fingerprintHash,
       data.transform_version || TRANSFORM_VERSION,
-      data.snapshot_time || null,
-    ]);
+      toDate(data.snapshot_time),
+    ], client);
 
     return result.rows[0];
   } catch (error) {
