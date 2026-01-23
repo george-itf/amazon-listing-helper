@@ -4641,76 +4641,17 @@ export async function registerV2Routes(fastify) {
   });
 
   // ============================================================================
-  // JOBS - Job visibility and management
+  // JOBS - Additional job endpoints (extends existing /api/v2/jobs routes)
   // ============================================================================
 
   /**
-   * GET /api/v2/jobs
-   * Get recent jobs with optional filters
-   */
-  fastify.get('/api/v2/jobs', async (request, reply) => {
-    try {
-      const jobRepoModule = await import('../repositories/job.repository.js');
-      const { types, statuses, limit = '50', offset = '0' } = request.query;
-
-      const jobs = await jobRepoModule.findRecent({
-        types: types ? types.split(',') : undefined,
-        statuses: statuses ? statuses.split(',') : undefined,
-        limit: parseInt(limit, 10),
-        offset: parseInt(offset, 10),
-      });
-
-      return wrapResponse(jobs);
-    } catch (error) {
-      httpLogger.error('[API] GET /jobs error:', error.message);
-      return reply.status(500).send(wrapResponse(null, error.message));
-    }
-  });
-
-  /**
-   * GET /api/v2/jobs/stats
-   * Get job count statistics by status
-   */
-  fastify.get('/api/v2/jobs/stats', async (request, reply) => {
-    try {
-      const jobRepoModule = await import('../repositories/job.repository.js');
-      const counts = await jobRepoModule.countByStatus();
-      return wrapResponse(counts);
-    } catch (error) {
-      httpLogger.error('[API] GET /jobs/stats error:', error.message);
-      return reply.status(500).send(wrapResponse(null, error.message));
-    }
-  });
-
-  /**
-   * GET /api/v2/jobs/:id
-   * Get a specific job by ID
-   */
-  fastify.get('/api/v2/jobs/:id', async (request, reply) => {
-    try {
-      const jobRepoModule = await import('../repositories/job.repository.js');
-      const jobId = parseInt(request.params.id, 10);
-
-      const job = await jobRepoModule.findById(jobId);
-      if (!job) {
-        return reply.status(404).send({ success: false, error: 'Job not found' });
-      }
-
-      return wrapResponse(job);
-    } catch (error) {
-      httpLogger.error('[API] GET /jobs/:id error:', error.message);
-      return reply.status(500).send(wrapResponse(null, error.message));
-    }
-  });
-
-  /**
-   * POST /api/v2/jobs/:id/retry
+   * POST /api/v2/jobs/:jobId/retry
    * Retry a failed job
    */
-  fastify.post('/api/v2/jobs/:id/retry', async (request, reply) => {
+  fastify.post('/api/v2/jobs/:jobId/retry', async (request, reply) => {
     try {
       const { query: dbQuery } = await import('../database/connection.js');
-      const jobId = parseInt(request.params.id, 10);
+      const jobId = parseInt(request.params.jobId, 10);
 
       // Reset job to pending
       const result = await dbQuery(`
@@ -4735,31 +4676,7 @@ export async function registerV2Routes(fastify) {
 
       return wrapResponse(result.rows[0]);
     } catch (error) {
-      httpLogger.error('[API] POST /jobs/:id/retry error:', error.message);
-      return reply.status(500).send(wrapResponse(null, error.message));
-    }
-  });
-
-  /**
-   * POST /api/v2/jobs/:id/cancel
-   * Cancel a pending or running job
-   */
-  fastify.post('/api/v2/jobs/:id/cancel', async (request, reply) => {
-    try {
-      const jobRepoModule = await import('../repositories/job.repository.js');
-      const jobId = parseInt(request.params.id, 10);
-
-      const cancelled = await jobRepoModule.cancel(jobId);
-      if (!cancelled) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Cannot cancel job - job not found or not in cancellable state'
-        });
-      }
-
-      return wrapResponse({ cancelled: true, job_id: jobId });
-    } catch (error) {
-      httpLogger.error('[API] POST /jobs/:id/cancel error:', error.message);
+      httpLogger.error('[API] POST /jobs/:jobId/retry error:', error.message);
       return reply.status(500).send(wrapResponse(null, error.message));
     }
   });
