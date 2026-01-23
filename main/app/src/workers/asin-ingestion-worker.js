@@ -248,11 +248,12 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
       // Get catalog items
       // Note: 'attributes' is NOT valid for searchCatalogItems - only for getCatalogItem
       // Valid values: identifiers, images, productTypes, salesRanks, summaries, variations
+      // Note: identifiers must be an array, not a comma-separated string
       const catalogResponse = await sp.callAPI({
         operation: 'searchCatalogItems',
         endpoint: 'catalogItems',
         query: {
-          identifiers: batch.join(','),
+          identifiers: batch,
           identifiersType: 'ASIN',
           marketplaceIds: [amazonMarketplaceId],
           includedData: ['identifiers', 'images', 'salesRanks', 'productTypes', 'summaries'],
