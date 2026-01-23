@@ -34,8 +34,24 @@ function formatNumber(value: number | null | undefined): string {
 
 // D.2 FIX: Virtualization threshold - only virtualize when we have many rows
 const VIRTUALIZATION_THRESHOLD = 50;
-const ROW_HEIGHT = 48; // Estimated row height in pixels
+const ROW_HEIGHT = 52; // Estimated row height in pixels
 const MAX_VISIBLE_HEIGHT = 600; // Max height for virtualized container
+
+// Fixed column widths for consistent alignment between header and body
+const COLUMN_WIDTHS = {
+  sku: 'w-[120px] min-w-[120px]',
+  asin: 'w-[100px] min-w-[100px]',
+  title: 'w-[200px] min-w-[200px]',
+  qty: 'w-[60px] min-w-[60px]',
+  price: 'w-[80px] min-w-[80px]',
+  buyBox: 'w-[70px] min-w-[70px]',
+  profit: 'w-[80px] min-w-[80px]',
+  margin: 'w-[70px] min-w-[70px]',
+  units: 'w-[80px] min-w-[80px]',
+  cover: 'w-[90px] min-w-[90px]',
+  risks: 'w-[100px] min-w-[100px]',
+  actions: 'w-[100px] min-w-[100px]',
+};
 
 export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -113,21 +129,35 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
   // D.2 FIX: Virtualized rendering for large lists
   return (
     <div className="overflow-x-auto">
-      <table className="min-w-full">
+      <table className="w-full table-fixed">
+        <colgroup>
+          <col className={COLUMN_WIDTHS.sku} />
+          <col className={COLUMN_WIDTHS.asin} />
+          <col className={COLUMN_WIDTHS.title} />
+          <col className={COLUMN_WIDTHS.qty} />
+          <col className={COLUMN_WIDTHS.price} />
+          <col className={COLUMN_WIDTHS.buyBox} />
+          <col className={COLUMN_WIDTHS.profit} />
+          <col className={COLUMN_WIDTHS.margin} />
+          <col className={COLUMN_WIDTHS.units} />
+          <col className={COLUMN_WIDTHS.cover} />
+          <col className={COLUMN_WIDTHS.risks} />
+          <col className={COLUMN_WIDTHS.actions} />
+        </colgroup>
         <thead className="table-header-sticky">
           <tr className="table-header">
-            <th className="px-4 py-3" scope="col">SKU</th>
-            <th className="px-4 py-3" scope="col">ASIN</th>
-            <th className="px-4 py-3" scope="col">Title</th>
-            <th className="px-4 py-3 text-right" scope="col">Qty</th>
-            <th className="px-4 py-3 text-right" scope="col">Price</th>
-            <th className="px-4 py-3" scope="col">Buy Box</th>
-            <th className="px-4 py-3 text-right" scope="col">Profit</th>
-            <th className="px-4 py-3 text-right" scope="col">Margin</th>
-            <th className="px-4 py-3 text-right" scope="col">Units (7d)</th>
-            <th className="px-4 py-3 text-right" scope="col">Days Cover</th>
-            <th className="px-4 py-3" scope="col">Risks</th>
-            <th className="px-4 py-3" scope="col">Actions</th>
+            <th className="px-3 py-3 text-left" scope="col">SKU</th>
+            <th className="px-3 py-3 text-left" scope="col">ASIN</th>
+            <th className="px-3 py-3 text-left" scope="col">Title</th>
+            <th className="px-3 py-3 text-right" scope="col">Qty</th>
+            <th className="px-3 py-3 text-right" scope="col">Price</th>
+            <th className="px-3 py-3 text-left" scope="col">Buy Box</th>
+            <th className="px-3 py-3 text-right" scope="col">Profit</th>
+            <th className="px-3 py-3 text-right" scope="col">Margin</th>
+            <th className="px-3 py-3 text-right" scope="col">Units (7d)</th>
+            <th className="px-3 py-3 text-right" scope="col">Days Cover</th>
+            <th className="px-3 py-3 text-left" scope="col">Risks</th>
+            <th className="px-3 py-3 text-left" scope="col">Actions</th>
           </tr>
         </thead>
       </table>
@@ -143,7 +173,21 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
             position: 'relative',
           }}
         >
-          <table className="min-w-full">
+          <table className="w-full table-fixed">
+            <colgroup>
+              <col className={COLUMN_WIDTHS.sku} />
+              <col className={COLUMN_WIDTHS.asin} />
+              <col className={COLUMN_WIDTHS.title} />
+              <col className={COLUMN_WIDTHS.qty} />
+              <col className={COLUMN_WIDTHS.price} />
+              <col className={COLUMN_WIDTHS.buyBox} />
+              <col className={COLUMN_WIDTHS.profit} />
+              <col className={COLUMN_WIDTHS.margin} />
+              <col className={COLUMN_WIDTHS.units} />
+              <col className={COLUMN_WIDTHS.cover} />
+              <col className={COLUMN_WIDTHS.risks} />
+              <col className={COLUMN_WIDTHS.actions} />
+            </colgroup>
             <tbody>
               {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                 const listing = listings[virtualRow.index];
@@ -160,9 +204,11 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
                       left: 0,
                       width: '100%',
                       transform: `translateY(${virtualRow.start}px)`,
+                      display: 'table',
+                      tableLayout: 'fixed',
                     }}
                   >
-                    <ListingRowContent
+                    <VirtualizedRowContent
                       listing={listing}
                       onEditPrice={onEditPrice}
                       onEditStock={onEditStock}
@@ -291,6 +337,85 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
           <Link
             to={`/listings/${listing.id}`}
             className="text-gray-600 hover:text-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-1 rounded px-1"
+          >
+            View
+          </Link>
+        </div>
+      </td>
+    </>
+  );
+}
+
+// Virtualized row content with fixed widths to match header
+function VirtualizedRowContent({ listing, onEditPrice }: ListingRowProps) {
+  const f = listing.features;
+  const cellClass = "px-3 py-3 text-sm whitespace-nowrap overflow-hidden text-ellipsis";
+
+  return (
+    <>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.sku} font-mono text-xs`}>
+        <Link
+          to={`/listings/${listing.id}`}
+          className="text-blue-600 hover:underline"
+        >
+          {listing.seller_sku}
+        </Link>
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.asin} font-mono text-xs`}>
+        {listing.asin || '-'}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.title}`} title={listing.title}>
+        {listing.title}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.qty} text-right`}>
+        {formatNumber(f?.available_quantity)}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.price} text-right font-medium`}>
+        {formatCurrency(f?.price_inc_vat)}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.buyBox}`}>
+        {f ? <BuyBoxBadge status={f.buy_box_status} /> : '-'}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.profit} text-right`}>
+        <span className={f && f.profit_ex_vat != null && f.profit_ex_vat < 0 ? 'text-red-600' : 'text-green-600'}>
+          {formatCurrencyWithSign(f?.profit_ex_vat)}
+        </span>
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.margin} text-right`}>
+        {formatPercent(f?.margin)}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.units} text-right`}>
+        {formatNumber(f?.units_7d)}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.cover} text-right`}>
+        {f?.days_of_cover != null ? `${f.days_of_cover}d` : '-'}
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.risks}`}>
+        <div className="flex gap-1 flex-wrap">
+          {f?.buy_box_risk && f.buy_box_risk !== 'LOW' && (
+            <RiskBadge level={f.buy_box_risk} label="BB" />
+          )}
+          {f?.stockout_risk && f.stockout_risk !== 'LOW' && (
+            <RiskBadge level={f.stockout_risk} label="Stock" />
+          )}
+          {f?.margin != null && f.margin < 0.15 && (
+            <RiskBadge level="HIGH" label="Margin" />
+          )}
+        </div>
+      </td>
+      <td className={`${cellClass} ${COLUMN_WIDTHS.actions}`}>
+        <div className="flex gap-2">
+          {onEditPrice && (
+            <button
+              onClick={() => onEditPrice(listing)}
+              className="text-blue-600 hover:text-blue-800 text-sm"
+            >
+              Price
+            </button>
+          )}
+          <Link
+            to={`/listings/${listing.id}`}
+            className="text-gray-600 hover:text-gray-800 text-sm"
           >
             View
           </Link>
