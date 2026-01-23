@@ -1,18 +1,36 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../layouts/PageHeader';
-import { analyzeAsin, trackAsin, getTrackedAsins, convertAsinToListing } from '../api/asins';
-import type { AsinAnalysis, AsinEntity } from '../api/asins';
+import {
+  analyzeAsin,
+  trackAsin,
+  getTrackedAsins,
+  convertAsinToListing,
+  updateAsinStage,
+  batchUpdateAsinStage,
+  PIPELINE_STAGES,
+  STAGE_LABELS,
+  STAGE_DESCRIPTIONS,
+} from '../api/asins';
+import type { AsinAnalysis, AsinEntity, PipelineStage } from '../api/asins';
 
 export function AsinAnalyzerPage() {
   const navigate = useNavigate();
   const [asinInput, setAsinInput] = useState('');
   const [analysis, setAnalysis] = useState<AsinAnalysis | null>(null);
   const [trackedAsins, setTrackedAsins] = useState<AsinEntity[]>([]);
+  const [stageCounts, setStageCounts] = useState<Record<PipelineStage, number>>({
+    INBOX: 0, QUALIFIED: 0, COSTED: 0, READY: 0, CONVERTED: 0, REJECTED: 0,
+  });
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isConverting, setIsConverting] = useState(false);
   const [isLoadingTracked, setIsLoadingTracked] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Pipeline state
+  const [selectedStage, setSelectedStage] = useState<PipelineStage | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [isMovingStage, setIsMovingStage] = useState(false);
 
   // Convert form state
   const [showConvertForm, setShowConvertForm] = useState(false);
@@ -20,20 +38,73 @@ export function AsinAnalyzerPage() {
   const [convertPrice, setConvertPrice] = useState('');
   const [convertQuantity, setConvertQuantity] = useState('100');
 
-  // Load tracked ASINs on mount
+  // Load tracked ASINs on mount and when stage filter changes
   useEffect(() => {
     loadTrackedAsins();
-  }, []);
+  }, [selectedStage]);
 
   const loadTrackedAsins = async () => {
     setIsLoadingTracked(true);
     try {
-      const tracked = await getTrackedAsins();
-      setTrackedAsins(tracked);
+      const response = await getTrackedAsins(selectedStage ?? undefined);
+      setTrackedAsins(response.items);
+      setStageCounts(response.stage_counts as Record<PipelineStage, number>);
+      // Clear selection when loading new data
+      setSelectedIds(new Set());
     } catch (err) {
       console.error('Failed to load tracked ASINs:', err);
     } finally {
       setIsLoadingTracked(false);
+    }
+  };
+
+  // Handle stage change for single ASIN
+  const handleStageChange = async (asinId: number, newStage: PipelineStage) => {
+    setIsMovingStage(true);
+    try {
+      await updateAsinStage(asinId, newStage);
+      await loadTrackedAsins();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update stage');
+    } finally {
+      setIsMovingStage(false);
+    }
+  };
+
+  // Handle batch stage change
+  const handleBatchStageChange = async (newStage: PipelineStage) => {
+    if (selectedIds.size === 0) return;
+
+    setIsMovingStage(true);
+    try {
+      await batchUpdateAsinStage(Array.from(selectedIds), newStage);
+      await loadTrackedAsins();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update stages');
+    } finally {
+      setIsMovingStage(false);
+    }
+  };
+
+  // Toggle selection for an ASIN
+  const toggleSelection = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Select/deselect all visible ASINs
+  const toggleSelectAll = () => {
+    if (selectedIds.size === trackedAsins.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(trackedAsins.map(a => a.id)));
     }
   };
 
@@ -504,56 +575,171 @@ export function AsinAnalyzerPage() {
         </div>
       )}
 
-      {/* Research Pool - Tracked ASINs */}
+      {/* Opportunity Pipeline - Tracked ASINs */}
       <div className="card">
         <div className="flex justify-between items-center mb-4">
-          <h3 className="font-semibold">Research Pool ({trackedAsins.length} tracked)</h3>
+          <div>
+            <h3 className="font-semibold">Opportunity Pipeline</h3>
+            <p className="text-sm text-gray-500">
+              {selectedStage
+                ? STAGE_DESCRIPTIONS[selectedStage]
+                : `${Object.values(stageCounts).reduce((a, b) => a + b, 0)} total tracked ASINs`
+              }
+            </p>
+          </div>
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-600">{selectedIds.size} selected</span>
+              <select
+                className="select select-sm border-gray-300"
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) {
+                    handleBatchStageChange(e.target.value as PipelineStage);
+                  }
+                }}
+                disabled={isMovingStage}
+              >
+                <option value="">Move to...</option>
+                {PIPELINE_STAGES.map(stage => (
+                  <option key={stage} value={stage}>{STAGE_LABELS[stage]}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="btn btn-ghost btn-xs"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Pipeline Stage Tabs */}
+        <div className="border-b border-gray-200 mb-4">
+          <div className="flex flex-wrap gap-1">
+            <button
+              onClick={() => setSelectedStage(null)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                selectedStage === null
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              All
+              <span className="ml-1.5 px-1.5 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full">
+                {Object.values(stageCounts).reduce((a, b) => a + b, 0)}
+              </span>
+            </button>
+            {PIPELINE_STAGES.map(stage => (
+              <button
+                key={stage}
+                onClick={() => setSelectedStage(stage)}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  selectedStage === stage
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                {STAGE_LABELS[stage]}
+                {stageCounts[stage] > 0 && (
+                  <span className={`ml-1.5 px-1.5 py-0.5 text-xs rounded-full ${
+                    stage === 'READY' ? 'bg-green-100 text-green-700' :
+                    stage === 'CONVERTED' ? 'bg-blue-100 text-blue-700' :
+                    stage === 'REJECTED' ? 'bg-red-100 text-red-700' :
+                    'bg-gray-100 text-gray-600'
+                  }`}>
+                    {stageCounts[stage]}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
 
         {isLoadingTracked ? (
           <p className="text-gray-500 text-center py-8">Loading tracked ASINs...</p>
         ) : trackedAsins.length === 0 ? (
           <p className="text-gray-500 text-center py-8">
-            No ASINs tracked yet. Analyze an ASIN above and click "Track ASIN" to add it to your research pool.
+            {selectedStage
+              ? `No ASINs in ${STAGE_LABELS[selectedStage]} stage.`
+              : 'No ASINs tracked yet. Analyze an ASIN above and click "Track ASIN" to add it to your research pool.'
+            }
           </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="table w-full">
               <thead>
                 <tr>
+                  <th className="w-10">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.size === trackedAsins.length && trackedAsins.length > 0}
+                      onChange={toggleSelectAll}
+                      className="checkbox checkbox-sm"
+                    />
+                  </th>
                   <th>ASIN</th>
                   <th>Title</th>
                   <th>Category</th>
-                  <th>Status</th>
+                  <th>Stage</th>
+                  <th>Missing</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {trackedAsins.map((asin) => (
-                  <tr key={asin.id}>
-                    <td className="font-mono">{asin.asin}</td>
-                    <td className="max-w-xs truncate">{asin.title || '-'}</td>
-                    <td>{asin.category || '-'}</td>
-                    <td>
-                      <span className={`badge ${
-                        asin.status === 'READY' ? 'badge-success' :
-                        asin.status === 'CONVERTED' ? 'badge-info' :
-                        asin.status === 'ANALYZING' ? 'badge-warning' :
-                        'badge-neutral'
-                      }`}>
-                        {asin.status}
-                      </span>
-                    </td>
-                    <td>
-                      <button
-                        onClick={() => handleAnalyzeTracked(asin.asin)}
-                        className="btn btn-ghost btn-xs"
-                      >
-                        Analyze
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {trackedAsins.map((asin) => {
+                  const missingInputs = getMissingInputs(asin);
+                  return (
+                    <tr key={asin.id} className={selectedIds.has(asin.id) ? 'bg-blue-50' : ''}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(asin.id)}
+                          onChange={() => toggleSelection(asin.id)}
+                          className="checkbox checkbox-sm"
+                        />
+                      </td>
+                      <td className="font-mono">{asin.asin}</td>
+                      <td className="max-w-xs truncate">{asin.title || '-'}</td>
+                      <td>{asin.category || '-'}</td>
+                      <td>
+                        <select
+                          value={asin.pipeline_stage || 'INBOX'}
+                          onChange={(e) => handleStageChange(asin.id, e.target.value as PipelineStage)}
+                          disabled={isMovingStage}
+                          className={`select select-xs border ${
+                            asin.pipeline_stage === 'READY' ? 'border-green-300 bg-green-50' :
+                            asin.pipeline_stage === 'CONVERTED' ? 'border-blue-300 bg-blue-50' :
+                            asin.pipeline_stage === 'REJECTED' ? 'border-red-300 bg-red-50' :
+                            'border-gray-300'
+                          }`}
+                        >
+                          {PIPELINE_STAGES.map(stage => (
+                            <option key={stage} value={stage}>{STAGE_LABELS[stage]}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        {missingInputs.length > 0 ? (
+                          <span className="text-xs text-orange-600" title={missingInputs.join(', ')}>
+                            {missingInputs.length} missing
+                          </span>
+                        ) : (
+                          <span className="text-xs text-green-600">Complete</span>
+                        )}
+                      </td>
+                      <td>
+                        <button
+                          onClick={() => handleAnalyzeTracked(asin.asin)}
+                          className="btn btn-ghost btn-xs"
+                        >
+                          Analyze
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -561,4 +747,14 @@ export function AsinAnalyzerPage() {
       </div>
     </div>
   );
+}
+
+// Helper to determine missing inputs for an ASIN
+function getMissingInputs(asin: AsinEntity): string[] {
+  const missing: string[] = [];
+  if (!asin.title) missing.push('Title');
+  if (!asin.category) missing.push('Category');
+  if (!asin.brand) missing.push('Brand');
+  // Add more checks as needed based on available fields
+  return missing;
 }

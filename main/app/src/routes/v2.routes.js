@@ -1728,26 +1728,74 @@ export async function registerV2Routes(fastify) {
   /**
    * GET /api/v2/asins
    * List ASIN entities (research pool)
+   * Query params:
+   *   - tracked_only: 'true' to filter to tracked ASINs
+   *   - stage: filter by pipeline stage (INBOX, QUALIFIED, COSTED, READY, CONVERTED, REJECTED)
+   *            NULL pipeline_stage is treated as INBOX
+   *   - limit, offset: pagination
    */
   fastify.get('/api/v2/asins', async (request, reply) => {
     const { query: dbQuery } = await import('../database/connection.js');
-    const { tracked_only = 'false', limit = '50', offset = '0' } = request.query;
+    const { tracked_only = 'false', stage, limit = '500', offset = '0' } = request.query;
 
-    let whereClause = '';
+    const conditions = [];
+    const params = [];
+    let paramIndex = 1;
+
     if (tracked_only === 'true') {
-      whereClause = 'WHERE ae.is_tracked = true';
+      conditions.push('ae.is_tracked = true');
     }
 
+    // Pipeline stage filter (NULL = INBOX)
+    const VALID_STAGES = ['INBOX', 'QUALIFIED', 'COSTED', 'READY', 'CONVERTED', 'REJECTED'];
+    if (stage && VALID_STAGES.includes(stage.toUpperCase())) {
+      const upperStage = stage.toUpperCase();
+      if (upperStage === 'INBOX') {
+        // INBOX includes NULL pipeline_stage
+        conditions.push('(ae.pipeline_stage IS NULL OR ae.pipeline_stage = $' + paramIndex + ')');
+      } else {
+        conditions.push('ae.pipeline_stage = $' + paramIndex);
+      }
+      params.push(upperStage);
+      paramIndex++;
+    }
+
+    const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    params.push(parseInt(limit, 10));
+    params.push(parseInt(offset, 10));
+
     const result = await dbQuery(`
-      SELECT ae.*, m.name as marketplace_name
+      SELECT ae.*,
+             m.name as marketplace_name,
+             COALESCE(ae.pipeline_stage, 'INBOX') as pipeline_stage
       FROM asin_entities ae
       LEFT JOIN marketplaces m ON m.id = ae.marketplace_id
       ${whereClause}
       ORDER BY ae.updated_at DESC
-      LIMIT $1 OFFSET $2
-    `, [parseInt(limit, 10), parseInt(offset, 10)]);
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `, params);
 
-    return wrapResponse(result.rows);
+    // Get counts by stage for tracked ASINs
+    const countResult = await dbQuery(`
+      SELECT
+        COALESCE(pipeline_stage, 'INBOX') as stage,
+        COUNT(*) as count
+      FROM asin_entities
+      WHERE is_tracked = true
+      GROUP BY COALESCE(pipeline_stage, 'INBOX')
+    `);
+
+    const stageCounts = {};
+    VALID_STAGES.forEach(s => stageCounts[s] = 0);
+    countResult.rows.forEach(row => {
+      stageCounts[row.stage] = parseInt(row.count, 10);
+    });
+
+    return wrapResponse({
+      items: result.rows,
+      stage_counts: stageCounts,
+    });
   });
 
   /**
@@ -1985,6 +2033,89 @@ export async function registerV2Routes(fastify) {
     }
 
     return wrapResponse({ untracked: true });
+  });
+
+  /**
+   * PATCH /api/v2/asins/:id/stage
+   * Update pipeline stage for a tracked ASIN
+   * Body: { stage: 'INBOX' | 'QUALIFIED' | 'COSTED' | 'READY' | 'CONVERTED' | 'REJECTED' }
+   */
+  fastify.patch('/api/v2/asins/:id/stage', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const asinEntityId = parseInt(request.params.id, 10);
+    const { stage } = request.body;
+
+    const VALID_STAGES = ['INBOX', 'QUALIFIED', 'COSTED', 'READY', 'CONVERTED', 'REJECTED'];
+
+    if (!stage || !VALID_STAGES.includes(stage.toUpperCase())) {
+      return reply.status(400).send({
+        success: false,
+        error: `Invalid stage. Must be one of: ${VALID_STAGES.join(', ')}`
+      });
+    }
+
+    const upperStage = stage.toUpperCase();
+
+    // Update the pipeline stage (store NULL for INBOX to save space)
+    const stageValue = upperStage === 'INBOX' ? null : upperStage;
+
+    const result = await dbQuery(`
+      UPDATE asin_entities
+      SET pipeline_stage = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2 AND is_tracked = true
+      RETURNING *, COALESCE(pipeline_stage, 'INBOX') as pipeline_stage
+    `, [stageValue, asinEntityId]);
+
+    if (result.rows.length === 0) {
+      return reply.status(404).send({
+        success: false,
+        error: 'ASIN entity not found or not tracked'
+      });
+    }
+
+    return wrapResponse(result.rows[0]);
+  });
+
+  /**
+   * POST /api/v2/asins/batch-stage
+   * Update pipeline stage for multiple tracked ASINs
+   * Body: { ids: number[], stage: string }
+   */
+  fastify.post('/api/v2/asins/batch-stage', async (request, reply) => {
+    const { query: dbQuery } = await import('../database/connection.js');
+    const { ids, stage } = request.body;
+
+    const VALID_STAGES = ['INBOX', 'QUALIFIED', 'COSTED', 'READY', 'CONVERTED', 'REJECTED'];
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return reply.status(400).send({ success: false, error: 'ids must be a non-empty array' });
+    }
+
+    if (!stage || !VALID_STAGES.includes(stage.toUpperCase())) {
+      return reply.status(400).send({
+        success: false,
+        error: `Invalid stage. Must be one of: ${VALID_STAGES.join(', ')}`
+      });
+    }
+
+    const upperStage = stage.toUpperCase();
+    const stageValue = upperStage === 'INBOX' ? null : upperStage;
+
+    // Build parameterized query for batch update
+    const idParams = ids.map((_, i) => `$${i + 2}`).join(', ');
+
+    const result = await dbQuery(`
+      UPDATE asin_entities
+      SET pipeline_stage = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id IN (${idParams}) AND is_tracked = true
+      RETURNING id, COALESCE(pipeline_stage, 'INBOX') as pipeline_stage
+    `, [stageValue, ...ids.map(id => parseInt(id, 10))]);
+
+    return wrapResponse({
+      updated_count: result.rows.length,
+      updated_ids: result.rows.map(r => r.id),
+      stage: upperStage,
+    });
   });
 
   // ============================================================================

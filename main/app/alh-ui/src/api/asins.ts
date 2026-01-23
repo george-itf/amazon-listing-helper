@@ -2,7 +2,37 @@
  * ASIN Analyzer API
  */
 
-import { get, post } from './client';
+import { get, post, patch } from './client';
+
+// Pipeline stages for opportunity tracking
+export type PipelineStage = 'INBOX' | 'QUALIFIED' | 'COSTED' | 'READY' | 'CONVERTED' | 'REJECTED';
+
+export const PIPELINE_STAGES: PipelineStage[] = [
+  'INBOX',
+  'QUALIFIED',
+  'COSTED',
+  'READY',
+  'CONVERTED',
+  'REJECTED',
+];
+
+export const STAGE_LABELS: Record<PipelineStage, string> = {
+  INBOX: 'Inbox',
+  QUALIFIED: 'Qualified',
+  COSTED: 'Costed',
+  READY: 'Ready',
+  CONVERTED: 'Converted',
+  REJECTED: 'Rejected',
+};
+
+export const STAGE_DESCRIPTIONS: Record<PipelineStage, string> = {
+  INBOX: 'Newly tracked ASINs awaiting review',
+  QUALIFIED: 'Meets minimum criteria (margin, rank)',
+  COSTED: 'BOM scenario attached',
+  READY: 'Full analysis complete, decision pending',
+  CONVERTED: 'Became a listing',
+  REJECTED: 'Not pursuing',
+};
 
 export interface AsinEntity {
   id: number;
@@ -12,6 +42,9 @@ export interface AsinEntity {
   category: string | null;
   brand: string | null;
   status: 'NEW' | 'ANALYZING' | 'READY' | 'CONVERTED' | 'REJECTED';
+  pipeline_stage: PipelineStage;
+  is_tracked: boolean;
+  tracked_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -101,9 +134,24 @@ export async function getAsinEntity(id: number): Promise<AsinEntity> {
   return get<AsinEntity>(`/api/v2/asins/${id}`);
 }
 
-// Get all tracked ASINs
-export async function getTrackedAsins(): Promise<AsinEntity[]> {
-  return get<AsinEntity[]>('/api/v2/asins');
+// Response type for ASIN list with stage counts
+export interface AsinListResponse {
+  items: AsinEntity[];
+  stage_counts: Record<PipelineStage, number>;
+}
+
+// Get all tracked ASINs with optional stage filter
+export async function getTrackedAsins(stage?: PipelineStage): Promise<AsinListResponse> {
+  const params: Record<string, string> = { tracked_only: 'true' };
+  if (stage) {
+    params.stage = stage;
+  }
+  return get<AsinListResponse>('/api/v2/asins', params);
+}
+
+// Get all ASINs (not just tracked)
+export async function getAllAsins(): Promise<AsinListResponse> {
+  return get<AsinListResponse>('/api/v2/asins');
 }
 
 // Track a new ASIN
@@ -125,4 +173,26 @@ export async function convertAsinToListing(
 // Get ASIN analysis (cached)
 export async function getAsinAnalysis(asinEntityId: number): Promise<AsinAnalysis> {
   return get<AsinAnalysis>(`/api/v2/asins/${asinEntityId}/analysis`);
+}
+
+// Update pipeline stage for a single ASIN
+export async function updateAsinStage(
+  asinEntityId: number,
+  stage: PipelineStage
+): Promise<AsinEntity> {
+  return patch<AsinEntity>(`/api/v2/asins/${asinEntityId}/stage`, { stage });
+}
+
+// Batch update pipeline stage for multiple ASINs
+export interface BatchStageResponse {
+  updated_count: number;
+  updated_ids: number[];
+  stage: PipelineStage;
+}
+
+export async function batchUpdateAsinStage(
+  ids: number[],
+  stage: PipelineStage
+): Promise<BatchStageResponse> {
+  return post<BatchStageResponse>('/api/v2/asins/batch-stage', { ids, stage });
 }

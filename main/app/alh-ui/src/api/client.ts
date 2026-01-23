@@ -93,6 +93,12 @@ export async function put<T>(url: string, data?: unknown): Promise<T> {
   return unwrapResponse(response, `PUT ${url}`);
 }
 
+// Generic PATCH request
+export async function patch<T>(url: string, data?: unknown): Promise<T> {
+  const response = await apiClient.patch<ApiResponse<T>>(url, data);
+  return unwrapResponse(response, `PATCH ${url}`);
+}
+
 // Generic DELETE request
 export async function del<T>(url: string): Promise<T> {
   const response = await apiClient.delete<ApiResponse<T>>(url);
