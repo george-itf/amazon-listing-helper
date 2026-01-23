@@ -82,13 +82,31 @@ export function RecommendationsPage() {
     loadRecommendations();
   }, [activeTab]);
 
+  const [acceptingId, setAcceptingId] = useState<number | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
   const handleAccept = async (rec: Recommendation) => {
+    setAcceptingId(rec.id);
+    setSuccessMessage(null);
     try {
-      await acceptRecommendation(rec.id);
+      const result = await acceptRecommendation(rec.id);
+      // Show success with job info if a job was created
+      if (result.job_created) {
+        setSuccessMessage(`Accepted! Job #${result.job_id} created to apply the change.`);
+        setTimeout(() => setSuccessMessage(null), 5000);
+      }
       loadRecommendations();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to accept recommendation');
+    } finally {
+      setAcceptingId(null);
     }
+  };
+
+  // Check if recommendation will create a job when accepted
+  const willCreateJob = (rec: Recommendation): boolean => {
+    const action = rec.action_payload_json?.action;
+    return action === 'CHANGE_PRICE' || action === 'CHANGE_STOCK';
   };
 
   const handleReject = async (rec: Recommendation) => {
@@ -164,6 +182,15 @@ export function RecommendationsPage() {
         {isLoading && (
           <div className="text-center py-12 text-gray-500">
             <p>Loading recommendations...</p>
+          </div>
+        )}
+
+        {successMessage && (
+          <div className="mb-4 p-3 bg-green-50 text-green-700 rounded-md text-sm flex items-center gap-2">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            {successMessage}
           </div>
         )}
 
@@ -305,12 +332,28 @@ export function RecommendationsPage() {
 
                 {/* Actions */}
                 {rec.status === 'PENDING' && (
-                  <div className="flex gap-2 mt-4">
+                  <div className="flex gap-2 mt-4 flex-wrap items-center">
                     <button
                       onClick={() => handleAccept(rec)}
-                      className="btn btn-primary btn-sm"
+                      disabled={acceptingId === rec.id}
+                      className="btn btn-primary btn-sm inline-flex items-center gap-1"
+                      title={willCreateJob(rec) ? 'Accept and create publish job' : 'Accept recommendation'}
                     >
-                      Accept
+                      {acceptingId === rec.id ? (
+                        <>
+                          <Spinner />
+                          Accepting...
+                        </>
+                      ) : (
+                        <>
+                          Accept
+                          {willCreateJob(rec) && (
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                            </svg>
+                          )}
+                        </>
+                      )}
                     </button>
                     <button
                       onClick={() => handleReject(rec)}
@@ -332,6 +375,26 @@ export function RecommendationsPage() {
                         View Listing
                       </Link>
                     )}
+                    {willCreateJob(rec) && (
+                      <span className="text-xs text-gray-500">
+                        Creates publish job
+                      </span>
+                    )}
+                  </div>
+                )}
+                {rec.status === 'ACCEPTED' && rec.accepted_job_id && (
+                  <div className="mt-3 text-sm text-blue-600">
+                    Publish job #{rec.accepted_job_id} created
+                  </div>
+                )}
+                {rec.status === 'APPLIED' && (
+                  <div className="mt-3 text-sm text-green-600">
+                    Successfully applied
+                  </div>
+                )}
+                {rec.status === 'FAILED' && (
+                  <div className="mt-3 text-sm text-red-600">
+                    Failed to apply - check job status
                   </div>
                 )}
               </div>

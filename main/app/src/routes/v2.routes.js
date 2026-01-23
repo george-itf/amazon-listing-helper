@@ -4616,6 +4616,177 @@ export async function registerV2Routes(fastify) {
     }
   });
 
+  // ============================================================================
+  // ATTENTION QUEUE - Prioritized issues requiring attention
+  // ============================================================================
+
+  /**
+   * GET /api/v2/attention-queue
+   * Get prioritized list of items requiring attention
+   */
+  fastify.get('/api/v2/attention-queue', async (request, reply) => {
+    try {
+      const recommendationService = await import('../services/recommendation.service.js');
+      const { limit = '50' } = request.query;
+
+      const items = await recommendationService.getAttentionQueueItems({
+        limit: parseInt(limit, 10),
+      });
+
+      return wrapResponse(items);
+    } catch (error) {
+      httpLogger.error('[API] GET /attention-queue error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  // ============================================================================
+  // JOBS - Job visibility and management
+  // ============================================================================
+
+  /**
+   * GET /api/v2/jobs
+   * Get recent jobs with optional filters
+   */
+  fastify.get('/api/v2/jobs', async (request, reply) => {
+    try {
+      const jobRepoModule = await import('../repositories/job.repository.js');
+      const { types, statuses, limit = '50', offset = '0' } = request.query;
+
+      const jobs = await jobRepoModule.findRecent({
+        types: types ? types.split(',') : undefined,
+        statuses: statuses ? statuses.split(',') : undefined,
+        limit: parseInt(limit, 10),
+        offset: parseInt(offset, 10),
+      });
+
+      return wrapResponse(jobs);
+    } catch (error) {
+      httpLogger.error('[API] GET /jobs error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/jobs/stats
+   * Get job count statistics by status
+   */
+  fastify.get('/api/v2/jobs/stats', async (request, reply) => {
+    try {
+      const jobRepoModule = await import('../repositories/job.repository.js');
+      const counts = await jobRepoModule.countByStatus();
+      return wrapResponse(counts);
+    } catch (error) {
+      httpLogger.error('[API] GET /jobs/stats error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/jobs/:id
+   * Get a specific job by ID
+   */
+  fastify.get('/api/v2/jobs/:id', async (request, reply) => {
+    try {
+      const jobRepoModule = await import('../repositories/job.repository.js');
+      const jobId = parseInt(request.params.id, 10);
+
+      const job = await jobRepoModule.findById(jobId);
+      if (!job) {
+        return reply.status(404).send({ success: false, error: 'Job not found' });
+      }
+
+      return wrapResponse(job);
+    } catch (error) {
+      httpLogger.error('[API] GET /jobs/:id error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/jobs/:id/retry
+   * Retry a failed job
+   */
+  fastify.post('/api/v2/jobs/:id/retry', async (request, reply) => {
+    try {
+      const { query: dbQuery } = await import('../database/connection.js');
+      const jobId = parseInt(request.params.id, 10);
+
+      // Reset job to pending
+      const result = await dbQuery(`
+        UPDATE jobs
+        SET status = 'PENDING',
+            attempts = 0,
+            error_message = NULL,
+            scheduled_for = CURRENT_TIMESTAMP,
+            started_at = NULL,
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status IN ('FAILED', 'CANCELLED')
+        RETURNING *
+      `, [jobId]);
+
+      if (result.rows.length === 0) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Cannot retry job - job not found or not in retryable state'
+        });
+      }
+
+      return wrapResponse(result.rows[0]);
+    } catch (error) {
+      httpLogger.error('[API] POST /jobs/:id/retry error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * POST /api/v2/jobs/:id/cancel
+   * Cancel a pending or running job
+   */
+  fastify.post('/api/v2/jobs/:id/cancel', async (request, reply) => {
+    try {
+      const jobRepoModule = await import('../repositories/job.repository.js');
+      const jobId = parseInt(request.params.id, 10);
+
+      const cancelled = await jobRepoModule.cancel(jobId);
+      if (!cancelled) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Cannot cancel job - job not found or not in cancellable state'
+        });
+      }
+
+      return wrapResponse({ cancelled: true, job_id: jobId });
+    } catch (error) {
+      httpLogger.error('[API] POST /jobs/:id/cancel error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
+  /**
+   * GET /api/v2/listings/:listingId/jobs
+   * Get jobs for a specific listing
+   */
+  fastify.get('/api/v2/listings/:listingId/jobs', async (request, reply) => {
+    try {
+      const jobRepoModule = await import('../repositories/job.repository.js');
+      const listingId = parseInt(request.params.listingId, 10);
+      const { types, statuses, limit = '20' } = request.query;
+
+      const jobs = await jobRepoModule.findByListing(listingId, {
+        types: types ? types.split(',') : undefined,
+        statuses: statuses ? statuses.split(',') : undefined,
+        limit: parseInt(limit, 10),
+      });
+
+      return wrapResponse(jobs);
+    } catch (error) {
+      httpLogger.error('[API] GET /listings/:listingId/jobs error:', error.message);
+      return reply.status(500).send(wrapResponse(null, error.message));
+    }
+  });
+
   /**
    * GET /api/v2/ready
    * Kubernetes-style readiness probe

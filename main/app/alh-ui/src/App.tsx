@@ -5,6 +5,7 @@ import {
   ListingsPage,
   ListingDetailPage,
   RecommendationsPage,
+  AttentionQueuePage,
   AsinAnalyzerPage,
   BomLibraryPage,
   NotFoundPage,
@@ -25,6 +26,9 @@ function App() {
 
           {/* Recommendations */}
           <Route path="/recommendations" element={<RecommendationsPage />} />
+
+          {/* Attention Queue */}
+          <Route path="/attention" element={<AttentionQueuePage />} />
 
           {/* ASIN Analyzer */}
           <Route path="/asins" element={<AsinAnalyzerPage />} />

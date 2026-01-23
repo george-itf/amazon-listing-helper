@@ -26,7 +26,9 @@ export type RecommendationStatus =
   | 'REJECTED'
   | 'SNOOZED'
   | 'EXPIRED'
-  | 'SUPERSEDED';
+  | 'SUPERSEDED'
+  | 'APPLIED'   // Successfully applied via job
+  | 'FAILED';   // Job failed to apply
 
 // Entity types
 export type RecommendationEntityType = 'LISTING' | 'ASIN';
@@ -168,9 +170,16 @@ export interface Recommendation {
   snoozed_until: string | null;
   accepted_at: string | null;
   rejected_at: string | null;
+  applied_at: string | null;
+  accepted_job_id: number | null;
   generated_at: string;
   created_at: string;
   updated_at: string;
+
+  // Extended response fields (from acceptRecommendation)
+  job_id?: number;
+  job_type?: string;
+  job_created?: boolean;
 
   // Joined fields from related tables
   listing_sku?: string | null;

@@ -23,6 +23,7 @@ import * as featureStoreService from './feature-store.service.js';
 import { loadGuardrails, validatePriceChange } from './guardrails.service.js';
 // A.2.2 FIX: Import fee calculator to recalculate fees for suggested prices
 import { calculateAmazonFeesExVat, roundMoney } from './economics.service.js';
+import * as jobRepo from '../repositories/job.repository.js';
 
 /**
  * Generate recommendations for a listing
@@ -552,7 +553,12 @@ async function expireOldRecommendations(entityType, entityId) {
 }
 
 /**
- * Accept a recommendation
+ * Accept a recommendation and create publish job if applicable
+ *
+ * FIX: Previously this only marked status as ACCEPTED without creating a job.
+ * Now it creates a PUBLISH_PRICE_CHANGE or PUBLISH_STOCK_CHANGE job when accepting
+ * actionable recommendations.
+ *
  * @param {number} recommendationId
  * @param {string} [reason]
  * @returns {Promise<Object>}
@@ -567,21 +573,97 @@ export async function acceptRecommendation(recommendationId, reason = null) {
     throw new Error(`Cannot accept recommendation in status: ${rec.status}`);
   }
 
-  // Update status
+  // Parse action payload
+  const actionPayload = typeof rec.action_payload_json === 'string'
+    ? JSON.parse(rec.action_payload_json)
+    : rec.action_payload_json;
+
+  let jobId = null;
+  let jobType = null;
+
+  // Create publish job based on recommendation type and action
+  if (rec.entity_type === 'LISTING' && actionPayload?.action === 'CHANGE_PRICE') {
+    // Price change recommendations - create PUBLISH_PRICE_CHANGE job
+    const suggestedPrice = actionPayload.suggested_price_inc_vat;
+    const currentPrice = actionPayload.current_price_inc_vat;
+
+    if (suggestedPrice && suggestedPrice !== currentPrice) {
+      jobType = 'PUBLISH_PRICE_CHANGE';
+      const job = await jobRepo.create({
+        job_type: 'PUBLISH_PRICE_CHANGE',
+        scope_type: 'LISTING',
+        listing_id: rec.entity_id,
+        input_json: {
+          price_inc_vat: suggestedPrice,
+          previous_price_inc_vat: currentPrice,
+          recommendation_id: recommendationId,
+          reason: reason || `Accepted recommendation: ${rec.recommendation_type}`,
+          correlation_id: `rec-${recommendationId}-${Date.now()}`,
+        },
+        priority: 7, // High priority for user-initiated actions
+        created_by: 'user',
+      });
+      jobId = job?.id || null;
+    }
+  } else if (rec.entity_type === 'LISTING' && actionPayload?.action === 'CHANGE_STOCK') {
+    // Stock change recommendations - create PUBLISH_STOCK_CHANGE job
+    const suggestedQty = actionPayload.suggested_quantity;
+    const currentQty = actionPayload.current_quantity;
+
+    if (suggestedQty && suggestedQty !== currentQty) {
+      jobType = 'PUBLISH_STOCK_CHANGE';
+      const job = await jobRepo.create({
+        job_type: 'PUBLISH_STOCK_CHANGE',
+        scope_type: 'LISTING',
+        listing_id: rec.entity_id,
+        input_json: {
+          available_quantity: suggestedQty,
+          previous_quantity: currentQty,
+          recommendation_id: recommendationId,
+          reason: reason || `Accepted recommendation: ${rec.recommendation_type}`,
+        },
+        priority: 7,
+        created_by: 'user',
+      });
+      jobId = job?.id || null;
+    }
+  }
+
+  // Update status and link to job
   const result = await query(`
     UPDATE recommendations
-    SET status = 'ACCEPTED', accepted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    SET status = 'ACCEPTED',
+        accepted_at = CURRENT_TIMESTAMP,
+        accepted_job_id = $2,
+        updated_at = CURRENT_TIMESTAMP
     WHERE id = $1
     RETURNING *
-  `, [recommendationId]);
+  `, [recommendationId, jobId]);
 
-  // Create event
+  // Create event with job details
   await query(`
-    INSERT INTO recommendation_events (recommendation_id, event_type, reason, created_by)
-    VALUES ($1, 'ACCEPTED', $2, 'user')
-  `, [recommendationId, reason]);
+    INSERT INTO recommendation_events (recommendation_id, event_type, job_id, reason, details_json, created_by)
+    VALUES ($1, 'ACCEPTED', $2, $3, $4, 'user')
+  `, [
+    recommendationId,
+    jobId,
+    reason,
+    JSON.stringify({
+      job_type: jobType,
+      job_id: jobId,
+      action: actionPayload?.action,
+    }),
+  ]);
 
-  return result.rows[0];
+  const updatedRec = result.rows[0];
+
+  // Return recommendation with job info for frontend
+  return {
+    ...updatedRec,
+    job_id: jobId,
+    job_type: jobType,
+    job_created: !!jobId,
+  };
 }
 
 /**
@@ -752,6 +834,268 @@ export async function getPendingRecommendations(options = {}) {
   }
 }
 
+/**
+ * Mark recommendation as APPLIED after job succeeds
+ * Called by job worker when a recommendation-triggered job completes successfully
+ *
+ * @param {number} jobId - The job that completed
+ * @returns {Promise<Object|null>}
+ */
+export async function markRecommendationApplied(jobId) {
+  try {
+    // Find recommendation linked to this job
+    const recResult = await query(`
+      SELECT id FROM recommendations
+      WHERE accepted_job_id = $1 AND status = 'ACCEPTED'
+    `, [jobId]);
+
+    if (recResult.rows.length === 0) {
+      return null; // No linked recommendation
+    }
+
+    const recId = recResult.rows[0].id;
+
+    // Update to APPLIED
+    const result = await query(`
+      UPDATE recommendations
+      SET status = 'APPLIED', applied_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING *
+    `, [recId]);
+
+    // Create event
+    await query(`
+      INSERT INTO recommendation_events (recommendation_id, event_type, job_id, created_by)
+      VALUES ($1, 'APPLIED', $2, 'worker')
+    `, [recId, jobId]);
+
+    return result.rows[0];
+  } catch (error) {
+    console.error(`[Recommendations] Failed to mark recommendation applied for job ${jobId}:`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Mark recommendation as FAILED after job fails
+ * Called by job worker when a recommendation-triggered job fails permanently
+ *
+ * @param {number} jobId - The job that failed
+ * @param {string} errorMessage - Error message from the job
+ * @returns {Promise<Object|null>}
+ */
+export async function markRecommendationFailed(jobId, errorMessage) {
+  try {
+    // Find recommendation linked to this job
+    const recResult = await query(`
+      SELECT id FROM recommendations
+      WHERE accepted_job_id = $1 AND status = 'ACCEPTED'
+    `, [jobId]);
+
+    if (recResult.rows.length === 0) {
+      return null; // No linked recommendation
+    }
+
+    const recId = recResult.rows[0].id;
+
+    // Update to FAILED
+    const result = await query(`
+      UPDATE recommendations
+      SET status = 'FAILED', updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING *
+    `, [recId]);
+
+    // Create event
+    await query(`
+      INSERT INTO recommendation_events (recommendation_id, event_type, job_id, details_json, created_by)
+      VALUES ($1, 'FAILED', $2, $3, 'worker')
+    `, [recId, jobId, JSON.stringify({ error: errorMessage })]);
+
+    return result.rows[0];
+  } catch (error) {
+    console.error(`[Recommendations] Failed to mark recommendation failed for job ${jobId}:`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Get attention queue items - prioritized list of issues requiring attention
+ * Combines failed jobs, recommendations needing action, and data quality issues
+ *
+ * @param {Object} options
+ * @param {number} [options.limit=50]
+ * @returns {Promise<Array>}
+ */
+export async function getAttentionQueueItems(options = {}) {
+  const { limit = 50 } = options;
+  const items = [];
+
+  try {
+    // 1. Failed jobs (highest priority)
+    const failedJobsResult = await query(`
+      SELECT j.id, j.job_type, j.listing_id, j.error_message, j.finished_at,
+             l.seller_sku, l.title as listing_title
+      FROM jobs j
+      LEFT JOIN listings l ON l.id = j.listing_id
+      WHERE j.status = 'FAILED'
+      ORDER BY j.finished_at DESC
+      LIMIT 10
+    `);
+
+    for (const job of failedJobsResult.rows) {
+      items.push({
+        id: `job-${job.id}`,
+        type: 'FAILED_JOB',
+        priority: 1,
+        title: `Failed: ${job.job_type.replace(/_/g, ' ')}`,
+        description: job.error_message || 'Job failed without error message',
+        listing_id: job.listing_id,
+        listing_sku: job.seller_sku,
+        listing_title: job.listing_title,
+        job_id: job.id,
+        timestamp: job.finished_at,
+        action: 'RETRY_OR_DISMISS',
+      });
+    }
+
+    // 2. Buy Box Lost (via feature store)
+    const buyBoxLostResult = await query(`
+      SELECT fs.entity_id as listing_id, fs.features_json, l.seller_sku, l.title
+      FROM feature_store fs
+      JOIN listings l ON l.id = fs.entity_id
+      WHERE fs.entity_type = 'LISTING'
+        AND fs.features_json->>'buy_box_status' = 'LOST'
+      ORDER BY fs.computed_at DESC
+      LIMIT 10
+    `);
+
+    for (const row of buyBoxLostResult.rows) {
+      const features = typeof row.features_json === 'string'
+        ? JSON.parse(row.features_json)
+        : row.features_json;
+
+      items.push({
+        id: `buybox-${row.listing_id}`,
+        type: 'BUY_BOX_LOST',
+        priority: 2,
+        title: 'Buy Box Lost',
+        description: `Lost Buy Box. Current win rate: ${((features.buy_box_percentage_30d || 0) * 100).toFixed(0)}%`,
+        listing_id: row.listing_id,
+        listing_sku: row.seller_sku,
+        listing_title: row.title,
+        features,
+        action: 'REVIEW_PRICING',
+      });
+    }
+
+    // 3. Margin at risk
+    const marginAtRiskResult = await query(`
+      SELECT fs.entity_id as listing_id, fs.features_json, l.seller_sku, l.title
+      FROM feature_store fs
+      JOIN listings l ON l.id = fs.entity_id
+      WHERE fs.entity_type = 'LISTING'
+        AND (fs.features_json->>'margin')::float < 0.10
+      ORDER BY (fs.features_json->>'margin')::float ASC
+      LIMIT 10
+    `);
+
+    for (const row of marginAtRiskResult.rows) {
+      const features = typeof row.features_json === 'string'
+        ? JSON.parse(row.features_json)
+        : row.features_json;
+
+      items.push({
+        id: `margin-${row.listing_id}`,
+        type: 'MARGIN_AT_RISK',
+        priority: 3,
+        title: 'Low Margin',
+        description: `Margin at ${((features.margin || 0) * 100).toFixed(1)}% - below threshold`,
+        listing_id: row.listing_id,
+        listing_sku: row.seller_sku,
+        listing_title: row.title,
+        features,
+        action: 'REVIEW_COSTS',
+      });
+    }
+
+    // 4. Stockout risk
+    const stockoutResult = await query(`
+      SELECT fs.entity_id as listing_id, fs.features_json, l.seller_sku, l.title
+      FROM feature_store fs
+      JOIN listings l ON l.id = fs.entity_id
+      WHERE fs.entity_type = 'LISTING'
+        AND fs.features_json->>'stockout_risk' IN ('HIGH', 'MEDIUM')
+      ORDER BY
+        CASE fs.features_json->>'stockout_risk'
+          WHEN 'HIGH' THEN 1
+          WHEN 'MEDIUM' THEN 2
+          ELSE 3
+        END
+      LIMIT 10
+    `);
+
+    for (const row of stockoutResult.rows) {
+      const features = typeof row.features_json === 'string'
+        ? JSON.parse(row.features_json)
+        : row.features_json;
+
+      items.push({
+        id: `stockout-${row.listing_id}`,
+        type: 'STOCKOUT_RISK',
+        priority: features.stockout_risk === 'HIGH' ? 2 : 4,
+        title: `Stockout Risk: ${features.stockout_risk}`,
+        description: `${(features.days_of_cover || 0).toFixed(1)} days of cover remaining`,
+        listing_id: row.listing_id,
+        listing_sku: row.seller_sku,
+        listing_title: row.title,
+        features,
+        action: 'ORDER_STOCK',
+      });
+    }
+
+    // 5. Stale data (features older than 24 hours)
+    const staleDataResult = await query(`
+      SELECT fs.entity_id as listing_id, fs.computed_at, l.seller_sku, l.title
+      FROM feature_store fs
+      JOIN listings l ON l.id = fs.entity_id
+      WHERE fs.entity_type = 'LISTING'
+        AND fs.computed_at < CURRENT_TIMESTAMP - INTERVAL '24 hours'
+      ORDER BY fs.computed_at ASC
+      LIMIT 10
+    `);
+
+    for (const row of staleDataResult.rows) {
+      const hoursOld = Math.round((Date.now() - new Date(row.computed_at).getTime()) / (1000 * 60 * 60));
+
+      items.push({
+        id: `stale-${row.listing_id}`,
+        type: 'STALE_DATA',
+        priority: 5,
+        title: 'Stale Data',
+        description: `Data is ${hoursOld} hours old - needs refresh`,
+        listing_id: row.listing_id,
+        listing_sku: row.seller_sku,
+        listing_title: row.title,
+        timestamp: row.computed_at,
+        action: 'REFRESH_DATA',
+      });
+    }
+
+    // Sort by priority and limit
+    items.sort((a, b) => a.priority - b.priority);
+    return items.slice(0, limit);
+
+  } catch (error) {
+    // Handle missing tables gracefully
+    if (error.message?.includes('does not exist')) {
+      console.warn('[AttentionQueue] Some tables do not exist:', error.message);
+      return items;
+    }
+    throw error;
+  }
+}
+
 export default {
   generateListingRecommendations,
   generateAsinRecommendations,
@@ -761,4 +1105,7 @@ export default {
   getRecommendation,
   getRecommendationsForEntity,
   getPendingRecommendations,
+  markRecommendationApplied,
+  markRecommendationFailed,
+  getAttentionQueueItems,
 };
