@@ -208,12 +208,13 @@
   --card-border: 1px solid var(--color-border);
 
   /* Tables */
-  --table-header-bg: var(--color-neutral-50);
-  --table-header-color: var(--color-neutral-500);
+  --table-header-bg: var(--color-neutral-100);
+  --table-header-color: var(--color-neutral-700);
   --table-cell-padding-x: var(--space-4);
   --table-cell-padding-y: var(--space-3);
-  --table-row-hover: var(--color-neutral-50);
+  --table-row-hover: var(--color-primary-50);
   --table-row-stripe: var(--color-neutral-50);
+  --table-border-color: var(--color-neutral-200);
 
   /* Inputs */
   --input-padding-x: var(--space-3);
