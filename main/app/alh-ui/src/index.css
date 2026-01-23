@@ -285,6 +285,109 @@
   }
 
   /* ==========================================================================
+     RESPONSIVE TABLE (card view on mobile)
+     ========================================================================== */
+  .table-responsive {
+    width: 100%;
+  }
+
+  /* Mobile: Transform table rows to cards */
+  @media (max-width: 767px) {
+    .table-responsive {
+      display: block;
+    }
+
+    .table-responsive thead {
+      display: none;
+    }
+
+    .table-responsive tbody {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+    }
+
+    .table-responsive tbody tr {
+      display: block;
+      background-color: var(--color-surface);
+      border-radius: var(--radius-lg);
+      padding: var(--space-4);
+      box-shadow: var(--shadow-sm);
+      border: 1px solid var(--color-border);
+    }
+
+    .table-responsive tbody tr:hover {
+      box-shadow: var(--shadow-md);
+    }
+
+    .table-responsive td {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      padding: var(--space-2) 0;
+      border-bottom: 1px solid var(--color-neutral-100);
+      white-space: normal;
+    }
+
+    .table-responsive td:last-child {
+      border-bottom: none;
+    }
+
+    /* Show label before cell content using data-label attribute */
+    .table-responsive td::before {
+      content: attr(data-label);
+      font-weight: var(--font-medium);
+      color: var(--color-text-secondary);
+      font-size: var(--text-xs);
+      text-transform: uppercase;
+      letter-spacing: var(--tracking-wider);
+      flex-shrink: 0;
+      margin-right: var(--space-4);
+    }
+
+    /* Right-align numeric values in cards */
+    .table-responsive td[data-align="right"] {
+      text-align: right;
+    }
+
+    /* Actions column styling */
+    .table-responsive td.td-actions {
+      justify-content: flex-end;
+      padding-top: var(--space-3);
+      border-top: 1px solid var(--color-neutral-200);
+      border-bottom: none;
+      margin-top: var(--space-2);
+    }
+
+    .table-responsive td.td-actions::before {
+      display: none;
+    }
+
+    /* Checkbox column */
+    .table-responsive td.td-checkbox {
+      position: absolute;
+      top: var(--space-3);
+      right: var(--space-3);
+      padding: 0;
+      border: none;
+    }
+
+    .table-responsive td.td-checkbox::before {
+      display: none;
+    }
+
+    .table-responsive tbody tr:has(.td-checkbox) {
+      position: relative;
+      padding-right: var(--space-10);
+    }
+
+    /* Hide columns marked as mobile-hidden */
+    .table-responsive .mobile-hidden {
+      display: none;
+    }
+  }
+
+  /* ==========================================================================
      UTILITY COMPONENTS
      ========================================================================== */
   .focus-ring {

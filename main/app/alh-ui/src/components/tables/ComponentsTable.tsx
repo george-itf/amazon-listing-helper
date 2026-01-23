@@ -212,7 +212,7 @@ export function ComponentsTable({
       onKeyDown={handleTableKeyDown}
       aria-label="Components table. Use arrow keys to navigate, Enter to edit."
     >
-      <table className="min-w-full divide-y divide-gray-200">
+      <table className="min-w-full divide-y divide-gray-200 table-responsive">
         <thead className="table-header-sticky">
           <tr className="table-header">
             {onSelectionChange && (
@@ -231,10 +231,10 @@ export function ComponentsTable({
             )}
             <th className="px-4 py-3" scope="col">SKU</th>
             <th className="px-4 py-3" scope="col">Name</th>
-            <th className="px-4 py-3" scope="col">Description</th>
+            <th className="px-4 py-3 mobile-hidden" scope="col">Description</th>
             <th className="px-4 py-3 text-right" scope="col">Unit Cost (ex VAT)</th>
-            <th className="px-4 py-3 text-right" scope="col">Stock</th>
-            <th className="px-4 py-3" scope="col">Lead Time</th>
+            <th className="px-4 py-3 text-right mobile-hidden" scope="col">Stock</th>
+            <th className="px-4 py-3 mobile-hidden" scope="col">Lead Time</th>
             <th className="px-4 py-3 w-20" scope="col">Actions</th>
           </tr>
         </thead>
@@ -257,7 +257,7 @@ export function ComponentsTable({
               }`}
             >
               {onSelectionChange && (
-                <td className="table-cell">
+                <td className="table-cell td-checkbox">
                   <input
                     type="checkbox"
                     checked={selectedIds.has(comp.id)}
@@ -268,21 +268,23 @@ export function ComponentsTable({
                   />
                 </td>
               )}
-              <td className="table-cell font-mono text-xs">
+              <td className="table-cell font-mono text-xs" data-label="SKU">
                 {renderEditableCell(comp, 'component_sku')}
               </td>
-              <td className="table-cell">{renderEditableCell(comp, 'name')}</td>
-              <td className="table-cell text-gray-500">
+              <td className="table-cell" data-label="Name">{renderEditableCell(comp, 'name')}</td>
+              <td className="table-cell text-gray-500 mobile-hidden" data-label="Description">
                 {renderEditableCell(comp, 'description')}
               </td>
-              <td className="table-cell text-right">
+              <td className="table-cell text-right" data-label="Cost" data-align="right">
                 {renderEditableCell(comp, 'unit_cost_ex_vat', 'number')}
               </td>
-              <td className="table-cell text-right">{comp.current_stock ?? '-'}</td>
-              <td className="table-cell">
+              <td className="table-cell text-right mobile-hidden" data-label="Stock" data-align="right">
+                {comp.current_stock ?? '-'}
+              </td>
+              <td className="table-cell mobile-hidden" data-label="Lead Time">
                 {comp.lead_time_days ? `${comp.lead_time_days}d` : '-'}
               </td>
-              <td className="table-cell">
+              <td className="table-cell td-actions">
                 <button
                   onClick={() => onDelete(comp.id)}
                   className="text-red-600 hover:text-red-800 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1 rounded px-1"

@@ -73,19 +73,19 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
         className="overflow-x-auto max-h-[600px] overflow-y-auto"
         {...tableProps}
       >
-        <table className="min-w-full divide-y divide-gray-200">
+        <table className="min-w-full divide-y divide-gray-200 table-responsive">
           <thead className="table-header-sticky">
             <tr className="table-header">
               <th className="px-4 py-3" scope="col">SKU</th>
-              <th className="px-4 py-3" scope="col">ASIN</th>
+              <th className="px-4 py-3 mobile-hidden" scope="col">ASIN</th>
               <th className="px-4 py-3" scope="col">Title</th>
-              <th className="px-4 py-3 text-right" scope="col">Qty</th>
-              <th className="px-4 py-3 text-right" scope="col">Price (inc VAT)</th>
+              <th className="px-4 py-3 text-right mobile-hidden" scope="col">Qty</th>
+              <th className="px-4 py-3 text-right" scope="col">Price</th>
               <th className="px-4 py-3" scope="col">Buy Box</th>
               <th className="px-4 py-3 text-right" scope="col">Profit</th>
-              <th className="px-4 py-3 text-right" scope="col">Margin</th>
-              <th className="px-4 py-3 text-right" scope="col">Units (7d)</th>
-              <th className="px-4 py-3 text-right" scope="col">Days Cover</th>
+              <th className="px-4 py-3 text-right mobile-hidden" scope="col">Margin</th>
+              <th className="px-4 py-3 text-right mobile-hidden" scope="col">Units (7d)</th>
+              <th className="px-4 py-3 text-right mobile-hidden" scope="col">Days Cover</th>
               <th className="px-4 py-3" scope="col">Risks</th>
               <th className="px-4 py-3" scope="col">Actions</th>
             </tr>
@@ -219,7 +219,7 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
   const f = listing.features;
   return (
     <>
-      <td className="table-cell font-mono text-xs">
+      <td className="table-cell font-mono text-xs" data-label="SKU">
         <Link
           to={`/listings/${listing.id}`}
           className="text-blue-600 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 rounded"
@@ -227,36 +227,36 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
           {listing.seller_sku}
         </Link>
       </td>
-      <td className="table-cell font-mono text-xs">
+      <td className="table-cell font-mono text-xs mobile-hidden" data-label="ASIN">
         {listing.asin || '-'}
       </td>
-      <td className="table-cell max-w-xs truncate" title={listing.title}>
+      <td className="table-cell max-w-xs truncate" data-label="Title" title={listing.title}>
         {listing.title}
       </td>
-      <td className="table-cell text-right">
+      <td className="table-cell text-right mobile-hidden" data-label="Qty" data-align="right">
         {formatNumber(f?.available_quantity)}
       </td>
-      <td className="table-cell text-right font-medium">
+      <td className="table-cell text-right font-medium" data-label="Price" data-align="right">
         {formatCurrency(f?.price_inc_vat)}
       </td>
-      <td className="table-cell">
+      <td className="table-cell" data-label="Buy Box">
         {f ? <BuyBoxBadge status={f.buy_box_status} /> : '-'}
       </td>
-      <td className="table-cell text-right">
+      <td className="table-cell text-right" data-label="Profit" data-align="right">
         <span className={f && f.profit_ex_vat != null && f.profit_ex_vat < 0 ? 'text-red-600' : 'text-green-600'}>
           {formatCurrencyWithSign(f?.profit_ex_vat)}
         </span>
       </td>
-      <td className="table-cell text-right">
+      <td className="table-cell text-right mobile-hidden" data-label="Margin" data-align="right">
         {formatPercent(f?.margin)}
       </td>
-      <td className="table-cell text-right">
+      <td className="table-cell text-right mobile-hidden" data-label="Units" data-align="right">
         {formatNumber(f?.units_7d)}
       </td>
-      <td className="table-cell text-right">
+      <td className="table-cell text-right mobile-hidden" data-label="Cover" data-align="right">
         {f?.days_of_cover != null ? `${f.days_of_cover}d` : '-'}
       </td>
-      <td className="table-cell">
+      <td className="table-cell" data-label="Risks">
         <div className="flex gap-1 flex-wrap">
           {f?.buy_box_risk && f.buy_box_risk !== 'LOW' && (
             <RiskBadge level={f.buy_box_risk} label="BB" />
@@ -269,7 +269,7 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
           )}
         </div>
       </td>
-      <td className="table-cell">
+      <td className="table-cell td-actions">
         <div className="flex gap-2">
           {onEditPrice && (
             <button
