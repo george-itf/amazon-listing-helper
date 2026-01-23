@@ -312,6 +312,10 @@ async function fetchKeepaDataBatch(asins, ingestionJobId, marketplaceId) {
 /**
  * Fetch SP-API data for ASINs
  *
+ * Uses getCatalogItem (singular) for each ASIN rather than searchCatalogItems (batch)
+ * because the amazon-sp-api library has issues with searchCatalogItems parameter handling.
+ * This approach is proven to work in amazon-data-sync.js.
+ *
  * @param {string[]} asins - ASINs to fetch
  * @param {string} ingestionJobId - Ingestion job UUID
  * @param {number} marketplaceId - Marketplace ID
@@ -343,90 +347,69 @@ async function fetchSpApiDataBatch(asins, ingestionJobId, marketplaceId) {
   }
 
   const validAsins = normalizedAll.asinArray;
-  const batchCount = Math.ceil(validAsins.length / 20);
 
   logger.info({
     asinCount: validAsins.length,
-    batchCount,
     skippedCount: normalizedAll.skipped.length,
-  }, 'Fetching SP-API data');
+  }, 'Fetching SP-API catalog data (individual requests)');
 
-  // Fetch catalog items (up to 20 at a time per SP-API limit)
-  const catalogBatchSize = 20;
-  for (let i = 0; i < validAsins.length; i += catalogBatchSize) {
-    const batchSlice = validAsins.slice(i, i + catalogBatchSize);
+  // Fetch catalog items using getCatalogItem (individual) instead of searchCatalogItems (batch)
+  // The amazon-sp-api library has issues with searchCatalogItems parameter serialization
+  // This pattern is proven to work in amazon-data-sync.js
+  let successCount = 0;
+  let errorCount = 0;
 
-    // Normalize this specific batch (defensive - already validated above)
-    const normalized = normalizeSpApiIdentifiers(batchSlice, { maxSize: catalogBatchSize });
-
-    if (!normalized.valid) {
-      logger.warn({
-        batchStart: i,
-        error: normalized.error,
-      }, 'SP-API batch skipped - invalid identifiers');
-      continue;
-    }
-
-    // Log outgoing request for debugging (non-sensitive)
-    logger.debug({
-      batchStart: i,
-      identifiersCount: normalized.asinArray.length,
-      firstIdentifier: normalized.asinArray[0],
-      lastIdentifier: normalized.asinArray[normalized.asinArray.length - 1],
-      marketplaceIds: amazonMarketplaceId,
-    }, 'SP-API searchCatalogItems request');
+  for (let i = 0; i < validAsins.length; i++) {
+    const asin = validAsins[i];
 
     try {
-      // Get catalog items
-      // CRITICAL FIX: SP-API searchCatalogItems requires:
-      // - identifiers: comma-separated STRING (not array)
-      // - identifiersType: 'ASIN' (required with identifiers)
-      // - marketplaceIds: comma-separated STRING (not array)
-      // - includedData: comma-separated STRING (not array)
-      // Valid includedData values: identifiers, images, productTypes, salesRanks, summaries, variations
+      // Use getCatalogItem (singular) - proven working pattern from amazon-data-sync.js
       const catalogResponse = await sp.callAPI({
-        operation: 'searchCatalogItems',
+        operation: 'getCatalogItem',
         endpoint: 'catalogItems',
+        path: { asin },
         query: {
-          identifiers: normalized.identifiers,          // comma-separated string
-          identifiersType: 'ASIN',                      // required when using identifiers
-          marketplaceIds: amazonMarketplaceId,          // single marketplace ID string
-          includedData: 'identifiers,images,salesRanks,productTypes,summaries',  // comma-separated string
+          marketplaceIds: amazonMarketplaceId,
+          includedData: 'identifiers,images,salesRanks,productTypes,summaries',
         },
       });
 
-      if (catalogResponse.items && Array.isArray(catalogResponse.items)) {
-        for (const item of catalogResponse.items) {
-          const itemAsin = item.asin || item.identifiers?.find(id => id.identifierType === 'ASIN')?.identifier;
-          if (itemAsin) {
-            results.set(itemAsin, { catalogItem: item });
-          }
-        }
-        logger.debug({
-          batchStart: i,
-          itemsReturned: catalogResponse.items.length,
-        }, 'SP-API batch success');
-      } else {
-        logger.warn({
-          batchStart: i,
-          responseKeys: Object.keys(catalogResponse || {}),
-        }, 'SP-API returned no items array');
+      if (catalogResponse) {
+        results.set(asin, { catalogItem: catalogResponse });
+        successCount++;
       }
 
     } catch (error) {
-      // Enhanced error logging with context for debugging
-      logger.error({
-        batchStart: i,
-        identifiersCount: normalized.asinArray.length,
-        firstIdentifier: normalized.asinArray[0],
-        error: error.message,
-        errorCode: error.code,
-        statusCode: error.statusCode,
-      }, 'SP-API catalog fetch error');
+      errorCount++;
+      // Only log first few errors to avoid log spam
+      if (errorCount <= 5) {
+        logger.debug({
+          asin,
+          error: error.message,
+          errorCode: error.code,
+        }, 'SP-API getCatalogItem skipped');
+      }
     }
 
-    await sleep(100); // Rate limit delay
+    // Rate limit: small delay between requests
+    await sleep(50);
+
+    // Log progress every 20 ASINs
+    if ((i + 1) % 20 === 0 || i === validAsins.length - 1) {
+      logger.debug({
+        progress: i + 1,
+        total: validAsins.length,
+        successCount,
+        errorCount,
+      }, 'SP-API catalog fetch progress');
+    }
   }
+
+  logger.info({
+    totalAsins: validAsins.length,
+    successCount,
+    errorCount,
+  }, 'SP-API catalog fetch completed');
 
   // For each ASIN, try to get pricing and inventory
   for (const asin of asins) {
