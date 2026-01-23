@@ -336,6 +336,11 @@ export class KeepaRateLimiter extends TokenBucket {
    * Handle a 429 rate limit error from Keepa
    * Sets tokens to 0 and calculates required wait time
    *
+   * IMPORTANT: After a 429, our local token bucket state is WRONG - we thought
+   * we had tokens but Keepa says we don't. The safest approach is to wait for
+   * a FULL refill period (60 seconds) to guarantee tokens are available, rather
+   * than trusting our (incorrect) local state calculations.
+   *
    * @param {Object} options - Options from the error response
    * @param {number} [options.tokensRemaining] - X-Rl-RemainingTokens header value
    * @param {number} [options.retryAfterSeconds] - Retry-After header value in seconds
@@ -352,41 +357,41 @@ export class KeepaRateLimiter extends TokenBucket {
     // Track consecutive 429s for exponential backoff
     this.consecutive429Count++;
 
-    // Set tokens to actual remaining (usually 0 on 429)
-    this.tokens = Math.min(tokensRemaining, this.capacity);
+    // CRITICAL: Force tokens to 0 - our local state is demonstrably wrong
+    // Don't trust tokensRemaining from header either, assume worst case
+    this.tokens = 0;
     this.lastRefillTime = Date.now();
 
-    // Calculate base wait time
+    // Calculate wait time
     let waitMs;
 
     if (retryAfterSeconds !== null && retryAfterSeconds > 0) {
-      // Use Retry-After header if provided
+      // Trust Retry-After header if Keepa provides it
       waitMs = retryAfterSeconds * 1000;
     } else {
-      // Calculate based on tokens needed and refill rate
-      const baseWaitMs = (tokensNeeded / this.refillRate) * 1000;
+      // FULL REFILL STRATEGY: Wait for complete bucket refill (60+ seconds)
+      // This is more conservative but avoids cascading 429s.
+      // Our local state calculation was WRONG (we got a 429), so waiting
+      // for a full refill period guarantees tokens will be available.
+      const fullRefillMs = 65 * 1000; // 65 seconds (slightly more than 60s for safety margin)
 
-      // Apply exponential backoff based on consecutive 429s
-      // 1st: 1x, 2nd: 2x, 3rd: 4x, etc. (capped at 8x = ~4 minutes for 10 tokens)
-      const backoffMultiplier = Math.min(Math.pow(2, this.consecutive429Count - 1), 8);
-      waitMs = baseWaitMs * backoffMultiplier;
+      // For consecutive 429s, add more time: 1st: 65s, 2nd: 95s, 3rd: 125s
+      const additionalWaitMs = Math.min((this.consecutive429Count - 1) * 30000, 60000);
+      waitMs = fullRefillMs + additionalWaitMs;
     }
 
-    // Add 10% jitter to avoid thundering herd
-    const jitter = waitMs * 0.1 * Math.random();
+    // Add small jitter (3%) to avoid thundering herd
+    const jitter = waitMs * 0.03 * Math.random();
     waitMs = Math.ceil(waitMs + jitter);
 
-    // Cap maximum wait at 5 minutes
-    const maxWaitMs = 5 * 60 * 1000;
-    waitMs = Math.min(waitMs, maxWaitMs);
-
-    // Recommend retry if we haven't hit too many consecutive 429s
-    const shouldRetry = this.consecutive429Count <= 5;
+    // Only retry up to 3 times - if we're still getting 429s after 3 attempts
+    // with full refill waits, something else is wrong
+    const shouldRetry = this.consecutive429Count <= 3;
 
     // Save updated state
     this.saveState().catch(() => {});
 
-    console.log(`[KeepaRateLimiter] 429 received. Consecutive: ${this.consecutive429Count}, Wait: ${waitMs}ms, Retry: ${shouldRetry}`);
+    console.log(`[KeepaRateLimiter] 429 received. Consecutive: ${this.consecutive429Count}, Wait: ${Math.round(waitMs / 1000)}s, Retry: ${shouldRetry}`);
 
     return { waitMs, shouldRetry };
   }
