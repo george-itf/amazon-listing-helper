@@ -113,21 +113,21 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
   // D.2 FIX: Virtualized rendering for large lists
   return (
     <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-gray-200">
+      <table className="min-w-full">
         <thead className="table-header-sticky">
           <tr className="table-header">
-            <th className="px-4 py-3">SKU</th>
-            <th className="px-4 py-3">ASIN</th>
-            <th className="px-4 py-3">Title</th>
-            <th className="px-4 py-3 text-right">Qty</th>
-            <th className="px-4 py-3 text-right">Price (inc VAT)</th>
-            <th className="px-4 py-3">Buy Box</th>
-            <th className="px-4 py-3 text-right">Profit</th>
-            <th className="px-4 py-3 text-right">Margin</th>
-            <th className="px-4 py-3 text-right">Units (7d)</th>
-            <th className="px-4 py-3 text-right">Days Cover</th>
-            <th className="px-4 py-3">Risks</th>
-            <th className="px-4 py-3">Actions</th>
+            <th className="px-4 py-3" scope="col">SKU</th>
+            <th className="px-4 py-3" scope="col">ASIN</th>
+            <th className="px-4 py-3" scope="col">Title</th>
+            <th className="px-4 py-3 text-right" scope="col">Qty</th>
+            <th className="px-4 py-3 text-right" scope="col">Price</th>
+            <th className="px-4 py-3" scope="col">Buy Box</th>
+            <th className="px-4 py-3 text-right" scope="col">Profit</th>
+            <th className="px-4 py-3 text-right" scope="col">Margin</th>
+            <th className="px-4 py-3 text-right" scope="col">Units (7d)</th>
+            <th className="px-4 py-3 text-right" scope="col">Days Cover</th>
+            <th className="px-4 py-3" scope="col">Risks</th>
+            <th className="px-4 py-3" scope="col">Actions</th>
           </tr>
         </thead>
       </table>
@@ -144,15 +144,16 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
           }}
         >
           <table className="min-w-full">
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody>
               {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                 const listing = listings[virtualRow.index];
+                const isEven = virtualRow.index % 2 === 0;
                 return (
                   <tr
                     key={listing.id}
                     data-index={virtualRow.index}
                     ref={rowVirtualizer.measureElement}
-                    className="hover:bg-gray-50"
+                    className={`hover:bg-blue-50 cursor-pointer ${isEven ? 'bg-white' : 'bg-gray-50'}`}
                     style={{
                       position: 'absolute',
                       top: 0,
@@ -173,7 +174,7 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
           </table>
         </div>
       </div>
-      <div className="text-xs text-gray-500 p-2 text-right">
+      <div className="text-xs text-gray-500 p-2 text-right border-t border-gray-200">
         Showing {listings.length} listings (virtualized)
       </div>
     </div>
