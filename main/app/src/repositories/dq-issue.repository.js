@@ -98,9 +98,13 @@ export async function create(data) {
  * Bulk create DQ issues
  *
  * @param {Array<Object>} issues - Array of issue data
+ * @param {Object} [options] - Options
+ * @param {pg.PoolClient} [options.client] - Optional transaction client for atomic operations
  * @returns {Promise<{inserted: number}>}
  */
-export async function bulkCreate(issues) {
+export async function bulkCreate(issues, options = {}) {
+  const { client = null } = options;
+
   if (!issues || issues.length === 0) {
     return { inserted: 0 };
   }
@@ -150,7 +154,7 @@ export async function bulkCreate(issues) {
     `, [
       asins, marketplaceIds, asinEntityIds, ingestionJobIds, snapshotIds,
       issueTypes, fieldNames, severities, messages, details,
-    ]);
+    ], client);
 
     return { inserted: result.rows.length };
   } catch (error) {
@@ -383,9 +387,12 @@ export async function ignore(issueId, resolutionNotes = null) {
  * @param {string} asin - ASIN
  * @param {number} marketplaceId - Marketplace ID
  * @param {string[]} [issueTypes] - Types of issues to resolve (optional, all if not specified)
+ * @param {Object} [options] - Options
+ * @param {pg.PoolClient} [options.client] - Optional transaction client for atomic operations
  * @returns {Promise<number>} Number of resolved issues
  */
-export async function autoResolve(asin, marketplaceId, issueTypes = null) {
+export async function autoResolve(asin, marketplaceId, issueTypes = null, options = {}) {
+  const { client = null } = options;
   try {
     let sql = `
       UPDATE dq_issues
@@ -405,7 +412,7 @@ export async function autoResolve(asin, marketplaceId, issueTypes = null) {
 
     sql += ' RETURNING id';
 
-    const result = await query(sql, params);
+    const result = await query(sql, params, client);
     return result.rowCount;
   } catch (error) {
     if (error.message?.includes('does not exist')) {

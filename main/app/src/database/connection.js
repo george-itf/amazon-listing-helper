@@ -70,14 +70,19 @@ pool.on('error', (err) => {
 
 /**
  * Execute a query with parameters
+ *
  * @param {string} text - SQL query
  * @param {Array} params - Query parameters
+ * @param {pg.PoolClient} [client] - Optional transaction client. If provided, uses client.query
+ *                                   instead of pool.query, enabling transactional execution.
  * @returns {Promise<pg.QueryResult>}
  */
-export async function query(text, params = []) {
+export async function query(text, params = [], client = null) {
   const start = Date.now();
+  const executor = client || pool;
+
   try {
-    const result = await pool.query(text, params);
+    const result = await executor.query(text, params);
     const duration = Date.now() - start;
 
     // O.2 FIX: Use configurable threshold (default 500ms instead of 100ms)

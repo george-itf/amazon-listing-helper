@@ -15,15 +15,19 @@
  */
 
 import { query, transaction } from '../database/connection.js';
+import { toInteger, toNumber, toBoolean, toDate, toNullish } from '../lib/coerce.js';
 
 /**
  * Upsert an ASIN current record
  * Creates or updates the record for the given ASIN
  *
  * @param {Object} data - Current state data (from snapshot)
+ * @param {Object} [options] - Options
+ * @param {pg.PoolClient} [options.client] - Optional transaction client for atomic operations
  * @returns {Promise<Object|null>} Upserted row or null if table doesn't exist
  */
-export async function upsert(data) {
+export async function upsert(data, options = {}) {
+  const { client = null } = options;
   try {
     const result = await query(`
       INSERT INTO asin_current (
@@ -92,48 +96,52 @@ export async function upsert(data) {
         last_ingestion_job_id = EXCLUDED.last_ingestion_job_id,
         last_snapshot_time = EXCLUDED.last_snapshot_time,
         updated_at = CURRENT_TIMESTAMP
+      -- FRESHNESS GUARD: Only update if incoming data is newer or equal
+      -- Prevents out-of-order transforms from overwriting fresher data
+      WHERE asin_current.last_snapshot_time IS NULL
+         OR EXCLUDED.last_snapshot_time >= asin_current.last_snapshot_time
       RETURNING *, (xmax = 0) AS is_insert
     `, [
       data.asin,
       data.marketplace_id,
-      data.asin_entity_id || null,
+      toNullish(data.asin_entity_id),
       data.latest_snapshot_id,
-      data.title || null,
-      data.brand || null,
-      data.category_path || null,
-      data.price_inc_vat || null,
-      data.price_ex_vat || null,
-      data.list_price || null,
-      data.buy_box_price || null,
-      data.buy_box_seller_id || null,
-      data.buy_box_is_fba || null,
-      data.seller_count || null,
-      data.total_stock || null,
-      data.fulfillment_channel || null,
-      data.units_7d || null,
-      data.units_30d || null,
-      data.units_90d || null,
-      data.days_of_cover || null,
-      data.keepa_has_data || false,
-      data.keepa_last_update || null,
-      data.keepa_price_p25_90d || null,
-      data.keepa_price_median_90d || null,
-      data.keepa_price_p75_90d || null,
-      data.keepa_lowest_90d || null,
-      data.keepa_highest_90d || null,
-      data.keepa_sales_rank_latest || null,
-      data.keepa_new_offers || null,
-      data.keepa_used_offers || null,
-      data.gross_margin_pct || null,
-      data.profit_per_unit || null,
-      data.breakeven_price || null,
-      data.is_buy_box_lost || null,
-      data.is_out_of_stock || null,
-      data.price_volatility_score || null,
+      toNullish(data.title),
+      toNullish(data.brand),
+      toNullish(data.category_path),
+      toNumber(data.price_inc_vat),
+      toNumber(data.price_ex_vat),
+      toNumber(data.list_price),
+      toNumber(data.buy_box_price),
+      toNullish(data.buy_box_seller_id),
+      toBoolean(data.buy_box_is_fba),       // CRITICAL: preserves false
+      toInteger(data.seller_count),          // CRITICAL: preserves 0
+      toInteger(data.total_stock),           // CRITICAL: preserves 0
+      toNullish(data.fulfillment_channel),
+      toInteger(data.units_7d),              // CRITICAL: preserves 0
+      toInteger(data.units_30d),             // CRITICAL: preserves 0
+      toInteger(data.units_90d),             // CRITICAL: preserves 0
+      toNumber(data.days_of_cover),
+      toBoolean(data.keepa_has_data) ?? false,
+      toDate(data.keepa_last_update),
+      toInteger(data.keepa_price_p25_90d),
+      toInteger(data.keepa_price_median_90d),
+      toInteger(data.keepa_price_p75_90d),
+      toInteger(data.keepa_lowest_90d),
+      toInteger(data.keepa_highest_90d),
+      toInteger(data.keepa_sales_rank_latest),
+      toInteger(data.keepa_new_offers),      // CRITICAL: preserves 0
+      toInteger(data.keepa_used_offers),     // CRITICAL: preserves 0
+      toNumber(data.gross_margin_pct),
+      toNumber(data.profit_per_unit),
+      toNumber(data.breakeven_price),
+      toBoolean(data.is_buy_box_lost),       // CRITICAL: preserves false
+      toBoolean(data.is_out_of_stock),       // CRITICAL: preserves false
+      toNumber(data.price_volatility_score),
       data.fingerprint_hash,
       data.last_ingestion_job_id,
-      data.last_snapshot_time || new Date(),
-    ]);
+      toDate(data.last_snapshot_time) ?? new Date(),
+    ], client);
 
     return result.rows[0];
   } catch (error) {

@@ -462,8 +462,135 @@ export function getKeepaRateLimiter() {
   return keepaRateLimiterInstance;
 }
 
+/**
+ * SP-API rate limiter
+ * Configured for Amazon SP-API's typical burst/refill limits.
+ *
+ * SP-API has per-endpoint rate limits, but for simplicity we use a conservative
+ * overall limit. The Catalog/Pricing APIs typically allow ~10 requests/second
+ * with burst capacity.
+ *
+ * Configure conservatively: 5 requests/second with burst of 20.
+ */
+export class SpApiRateLimiter extends TokenBucket {
+  constructor(options = {}) {
+    super({
+      name: options.name || 'sp_api',
+      capacity: options.capacity || 20,        // Burst capacity
+      refillRate: options.refillRate || 5,     // 5 tokens per second (conservative)
+      initialTokens: options.initialTokens ?? 10, // Start with some tokens
+      persist: false,                          // SP-API limits reset fast; no need to persist
+    });
+
+    // Track 429 errors
+    this.throttleCount = 0;
+    this.lastThrottleTime = 0;
+    this.totalWaitTimeMs = 0;
+    this.totalRequests = 0;
+  }
+
+  /**
+   * Acquire a token for an SP-API request
+   * Logs when waiting for tokens (observability)
+   *
+   * @param {string} [operation] - Operation name for logging
+   * @param {number} [maxWaitMs=30000] - Max wait time (default: 30s)
+   * @returns {Promise<boolean>}
+   */
+  async acquireForRequest(operation = 'unknown', maxWaitMs = 30000) {
+    this.totalRequests++;
+
+    const waitTime = this.getWaitTime(1);
+
+    if (waitTime > 0) {
+      console.log(`[SpApiRateLimiter] Waiting ${waitTime}ms for token before ${operation}`);
+      this.totalWaitTimeMs += waitTime;
+    }
+
+    const acquired = await this.acquire(1, maxWaitMs);
+
+    if (!acquired) {
+      console.warn(`[SpApiRateLimiter] Failed to acquire token for ${operation} after ${maxWaitMs}ms`);
+    }
+
+    return acquired;
+  }
+
+  /**
+   * Handle a 429 throttle response from SP-API
+   *
+   * @param {number} [retryAfterMs] - Retry-After value in milliseconds
+   * @returns {{ waitMs: number, shouldRetry: boolean }}
+   */
+  handleThrottle(retryAfterMs = null) {
+    this.throttleCount++;
+    this.lastThrottleTime = Date.now();
+
+    // Drain tokens to 0
+    this.tokens = 0;
+    this.lastRefillTime = Date.now();
+
+    // Calculate wait time
+    let waitMs;
+    if (retryAfterMs && retryAfterMs > 0) {
+      waitMs = retryAfterMs;
+    } else {
+      // Default: wait for half capacity to refill
+      const tokensToWait = this.capacity / 2;
+      waitMs = Math.ceil((tokensToWait / this.refillRate) * 1000);
+    }
+
+    // Add jitter
+    const jitter = waitMs * 0.1 * Math.random();
+    waitMs = Math.ceil(waitMs + jitter);
+
+    console.log(`[SpApiRateLimiter] 429 received. Throttle count: ${this.throttleCount}, Wait: ${waitMs}ms`);
+
+    // Allow up to 5 retries
+    const shouldRetry = this.throttleCount <= 5;
+
+    return { waitMs, shouldRetry };
+  }
+
+  /**
+   * Reset throttle count (call after successful request)
+   */
+  resetThrottleCount() {
+    this.throttleCount = 0;
+  }
+
+  /**
+   * Get rate limiter metrics for observability
+   * @returns {Object}
+   */
+  getMetrics() {
+    return {
+      ...super.getMetrics(),
+      throttleCount: this.throttleCount,
+      lastThrottleTime: this.lastThrottleTime,
+      totalWaitTimeMs: this.totalWaitTimeMs,
+    };
+  }
+}
+
+// Singleton instance for SP-API
+let spApiRateLimiterInstance = null;
+
+/**
+ * Get the singleton SP-API rate limiter instance
+ * @returns {SpApiRateLimiter}
+ */
+export function getSpApiRateLimiter() {
+  if (!spApiRateLimiterInstance) {
+    spApiRateLimiterInstance = new SpApiRateLimiter();
+  }
+  return spApiRateLimiterInstance;
+}
+
 export default {
   TokenBucket,
   KeepaRateLimiter,
   getKeepaRateLimiter,
+  SpApiRateLimiter,
+  getSpApiRateLimiter,
 };
