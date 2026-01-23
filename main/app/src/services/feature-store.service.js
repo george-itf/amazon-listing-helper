@@ -216,10 +216,11 @@ async function doComputeListingFeatures(listingId) {
   let leadTimeDays = 14; // Default fallback
   try {
     const leadTimeResult = await query(`
-      SELECT COALESCE(MAX(c.lead_time_days), 0) as max_lead_time
+      SELECT COALESCE(MAX(s.lead_time_days), 0) as max_lead_time
       FROM boms b
       JOIN bom_lines bl ON bl.bom_id = b.id
       JOIN components c ON c.id = bl.component_id
+      LEFT JOIN suppliers s ON s.id = c.supplier_id
       WHERE b.listing_id = $1
         AND b.is_active = true
         AND b.scope_type = 'LISTING'
