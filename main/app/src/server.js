@@ -21,6 +21,9 @@ import { registerV2Routes } from './routes/v2.routes.js';
 // Job worker
 import { startWorker, stopWorker } from './workers/job-worker.js';
 
+// ASIN ingestion worker (30-minute cadence for Keepa + SP-API data)
+import { startWorker as startAsinIngestion, stopWorker as stopAsinIngestion } from './workers/asin-ingestion-worker.js';
+
 // Startup tasks
 import { runStartupTasks } from './services/startup-tasks.service.js';
 
@@ -378,6 +381,12 @@ const start = async () => {
         logger.warn({ err }, 'Startup tasks warning');
       });
     }
+
+    // Start the ASIN ingestion worker (30-minute cadence for Keepa + SP-API)
+    if (process.env.DISABLE_ASIN_INGESTION !== 'true') {
+      startAsinIngestion();
+      logger.info('ASIN ingestion worker started');
+    }
   } catch (err) {
     logger.fatal({ err }, 'Failed to start server');
     process.exit(1);
@@ -391,6 +400,9 @@ const gracefulShutdown = async (signal) => {
   // CRITICAL: Must await worker shutdown to prevent job loss
   // Pass true to wait for in-progress jobs to complete
   await stopWorker(true);
+
+  // Stop ASIN ingestion worker
+  stopAsinIngestion();
 
   await fastify.close();
   await sentryFlush(); // Flush Sentry events before exit
