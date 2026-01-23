@@ -37,3 +37,7 @@ export {
 
 // Pagination
 export { Pagination, usePagination } from './Pagination';
+
+// Data Table
+export { DataTable } from './DataTable';
+export { ColumnVisibilityToggle } from './ColumnVisibilityToggle';
