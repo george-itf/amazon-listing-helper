@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './layouts/AppLayout';
+import { ToastProvider } from './components/ui';
 import {
   ListingsPage,
   ListingDetailPage,
@@ -12,7 +13,8 @@ import {
 function App() {
   return (
     <BrowserRouter>
-      <AppLayout>
+      <ToastProvider>
+        <AppLayout>
         <Routes>
           {/* Redirect root to listings */}
           <Route path="/" element={<Navigate to="/listings" replace />} />
@@ -33,7 +35,8 @@ function App() {
           {/* 404 */}
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
-      </AppLayout>
+        </AppLayout>
+      </ToastProvider>
     </BrowserRouter>
   );
 }

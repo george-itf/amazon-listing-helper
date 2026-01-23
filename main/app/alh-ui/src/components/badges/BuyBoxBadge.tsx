@@ -5,18 +5,21 @@ interface BuyBoxBadgeProps {
 }
 
 export function BuyBoxBadge({ status }: BuyBoxBadgeProps) {
-  const styles: Record<BuyBoxStatus, string> = {
+  // Show em-dash for Unknown status instead of a badge
+  if (status === 'UNKNOWN') {
+    return <span className="text-gray-400">—</span>;
+  }
+
+  const styles: Record<Exclude<BuyBoxStatus, 'UNKNOWN'>, string> = {
     WON: 'badge-success',
     PARTIAL: 'badge-warning',
     LOST: 'badge-danger',
-    UNKNOWN: 'badge-neutral',
   };
 
-  const labels: Record<BuyBoxStatus, string> = {
+  const labels: Record<Exclude<BuyBoxStatus, 'UNKNOWN'>, string> = {
     WON: 'Won',
     PARTIAL: 'Partial',
     LOST: 'Lost',
-    UNKNOWN: 'Unknown',
   };
 
   return (
