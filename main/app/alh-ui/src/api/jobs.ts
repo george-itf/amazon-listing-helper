@@ -35,6 +35,11 @@ export interface JobStats {
   CANCELLED: number;
 }
 
+interface JobsResponse {
+  jobs: Job[];
+  counts: JobStats;
+}
+
 // Get all jobs with optional filters
 export async function getJobs(params?: {
   types?: string;
@@ -42,12 +47,14 @@ export async function getJobs(params?: {
   limit?: number;
   offset?: number;
 }): Promise<Job[]> {
-  return get<Job[]>('/api/v2/jobs', params);
+  const response = await get<JobsResponse>('/api/v2/jobs', params);
+  return response.jobs;
 }
 
 // Get job statistics by status
 export async function getJobStats(): Promise<JobStats> {
-  return get<JobStats>('/api/v2/jobs/stats');
+  const response = await get<JobsResponse>('/api/v2/jobs', { limit: 1 });
+  return response.counts;
 }
 
 // Get a specific job
