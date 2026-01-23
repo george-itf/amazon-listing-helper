@@ -20,22 +20,22 @@ export function BomsTable({ boms, isLoading }: BomsTableProps) {
   }
 
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
       <table className="min-w-full divide-y divide-gray-200">
-        <thead>
+        <thead className="table-header-sticky">
           <tr className="table-header">
             <th className="px-4 py-3">ID</th>
             <th className="px-4 py-3">Scope</th>
             <th className="px-4 py-3">Version</th>
             <th className="px-4 py-3">Active</th>
-            <th className="px-4 py-3">Lines</th>
+            <th className="px-4 py-3 text-right">Lines</th>
             <th className="px-4 py-3 text-right">Total Cost (ex VAT)</th>
             <th className="px-4 py-3">Created</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
-          {boms.map((bom) => (
-            <tr key={bom.id} className="hover:bg-gray-50">
+          {boms.map((bom, index) => (
+            <tr key={bom.id} className={`hover:bg-gray-100 ${index % 2 === 1 ? 'bg-gray-50/50' : ''}`}>
               <td className="table-cell">{bom.id}</td>
               <td className="table-cell">
                 <span className="badge badge-neutral">{bom.scope_type}</span>
@@ -48,7 +48,7 @@ export function BomsTable({ boms, isLoading }: BomsTableProps) {
                   <span className="badge badge-neutral">Inactive</span>
                 )}
               </td>
-              <td className="table-cell">{bom.lines.length}</td>
+              <td className="table-cell text-right">{bom.lines.length}</td>
               <td className="table-cell text-right">
                 £{(Number(bom.total_cost_ex_vat) || 0).toFixed(2)}
               </td>

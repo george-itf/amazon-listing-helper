@@ -97,9 +97,9 @@ export function ComponentsTable({
   }
 
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
       <table className="min-w-full divide-y divide-gray-200">
-        <thead>
+        <thead className="table-header-sticky">
           <tr className="table-header">
             <th className="px-4 py-3">SKU</th>
             <th className="px-4 py-3">Name</th>
@@ -111,17 +111,17 @@ export function ComponentsTable({
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
-          {components.map((comp) => (
+          {components.map((comp, index) => (
             <tr
               key={comp.id}
-              className={`hover:bg-gray-50 ${
+              className={`hover:bg-gray-100 ${
                 editedComponentsCount > 0 &&
                 isModified(comp.id, 'component_sku') ||
                 isModified(comp.id, 'name') ||
                 isModified(comp.id, 'description') ||
                 isModified(comp.id, 'unit_cost_ex_vat')
                   ? 'bg-yellow-50'
-                  : ''
+                  : index % 2 === 1 ? 'bg-gray-50/50' : ''
               }`}
             >
               <td className="table-cell font-mono text-xs">
@@ -141,7 +141,7 @@ export function ComponentsTable({
               <td className="table-cell">
                 <button
                   onClick={() => onDelete(comp.id)}
-                  className="text-red-600 hover:text-red-800 text-sm"
+                  className="text-red-600 hover:text-red-800 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-1 rounded px-1"
                   title="Delete component"
                 >
                   Delete

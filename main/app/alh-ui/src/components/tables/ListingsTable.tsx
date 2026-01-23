@@ -11,17 +11,23 @@ interface ListingsTableProps {
 }
 
 function formatCurrency(value: number | null | undefined): string {
-  if (value == null) return '-';
+  if (value == null) return '—';
   return `£${value.toFixed(2)}`;
 }
 
+function formatCurrencyWithSign(value: number | null | undefined): string {
+  if (value == null) return '—';
+  const sign = value >= 0 ? '+' : '';
+  return `${sign}£${value.toFixed(2)}`;
+}
+
 function formatPercent(value: number | null | undefined): string {
-  if (value == null) return '-';
+  if (value == null) return '—';
   return `${(value * 100).toFixed(1)}%`;
 }
 
 function formatNumber(value: number | null | undefined): string {
-  if (value == null) return '-';
+  if (value == null) return '—';
   return value.toLocaleString();
 }
 
@@ -52,9 +58,9 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
   // For small lists, use simple rendering without virtualization
   if (listings.length < VIRTUALIZATION_THRESHOLD) {
     return (
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
         <table className="min-w-full divide-y divide-gray-200">
-          <thead>
+          <thead className="table-header-sticky">
             <tr className="table-header">
               <th className="px-4 py-3">SKU</th>
               <th className="px-4 py-3">ASIN</th>
@@ -89,7 +95,7 @@ export function ListingsTable({ listings, onEditPrice, onEditStock }: ListingsTa
   return (
     <div className="overflow-x-auto">
       <table className="min-w-full divide-y divide-gray-200">
-        <thead>
+        <thead className="table-header-sticky">
           <tr className="table-header">
             <th className="px-4 py-3">SKU</th>
             <th className="px-4 py-3">ASIN</th>
@@ -177,7 +183,7 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
       <td className="table-cell font-mono text-xs">
         <Link
           to={`/listings/${listing.id}`}
-          className="text-blue-600 hover:underline"
+          className="text-blue-600 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 rounded"
         >
           {listing.seller_sku}
         </Link>
@@ -198,8 +204,8 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
         {f ? <BuyBoxBadge status={f.buy_box_status} /> : '-'}
       </td>
       <td className="table-cell text-right">
-        <span className={f && f.profit_ex_vat < 0 ? 'text-red-600' : 'text-green-600'}>
-          {formatCurrency(f?.profit_ex_vat)}
+        <span className={f && f.profit_ex_vat != null && f.profit_ex_vat < 0 ? 'text-red-600' : 'text-green-600'}>
+          {formatCurrencyWithSign(f?.profit_ex_vat)}
         </span>
       </td>
       <td className="table-cell text-right">
@@ -229,7 +235,7 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
           {onEditPrice && (
             <button
               onClick={() => onEditPrice(listing)}
-              className="text-blue-600 hover:text-blue-800 text-sm"
+              className="text-blue-600 hover:text-blue-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 rounded px-1"
             >
               Price
             </button>
@@ -237,14 +243,14 @@ function ListingRowContent({ listing, onEditPrice, onEditStock }: ListingRowProp
           {onEditStock && (
             <button
               onClick={() => onEditStock(listing)}
-              className="text-blue-600 hover:text-blue-800 text-sm"
+              className="text-blue-600 hover:text-blue-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 rounded px-1"
             >
               Stock
             </button>
           )}
           <Link
             to={`/listings/${listing.id}`}
-            className="text-gray-600 hover:text-gray-800 text-sm"
+            className="text-gray-600 hover:text-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-1 rounded px-1"
           >
             View
           </Link>
